@@ -1,4 +1,6 @@
-from __future__ import annotations
+from pathlib import Path
+key="pb_detalhe",
+)
 
 
 info = st.selectbox(
@@ -13,15 +15,11 @@ key="pb_info",
 st.markdown("</div>", unsafe_allow_html=True)
 
 
-# --- Demo data for placeholder visuals (to be replaced later) ---
-# These are lightweight examples just to show layout behavior.
+# ------------------------------------------------------------
+# Dados de demonstração (placeholders)
+# ------------------------------------------------------------
 cat = ["A", "B", "C", "D", "E"]
-bar_df = pd.DataFrame(
-{
-"categoria": cat,
-"valor": [random.randint(10, 60) for _ in cat],
-}
-)
+bar_df = pd.DataFrame({"categoria": cat, "valor": [random.randint(10, 60) for _ in cat]})
 
 
 map_df = pd.DataFrame(
@@ -56,22 +54,17 @@ st.plotly_chart(mfig, use_container_width=True)
 
 with right:
 st.subheader("Gráfico (placeholder)")
-bfig = px.bar(
-bar_df,
-x="categoria",
-y="valor",
-text="valor",
-height=540,
-)
-bfig.update_traces(marker_color=PB_COLORS["laranja"]) # brand color
+bfig = px.bar(bar_df, x="categoria", y="valor", text="valor", height=540)
+bfig.update_traces(marker_color=PB_COLORS["laranja"]) # cor da marca
 bfig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
 st.plotly_chart(bfig, use_container_width=True)
 
 
 # ------------------------------------------------------------
-# Footer badges (optional; easy to swap with sponsor logos later)
+# Footer (opcional)
 # ------------------------------------------------------------
-st.write("\n")
+st.write("
+")
 with st.container():
 col_a, col_b, col_c = st.columns([1, 1, 1])
 col_a.markdown(
@@ -86,3 +79,13 @@ col_c.markdown(
 f"<div style='background:{PB_COLORS['teal']};border-radius:10px;padding:10px;text-align:center;color:white'>Pronto para acoplar dados</div>",
 unsafe_allow_html=True,
 )
+
+
+# Dicas de tema (opcional):
+# Em .streamlit/config.toml
+# [theme]
+# primaryColor = "#6FA097"
+# backgroundColor = "#FFFFFF"
+# secondaryBackgroundColor = "#F7F9F7"
+# textColor = "#1F2937"
+# font = "sans serif"
