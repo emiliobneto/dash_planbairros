@@ -53,10 +53,11 @@ PB_COLORS = {
 # ============================================================
 
 def inject_css() -> None:
-    """Injeta CSS de identidade visual e pequenos ajustes de UI."""
+    """Injeta CSS de identidade visual e aplica **Roboto** como fonte global."""
     st.markdown(
         f"""
         <style>
+            @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
             :root {{
                 --pb-amarelo: {PB_COLORS['amarelo']};
                 --pb-verde:   {PB_COLORS['verde']};
@@ -64,6 +65,10 @@ def inject_css() -> None:
                 --pb-telha:   {PB_COLORS['telha']};
                 --pb-teal:    {PB_COLORS['teal']};
                 --pb-navy:    {PB_COLORS['navy']};
+            }}
+            /* Fonte global */
+            html, body, .stApp {{
+                font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
             .pb-header {{
                 background: var(--pb-navy);
@@ -73,23 +78,27 @@ def inject_css() -> None:
                 display: flex;
                 align-items: center;
                 gap: 16px;
+                font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
             .pb-title {{
                 font-size: 2rem;
                 line-height: 1.2;
                 font-weight: 700;
                 letter-spacing: .5px;
+                font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
             .pb-subtitle {{
                 opacity: .9;
                 margin-top: 2px;
                 font-size: .95rem;
+                font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
             .stTabs [data-baseweb=\"tab-list\"] button[role=\"tab\"] {{
                 background: transparent;
                 border-bottom: 3px solid transparent;
                 color: #2b2b2b;
                 font-weight: 600;
+                font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
             .stTabs [data-baseweb=\"tab-list\"] button[aria-selected=\"true\"] {{
                 border-bottom: 3px solid var(--pb-teal) !important;
@@ -101,6 +110,7 @@ def inject_css() -> None:
                 box-shadow: 0 1px 2px rgba(0,0,0,.04);
                 border-radius: 16px;
                 padding: 16px;
+                font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
             .pb-card h4 {{
                 margin: 0 0 8px 0;
@@ -115,7 +125,7 @@ def inject_css() -> None:
     )
 
 
-def get_logo_path() -> Optional[str]:
+def get_logo_path() -> Optional[str]:() -> Optional[str]:
     """Retorna o primeiro caminho de logo existente, se houver."""
     candidates = [
         "assets/logo_todos.jpg",
@@ -273,6 +283,7 @@ def plot_map(df: pd.DataFrame) -> None:
         mapbox_style="open-street-map",
         margin=dict(l=0, r=0, t=0, b=0),
     )
+        mfig.update_layout(font=dict(family="Roboto, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"))
     st.plotly_chart(mfig, use_container_width=True)
 
 
@@ -285,6 +296,7 @@ def plot_bar(df: pd.DataFrame) -> None:
     bfig = px.bar(df, x="categoria", y="valor", text="valor", height=540)
     bfig.update_traces(marker_color=PB_COLORS["laranja"])  # cor da marca
     bfig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+        bfig.update_layout(font=dict(family="Roboto, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"))
     st.plotly_chart(bfig, use_container_width=True)
 
 
