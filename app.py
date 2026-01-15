@@ -94,7 +94,7 @@ def inject_css() -> None:
                 font-size: 1.1rem;  /* subtítulo um pouco maior */
                 font-weight: 400;
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
-            }}
+            }
             .stTabs [data-baseweb=\"tab-list\"] button[role=\"tab\"] {{
                 background: transparent;
                 border-bottom: 3px solid transparent;
@@ -369,5 +369,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
