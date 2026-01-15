@@ -128,8 +128,7 @@ with st.container():
             unsafe_allow_html=True,
         )
 
-st.write("
-")
+st.write("")
 
 # ------------------------------------------------------------
 # Abas
@@ -141,8 +140,7 @@ for i, aba in enumerate([aba1, aba2, aba3, aba4], start=1):
             f"**Conteúdo da Aba {i}** — este espaço será preenchido posteriormente com textos, imagens ou tabelas."
         )
 
-st.write("
-")
+st.write("")
 
 # ------------------------------------------------------------
 # Layout principal sob as abas
@@ -231,8 +229,7 @@ with right:
 # ------------------------------------------------------------
 # Footer (opcional)
 # ------------------------------------------------------------
-st.write("
-")
+st.write("")
 with st.container():
     col_a, col_b, col_c = st.columns([1, 1, 1])
     col_a.markdown(
@@ -256,3 +253,4 @@ with st.container():
 # secondaryBackgroundColor = "#F7F9F7"
 # textColor = "#1F2937"
 # font = "sans serif"
+
