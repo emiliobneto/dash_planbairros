@@ -70,27 +70,29 @@ def inject_css() -> None:
             html, body, .stApp {{
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
-            .pb-header {{
+            .pb-header {
                 background: var(--pb-navy);
                 color: #fff;
-                border-radius: 16px;
-                padding: 12px 18px;
+                border-radius: 18px;
+                padding: 20px 24px; /* aumentei para deixar a barra mais alta */
+                min-height: 110px;  /* garante altura maior da faixa azul */
                 display: flex;
                 align-items: center;
                 gap: 16px;
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
-            .pb-title {{
-                font-size: 2rem;
-                line-height: 1.2;
+            .pb-title {
+                font-size: 2.4rem;   /* título maior */
+                line-height: 1.15;
                 font-weight: 700;
                 letter-spacing: .5px;
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
-            .pb-subtitle {{
-                opacity: .9;
-                margin-top: 2px;
-                font-size: .95rem;
+            .pb-subtitle {
+                opacity: .95;
+                margin-top: 4px;
+                font-size: 1.1rem;  /* subtítulo um pouco maior */
+                font-weight: 400;
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
             .stTabs [data-baseweb=\"tab-list\"] button[role=\"tab\"] {{
@@ -125,7 +127,7 @@ def inject_css() -> None:
     )
 
 
-def get_logo_path() -> Optional[str]:
+def get_logo_path() -> Optional[str]:() -> Optional[str]:
     """Retorna o primeiro caminho de logo existente, se houver."""
     candidates = [
         "assets/logo_todos.jpg",
@@ -151,7 +153,7 @@ def build_header(logo_path: Optional[str]) -> None:
         col1, col2 = st.columns([1, 7])
         with col1:
             if logo_path:
-                st.image(logo_path, use_column_width=True)
+                st.image(logo_path, width=140)  # logo levemente menor para equilibrar o header
             else:
                 st.write("")  # espaçamento
         with col2:
@@ -283,7 +285,7 @@ def plot_map(df: pd.DataFrame) -> None:
         mapbox_style="open-street-map",
         margin=dict(l=0, r=0, t=0, b=0),
     )
-    mfig.update_layout(font=dict(family="Roboto, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"))
+        mfig.update_layout(font=dict(family="Roboto, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"))
     st.plotly_chart(mfig, use_container_width=True)
 
 
@@ -367,6 +369,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
