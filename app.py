@@ -163,7 +163,7 @@ def build_header(logo_path: Optional[str]) -> None:
                 <div class="pb-header">
                     <div style="display:flex;flex-direction:column">
                         <div class="pb-title">PlanBairros</div>
-                        <div class="pb-subtitle">Plataforma de visualização e planejamento em nível de bairro</div>
+                        <div class="pb-subtitle">Plataforma de visualização e planejamento em escala de bairro</div>
                     </div>
                 </div>
                 """,
@@ -370,6 +370,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
