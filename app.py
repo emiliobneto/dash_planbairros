@@ -70,31 +70,32 @@ def inject_css() -> None:
             html, body, .stApp {{
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
             }}
-            .pb-header {
+            .pb-header {{
                 background: var(--pb-navy);
                 color: #fff;
                 border-radius: 18px;
-                padding: 20px 24px; /* aumentei para deixar a barra mais alta */
-                min-height: 110px;  /* garante altura maior da faixa azul */
+                padding: 20px 24px;
+                min-height: 110px;
                 display: flex;
                 align-items: center;
                 gap: 16px;
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
-            }
-            .pb-title {
-                font-size: 2.4rem;   /* título maior */
+            }}
+            
+            .pb-title {{
+                font-size: 2.4rem;
                 line-height: 1.15;
                 font-weight: 700;
                 letter-spacing: .5px;
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
-            }
-            .pb-subtitle {
+            }}
+            .pb-subtitle {{
                 opacity: .95;
                 margin-top: 4px;
-                font-size: 1.1rem;  /* subtítulo um pouco maior */
+                font-size: 1.1rem;
                 font-weight: 400;
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
-            }
+            }}
             .stTabs [data-baseweb=\"tab-list\"] button[role=\"tab\"] {{
                 background: transparent;
                 border-bottom: 3px solid transparent;
@@ -369,6 +370,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
