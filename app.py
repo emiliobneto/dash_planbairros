@@ -80,7 +80,7 @@ def inject_css() -> None:
                 align-items: center;
                 gap: 16px;
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
-            }}
+            }
             .pb-title {
                 font-size: 2.4rem;   /* título maior */
                 line-height: 1.15;
@@ -369,3 +369,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
