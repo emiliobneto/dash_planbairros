@@ -87,7 +87,7 @@ def inject_css() -> None:
                 font-weight: 700;
                 letter-spacing: .5px;
                 font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
-            }}
+            }
             .pb-subtitle {
                 opacity: .95;
                 margin-top: 4px;
@@ -369,4 +369,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
