@@ -1,4 +1,19 @@
+# -*- coding: utf-8 -*-
+"""
+PlanBairros – Streamlit front-end (corrigido e estabilizado)
 
+• Cabeçalho com logo + nome do projeto
+• 4 abas (placeholders)
+• Abaixo das abas: painel esquerdo com 4 dropdowns
+• Centro/Direita: áreas de visualização (mapa e gráfico placeholders)
+• Paleta de cores aplicada via CSS customizado
+
+Observações de compatibilidade:
+- Corrigidas quebras de string e identação.
+- `st.columns` com fallback para versões sem `gap`.
+- `scatter_mapbox` usa `color_continuous_scale` (mais robusto).
+- Imports, layout e CSS revisados para servir como base de futuras métricas/visuais.
+"""
 from pathlib import Path
 import random
 
@@ -62,13 +77,13 @@ st.markdown(
             margin-top: 2px;
             font-size: .95rem;
         }}
-        .stTabs [data-baseweb="tab-list"] button[role="tab"] {{
+        .stTabs [data-baseweb=\"tab-list\"] button[role=\"tab\"] {{
             background: transparent;
             border-bottom: 3px solid transparent;
             color: #2b2b2b;
             font-weight: 600;
         }}
-        .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {{
+        .stTabs [data-baseweb=\"tab-list\"] button[aria-selected=\"true\"] {{
             border-bottom: 3px solid var(--pb-teal) !important;
             color: var(--pb-navy) !important;
         }}
@@ -118,10 +133,10 @@ with st.container():
     with col2:
         st.markdown(
             """
-            <div class="pb-header">
-                <div style="display:flex;flex-direction:column">
-                    <div class="pb-title">PlanBairros</div>
-                    <div class="pb-subtitle">Plataforma de visualização e planejamento em nível de bairro</div>
+            <div class=\"pb-header\">
+                <div style=\"display:flex;flex-direction:column\">
+                    <div class=\"pb-title\">PlanBairros</div>
+                    <div class=\"pb-subtitle\">Plataforma de visualização e planejamento em nível de bairro</div>
                 </div>
             </div>
             """,
@@ -145,7 +160,11 @@ st.write("")
 # ------------------------------------------------------------
 # Layout principal sob as abas
 # ------------------------------------------------------------
-left, center, right = st.columns([1, 2, 2], gap="large")
+try:
+    left, center, right = st.columns([1, 2, 2], gap="large")
+except TypeError:
+    # fallback para versões antigas do Streamlit que não suportam 'gap'
+    left, center, right = st.columns([1, 2, 2])
 
 with left:
     st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
@@ -211,11 +230,11 @@ with center:
         hover_name="nome",
         zoom=9,
         height=540,
+        color_continuous_scale=[PB_COLORS["amarelo"], PB_COLORS["teal"], PB_COLORS["navy"]],
     )
     mfig.update_layout(
         mapbox_style="open-street-map",
         margin=dict(l=0, r=0, t=0, b=0),
-        coloraxis_colorscale=[[0, PB_COLORS["amarelo"]], [0.5, PB_COLORS["teal"]], [1, PB_COLORS["navy"]]],
     )
     st.plotly_chart(mfig, use_container_width=True)
 
@@ -253,4 +272,3 @@ with st.container():
 # secondaryBackgroundColor = "#F7F9F7"
 # textColor = "#1F2937"
 # font = "sans serif"
-
