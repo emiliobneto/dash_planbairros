@@ -283,7 +283,7 @@ def plot_map(df: pd.DataFrame) -> None:
         mapbox_style="open-street-map",
         margin=dict(l=0, r=0, t=0, b=0),
     )
-        mfig.update_layout(font=dict(family="Roboto, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"))
+    mfig.update_layout(font=dict(family="Roboto, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"))
     st.plotly_chart(mfig, use_container_width=True)
 
 
@@ -367,4 +367,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
