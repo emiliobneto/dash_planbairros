@@ -296,7 +296,7 @@ def plot_bar(df: pd.DataFrame) -> None:
     bfig = px.bar(df, x="categoria", y="valor", text="valor", height=540)
     bfig.update_traces(marker_color=PB_COLORS["laranja"])  # cor da marca
     bfig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
-        bfig.update_layout(font=dict(family="Roboto, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"))
+    bfig.update_layout(font=dict(family="Roboto, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"))
     st.plotly_chart(bfig, use_container_width=True)
 
 
@@ -367,5 +367,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
