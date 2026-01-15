@@ -127,7 +127,7 @@ def inject_css() -> None:
     )
 
 
-def get_logo_path() -> Optional[str]:() -> Optional[str]:
+def get_logo_path() -> Optional[str]:
     """Retorna o primeiro caminho de logo existente, se houver."""
     candidates = [
         "assets/logo_todos.jpg",
@@ -369,6 +369,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
