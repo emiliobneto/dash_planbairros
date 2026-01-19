@@ -1,15 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-PlanBairros – app.py (reescrito com correções de performance e robustez)
-
-Principais ajustes:
-• Removido cálculo pesado de centroide via `unary_union`; agora usa `total_bounds` (O(1)).
-• `st_folium` só é chamado se `folium` **e** `streamlit-folium` estiverem disponíveis.
-• Leituras de Parquet protegidas com `try/except` + mensagens amigáveis.
-• Controles limpos e reordenados: Limites Administrativos → Variáveis → Métricas → Informações.
-• Limites renderizados apenas como contorno; fundo satélite com 50% de opacidade.
-• Variável "Densidade" aparece no mapa (choropleth por setor) e histograma ao lado; "Zoneamento" reservado.
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -384,3 +372,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
