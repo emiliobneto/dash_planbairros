@@ -127,9 +127,23 @@ ADMIN_NAME_MAP = {
     "Subprefeitura": ["Subprefeitura", "Subprefeituras", "subprefeitura"],
 }
 
+
 # ============================================================================
 # Leitura de dados
 # ============================================================================
+def _safe_read_parquet(path: Path) -> Optional[pd.DataFrame]:
+    """Ignora arquivos muito pequenos/corrompidos; tenta ler com pandas."""
+    try:
+        if path.stat().st_size < 1024:  # 1 KB — típico de placeholder/LFS
+            return None
+    except Exception:
+        return None
+    try:
+        return pd.read_parquet(path)
+    except Exception:
+        return None
+
+
 @st.cache_data(show_spinner=False)
 def load_admin_layer(layer_name: str):
     """Lê um Parquet geográfico e retorna GeoDataFrame em WGS84."""
@@ -142,21 +156,20 @@ def load_admin_layer(layer_name: str):
         st.warning(f"Arquivo Parquet não encontrado para '{layer_name}' em {ADM_DIR}.")
         return None
 
+    # tenta ler com geopandas; se falhar reconstrói geometria
     try:
         gdf = gpd.read_parquet(path)
     except Exception:
-        # Fallback: pandas + reconstrução de geometria (WKB/WKT)
-        try:
-            pdf = pd.read_parquet(path)
-        except Exception as exc:
-            st.warning(f"Falha ao ler {path.name}: {exc}")
+        pdf = _safe_read_parquet(path)
+        if pdf is None:
+            st.warning(f"Falha ao ler {path.name}.")
             return None
         geom_col = next((c for c in pdf.columns if c.lower() in ("geometry", "geom", "wkb", "wkt")), None)
         if geom_col is None:
             st.warning(f"{path.name}: coluna de geometria não encontrada.")
             return None
         try:
-            from shapely import wkb, wkt  # import local para reduzir custo de import
+            from shapely import wkb, wkt  # import local
             vals = pdf[geom_col]
             if vals.dropna().astype(str).str.startswith("POLY").any():
                 geo = vals.dropna().apply(wkt.loads)
@@ -167,6 +180,7 @@ def load_admin_layer(layer_name: str):
             st.warning(f"{path.name}: não foi possível reconstruir geometria ({exc}).")
             return None
 
+    # CRS → WGS84
     try:
         gdf = gdf.set_crs(4326) if gdf.crs is None else gdf.to_crs(4326)
     except Exception:
@@ -180,34 +194,36 @@ DENSITY_CANDIDATES = ["Densidade", "Densidade2023", "Desindade", "Desindade2023"
 
 @st.cache_data(show_spinner=False)
 def load_density() -> Optional[pd.DataFrame]:
+    """Procura um Parquet válido que contenha a coluna `densidade_hec`."""
+    search_order: list[Path] = []
+
     # 1) <repo>/densidade.parquet
     direct = DENS_DIR.with_suffix(".parquet")
     if direct.exists():
-        try:
-            return pd.read_parquet(direct)
-        except Exception as exc:
-            st.warning(f"Falha ao ler {direct}: {exc}")
-            return None
+        search_order.append(direct)
 
-    # 2) dentro de /densidade/
-    p = _first_parquet_matching(DENS_DIR, DENSITY_CANDIDATES)
-    if p is not None:
-        try:
-            return pd.read_parquet(p)
-        except Exception as exc:
-            st.warning(f"Falha ao ler {p}: {exc}")
-            return None
+    # 2) candidatos por nome em /densidade e em /limites_administrativos
+    for base in (DENS_DIR, ADM_DIR):
+        if base.exists():
+            by_name = _first_parquet_matching(base, DENSITY_CANDIDATES)
+            if by_name is not None:
+                search_order.append(by_name)
+            # varre todos como último recurso
+            search_order += sorted(base.glob("*.parquet"))
 
-    # 3) também procurar em /limites_administrativos/ (conforme screenshot)
-    p2 = _first_parquet_matching(ADM_DIR, DENSITY_CANDIDATES)
-    if p2 is not None:
-        try:
-            return pd.read_parquet(p2)
-        except Exception as exc:
-            st.warning(f"Falha ao ler {p2}: {exc}")
-            return None
+    # tenta todos, ignorando duplicados, até achar um com densidade_hec
+    seen = set()
+    for p in search_order:
+        if p in seen:
+            continue
+        seen.add(p)
+        df = _safe_read_parquet(p)
+        if df is None:
+            continue
+        if any(c.lower() == "densidade_hec" for c in df.columns):
+            return df
 
-    st.info("Dados de densidade não encontrados (pastas 'densidade' ou 'limites_administrativos').")
+    st.info("Dados de densidade não encontrados com coluna `densidade_hec` (substitua eventuais arquivos corrompidos).")
     return None
 
 
@@ -320,32 +336,46 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
 
 
 def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
-    """Desenha apenas o contorno (boundary) acima do tile, com tooltip conforme layer."""
+    """Desenha apenas o contorno (boundary) acima do tile, com tooltip se a coluna existir."""
     if gdf is None or folium is None:
         return
+
+    cols_lower = {c.lower(): c for c in gdf.columns}
+    label_col: Optional[str] = None
+    lname = layer_name.lower()
+    if "distr" in lname and "ds_nome" in cols_lower:
+        label_col = cols_lower["ds_nome"]
+    elif "subpref" in lname and "sp_nome" in cols_lower:
+        label_col = cols_lower["sp_nome"]
+    elif "setor" in lname:
+        for k in ("cd_geocodi", "cd_setor"):
+            if k in cols_lower:
+                label_col = cols_lower[k]
+                break
+
+    keep_cols = ["geometry"] + ([label_col] if label_col else [])
     try:
-        gf = gdf[["geometry"]].copy()
+        gf = gdf[keep_cols].copy()
         gf["geometry"] = gf.geometry.boundary
         gf["geometry"] = gf.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
     except Exception as exc:
         st.warning(f"Falha ao preparar contorno: {exc}")
         return
 
-    fields, aliases = [], []
-    cols_lower = {c.lower(): c for c in gdf.columns}
-    if "distr" in layer_name.lower() and "ds_nome" in cols_lower:
-        fields, aliases = [cols_lower["ds_nome"]], ["Distrito:"]
-    elif "subpref" in layer_name.lower() and "sp_nome" in cols_lower:
-        fields, aliases = [cols_lower["sp_nome"]], ["Subprefeitura:"]
-    elif "setor" in layer_name.lower():
-        for k in ("cd_geocodi", "cd_setor"):
-            if k in cols_lower:
-                fields, aliases = [cols_lower[k]], ["Setor:"]
-                break
+    fields = [label_col] if label_col else []
+    aliases = []
+    if label_col:
+        lc = label_col.lower()
+        if lc == "ds_nome":
+            aliases = ["Distrito:"]
+        elif lc == "sp_nome":
+            aliases = ["Subprefeitura:"]
+        elif lc in ("cd_geocodi", "cd_setor"):
+            aliases = ["Setor:"]
 
     try:
         folium.GeoJson(
-            data=gf.to_json(),  # string GeoJSON
+            data=gf.to_json(),
             name=f"{layer_name} (contorno)",
             pane="vectors",
             style_function=lambda f: {"fillOpacity": 0, "color": color, "weight": weight},
@@ -360,8 +390,10 @@ def plot_density_variable(m, setores_gdf, dens_df):
     if folium is None or gpd is None or setores_gdf is None or dens_df is None:
         return
 
-    # identifica chave preferencial
-    def _real(df, name): return next((c for c in df.columns if c.lower() == name.lower()), name)
+    def _real(df, name):  # pega o nome real da coluna ignorando case
+        return next((c for c in df.columns if c.lower() == name.lower()), name)
+
+    # chave preferencial
     key = None
     for cand in ("CD_GEOCODI", "CD_SETOR"):
         if cand.lower() in [c.lower() for c in setores_gdf.columns] and cand.lower() in [c.lower() for c in dens_df.columns]:
@@ -397,11 +429,12 @@ def plot_density_variable(m, setores_gdf, dens_df):
     def style_fn(feat):
         v = feat["properties"].get("densidade_hec")
         idx = sum(float(v) >= x for x in q[:-1]) if v is not None else 0
-        return {"fillOpacity": 0.65, "weight": 0.6, "color": "#ffffff", "fillColor": palette[min(idx, len(palette) - 1)]}
+        return {"fillOpacity": 0.65, "weight": 0.6, "color": "#ffffff",
+                "fillColor": palette[min(idx, len(palette) - 1)]}
 
     try:
         folium.GeoJson(
-            data=mg.to_json(),  # string GeoJSON
+            data=mg.to_json(),
             name="Densidade",
             pane="vectors",
             style_function=style_fn,
@@ -437,7 +470,6 @@ def main() -> None:
     inject_css()
     build_header(get_logo_path())
     st.write("")
-    # Abas (placeholders)
     build_tabs()
 
     try:
@@ -461,9 +493,9 @@ def main() -> None:
         st.caption(f"Arquivos em DENS_DIR: {[p.name for p in DENS_DIR.glob('*.parquet')]}")
 
     if gdf_limite is not None:
-        st.caption(f"{limite}: {len(gdf_limite)} feições | colunas: {list(gdf_limite.columns)[:8]}")
+        st.caption(f"{limite}: {len(gdf_limite)} feições | colunas: {list(gdf_limite.columns)[:10]}")
     if dens_df is not None:
-        st.caption(f"Densidade DF: {len(dens_df)} linhas | colunas: {list(dens_df.columns)[:8]}")
+        st.caption(f"Densidade DF: {len(dens_df)} linhas | colunas: {list(dens_df.columns)[:10]}")
 
     # Visualizações
     with center:
@@ -497,4 +529,3 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         st.exception(e)
-
