@@ -42,6 +42,7 @@ PB_COLORS = {
 
 
 def inject_css() -> None:
+    """CSS global da identidade + fontes maiores nos controles."""
     st.markdown(
         f"""
         <style>
@@ -59,6 +60,13 @@ def inject_css() -> None:
             .pb-title {{ font-size: 2.2rem; line-height: 1.15; font-weight: 700; letter-spacing: .5px; }}
             .pb-subtitle {{ opacity: .95; margin-top: 4px; font-size: 1.05rem; }}
             .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:16px; padding:16px; }}
+            /* ===== AUMENTO DE FONTE DOS CONTROLES (≈2x) ===== */
+            .pb-card h4 {{ font-size: 1.6rem !important; margin-bottom: .25rem; }}
+            .pb-card label {{ font-size: 1.4rem !important; font-weight: 700 !important; }}
+            .pb-card div[role="combobox"] {{ font-size: 1.25rem !important; min-height: 48px !important; }}
+            .pb-card [data-baseweb="select"] * {{ font-size: 1.25rem !important; }}
+            .pb-card .stSelectbox svg {{ transform: scale(1.3); }}   /* seta maior */
+            /* ================================================ */
             .stTabs [data-baseweb="tab-list"] button[role="tab"] {{ background:transparent; border-bottom:3px solid transparent; font-weight:600; }}
             .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {{ border-bottom:3px solid var(--pb-teal) !important; color:var(--pb-navy) !important; }}
             .main .block-container {{ padding-top: .6rem; padding-bottom: .6rem; }}
@@ -257,7 +265,7 @@ def build_controls(key_prefix: str = "main_") -> Tuple[str, str, str, str]:
         key=f"{key_prefix}pb_limite",
     )
 
-    # por padrão queremos mapa em tela cheia → começa em Zoneamento
+    # padrão: mapa amplo → começa em Zoneamento
     default_var = st.session_state.get(f"{key_prefix}pb_variavel", "Zoneamento")
     var_index = 0 if default_var == "Densidade" else 1
 
@@ -306,6 +314,33 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
             attr="Esri World Imagery", name="Esri Satellite", overlay=False, control=False, opacity=tiles_opacity
         ).add_to(m)
     return m
+
+
+def inject_leaflet_css(m, font_px: int = 320):
+    """
+    Injeta CSS diretamente no HTML do mapa para forçar o tamanho do tooltip.
+    Usa !important para vencer o estilo padrão do Leaflet.
+    """
+    if folium is None:
+        return
+    css = f"""
+    <style>
+      .leaflet-tooltip {{
+        font-size: {font_px}px !important;
+        font-weight: 900 !important;
+        color: #111 !important;
+        background: #fff !important;
+        border: 1px solid #222 !important;
+        border-radius: 8px !important;
+        padding: 18px 24px !important;
+        white-space: nowrap !important;
+        line-height: 1 !important;
+      }}
+      .leaflet-tooltip-pane {{ z-index: 10000 !important; }}
+    </style>
+    """
+    from folium import Element  # type: ignore
+    m.get_root().html.add_child(Element(css))
 
 
 def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
@@ -362,14 +397,15 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
                 aliases=[""],
                 sticky=True,
                 labels=False,
+                # ainda deixamos um estilo base; o global (inject_leaflet_css) garante o 20×
                 style=(
                     "background-color: white; color: #111;"
-                    "font-size: 640px; font-weight: 1200;"  # 4x maior
+                    "font-size: 64px; font-weight: 800;"
                     "white-space: nowrap;"
                     "border: 1px solid #222; border-radius: 8px;"
-                    "padding: 72px 96px;"
+                    "padding: 10px 14px;"
                 ),
-                max_width=4500,
+                max_width=1200,
             ),
         ).add_to(m)
 
@@ -432,12 +468,12 @@ def plot_density_variable(m, setores_gdf, dens_df):
             labels=True,
             style=(
                 "background-color: white; color: #111;"
-                "font-size: 640px; font-weight: 1200;"  # 4x maior
+                "font-size: 64px; font-weight: 800;"  # base; global vai forçar 320px
                 "white-space: nowrap;"
                 "border: 1px solid #222; border-radius: 8px;"
-                "padding: 72px 96px;"
+                "padding: 10px 14px;"
             ),
-            max_width=4500,
+            max_width=1200,
         ),
     ).add_to(m)
 
@@ -461,11 +497,41 @@ def bar_for_density(dens_df: Optional[pd.DataFrame]):
 # ============================================================================
 # App
 # ============================================================================
+def _safe_rerun() -> None:
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()  # compat
+
+
 def main() -> None:
     inject_css()
-    build_header(get_logo_path())
+    # Header
+    with st.container():
+        col1, col2 = st.columns([1, 7])
+        with col1:
+            lp = get_logo_path()
+            if lp:
+                st.image(lp, width=140)
+        with col2:
+            st.markdown(
+                """
+                <div class="pb-header">
+                    <div style="display:flex;flex-direction:column">
+                        <div class="pb-title">PlanBairros</div>
+                        <div class="pb-subtitle">Plataforma de visualização e planejamento em escala de bairro</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # Abas (placeholders)
+    t1, t2, t3, t4 = st.tabs(["Aba 1", "Aba 2", "Aba 3", "Aba 4"])
+    for i, aba in enumerate([t1, t2, t3, t4], start=1):
+        with aba:
+            st.markdown(f"**Conteúdo da Aba {i}** — espaço para textos/explicações.")
     st.write("")
-    build_tabs()
 
     # estado que decide o layout antes de renderizar os widgets
     pre_show_chart = st.session_state.get("_show_chart", False)
@@ -490,7 +556,7 @@ def main() -> None:
         # Se a escolha mudou o layout, refaz a página com novas colunas
         if show_chart != pre_show_chart:
             st.session_state["_show_chart"] = show_chart
-            st.experimental_rerun()
+            _safe_rerun()
 
         # --- MAPA
         with map_col:
@@ -501,6 +567,8 @@ def main() -> None:
                     center_latlon = ((miny + maxy) / 2, (minx + maxx) / 2)
                 height = 850 if right is None else 700
                 fmap = make_satellite_map(center=center_latlon, zoom=10, tiles_opacity=0.5)
+                # força tooltip 20×
+                inject_leaflet_css(fmap, font_px=320)
                 if fmap is not None:
                     if gdf_limite is not None:
                         add_admin_outline(fmap, gdf_limite, layer_name=limite, color="#000000", weight=1.0)
@@ -520,6 +588,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
