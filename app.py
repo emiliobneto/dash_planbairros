@@ -273,7 +273,7 @@ def make_satellite_map(center=(-23.55,-46.63), zoom=10, tiles_opacity=0.5):
         ).add_to(m)
     return m
 
-def inject_leaflet_css(m, font_px: int = 320, scale: float = 16.0):
+def inject_leaflet_css(m, font_px: int = 320, scale: float = 32.0):
     """
     Garante tooltip gigante: font-size + transform scale com !important.
     """
@@ -447,7 +447,7 @@ def main() -> None:
                 height = 850 if right is None else 700
                 fmap = make_satellite_map(center=center_latlon, zoom=10, tiles_opacity=0.5)
                 # força tooltip 20× (e mais, via scale)
-                inject_leaflet_css(fmap, font_px=320, scale=10.0)
+                inject_leaflet_css(fmap, font_px=320, scale=32.0)
                 if fmap is not None:
                     if gdf_limite is not None:
                         add_admin_outline(fmap, gdf_limite, layer_name=limite, color="#000000", weight=1.0)
@@ -465,4 +465,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
