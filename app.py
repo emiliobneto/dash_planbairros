@@ -286,7 +286,6 @@ def build_controls(key_prefix: str = "main_") -> Tuple[str, str, str, str]:
         key=f"{key_prefix}pb_limite",
     )
 
-    # padrão: mapa amplo → começa em Zoneamento
     default_var = st.session_state.get(f"{key_prefix}pb_variavel", "Zoneamento")
     var_index = 0 if default_var == "Densidade" else 1
 
@@ -339,15 +338,13 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
 
 def inject_leaflet_css(m, font_px: int = 900):
     """
-    Força o tooltip do Leaflet a um tamanho gigante.
-    Usa seletores agressivos e !important para vencer qualquer regra.
+    Força o tooltip do Leaflet a um tamanho gigante com classe personalizada.
     """
     if folium is None:
         return
-
     css = f"""
     <style>
-      /* evita transforms que possam encolher o tooltip */
+      /* Evita transforms que possam encolher o tooltip */
       .leaflet-tooltip-pane,
       .leaflet-pane.leaflet-tooltip-pane,
       .leaflet-pane.leaflet-tooltip-pane * {{
@@ -355,25 +352,24 @@ def inject_leaflet_css(m, font_px: int = 900):
         -webkit-transform: none !important;
       }}
 
-      /* tooltip e conteúdo */
-      .leaflet-tooltip,
-      .leaflet-tooltip * {{
-        font-size: {font_px}px !important;   /* TAMANHO GIGANTE */
+      /* SOMENTE tooltips com a nossa classe */
+      .leaflet-tooltip.pb-big-tooltip,
+      .leaflet-tooltip.pb-big-tooltip * {{
+        font-size: {font_px}px !important;
         font-weight: 900 !important;
         color: #111 !important;
         line-height: 1 !important;
       }}
 
-      /* caixa do tooltip */
-      .leaflet-tooltip {{
+      .leaflet-tooltip.pb-big-tooltip {{
         background: #fff !important;
-        border: 2px solid #222 !important;
-        border-radius: 10px !important;
-        padding: 22px 30px !important;
+        border: 3px solid #222 !important;
+        border-radius: 12px !important;
+        padding: 26px 34px !important;
         white-space: nowrap !important;
         pointer-events: none !important;
-        box-shadow: 0 2px 6px rgba(0,0,0,.2) !important;
-        z-index: 100000 !important;
+        box-shadow: 0 2px 6px rgba(0,0,0,.25) !important;
+        z-index: 200000 !important;
       }}
     </style>
     """
@@ -435,7 +431,8 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
                 aliases=[""],
                 sticky=True,
                 labels=False,
-                # estilo base (o CSS global acima garante o tamanho gigante)
+                class_name="pb-big-tooltip",   # <<< classe personalizada
+                # estilo base (o CSS global garante o tamanho gigante)
                 style=(
                     "background:#fff;color:#111;font-size:64px;font-weight:800;white-space:nowrap;"
                     "border:1px solid #222;border-radius:8px;padding:10px 14px;"
@@ -501,6 +498,7 @@ def plot_density_variable(m, setores_gdf, dens_df):
             aliases=["Setor:", "Densidade (hab/ha):"],
             sticky=True,
             labels=True,
+            class_name="pb-big-tooltip",   # <<< classe personalizada
             style=(
                 "background:#fff;color:#111;font-size:64px;font-weight:800;white-space:nowrap;"
                 "border:1px solid #222;border-radius:8px;padding:10px 14px;"
@@ -591,7 +589,7 @@ def main() -> None:
                     center_latlon = ((miny + maxy) / 2, (minx + maxx) / 2)
                 height = 850 if right is None else 700
                 fmap = make_satellite_map(center=center_latlon, zoom=10, tiles_opacity=0.5)
-                # força tooltip gigante (ajuste o valor se quiser ainda maior/menor)
+                # força tooltip gigante (ajuste o valor se quiser maior/menor)
                 inject_leaflet_css(fmap, font_px=900)
                 if fmap is not None:
                     if gdf_limite is not None:
