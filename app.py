@@ -273,7 +273,7 @@ def make_satellite_map(center=(-23.55,-46.63), zoom=10, tiles_opacity=0.5):
         ).add_to(m)
     return m
 
-def inject_leaflet_css(m, font_px: int = 320, scale: float = 8.0):
+def inject_leaflet_css(m, font_px: int = 320, scale: float = 16.0):
     """
     Garante tooltip gigante: font-size + transform scale com !important.
     """
@@ -465,3 +465,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
