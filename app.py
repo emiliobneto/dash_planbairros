@@ -1,3 +1,17 @@
+# -*- coding: utf-8 -*-
+"""
+PlanBairros – app.py (otimizado para destravar build/render)
+
+Ajustes principais para acabar com o travamento:
+• Sem `unary_union`: centro do mapa via `total_bounds` (O(1)).
+• `st_folium` só roda se **folium** e **streamlit-folium** estiverem instalados.
+• Leituras de Parquet com `try/except` e mensagens, sem quebrar a UI.
+• Choropleth de "Densidade" tem **guardas de desempenho**:
+    - Se o número de polígonos dos setores for grande, usa **marcadores por ponto representativo** (até 2.000 amostras) ao invés de preencher cada polígono.
+    - Caso contrário, aplica **simplificação geométrica** leve antes do `GeoJson`.
+• Limites desenhados apenas como **contorno**; fundo satélite (Google → fallback Esri) com **50%** de opacidade.
+• Controles limpos na ordem: **Limites Administrativos → Variáveis → Métricas → Informações**.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -88,55 +102,96 @@ def get_logo_path() -> Optional[str]:
 # ============================================================
 # Leitura de dados
 # ============================================================
+from unicodedata import normalize as _ud_norm
+
 BASE_DIR = Path("dash_planbairros")
 ADM_DIR = BASE_DIR / "limites_administrativos"
 DENS_DIR = BASE_DIR / "densidade"
+
+
+def _slug(s: str) -> str:
+    s2 = _ud_norm("NFKD", str(s)).encode("ASCII", "ignore").decode("ASCII")
+    return re.sub(r"[^a-z0-9]+", "", s2.strip().lower())
+
+
+def _first_parquet_matching(folder: Path, name_candidates: list[str]) -> Optional[Path]:
+    """Procura por .parquet em `folder` cujo nome (sem extensão) bata com qualquer candidato normalizado.
+    Retorna o primeiro Path encontrado; None caso contrário.
+    """
+    if not folder.exists():
+        return None
+    wanted = {_slug(n) for n in name_candidates}
+    for fp in folder.glob("*.parquet"):
+        if _slug(fp.stem) in wanted:
+            return fp
+    return None
+
+# Mapas administrativos: mapeia rótulos do dropdown para nomes reais de arquivo
+ADMIN_NAME_MAP = {
+    "Distritos": ["Distritos"],
+    "SetoresCensitarios2023": ["SetoresCensitarios2023", "SetoresCensitarios"],
+    "ZonasOD2023": ["ZonasOD2023", "ZonasOD"],
+    "Subprefeitura": ["Subprefeitura", "Subprefeituras", "subprefeitura"],
+}
 
 @st.cache_data(show_spinner=False)
 def load_admin_layer(layer_name: str):
     if gpd is None:
         st.info("Geopandas não disponível — instale `geopandas`, `pyarrow` e `shapely`.")
         return None
-    candidates = [
-        ADM_DIR / f"{layer_name}.parquet",
-        ADM_DIR / layer_name / f"{layer_name}.parquet",
-    ]
-    for path in candidates:
-        if path.exists():
-            try:
-                gdf = gpd.read_parquet(path)
-            except Exception as exc:  # noqa: BLE001
-                st.warning(f"Falha ao ler {path.name}: {exc}")
-                return None
-            try:
-                if gdf.crs is None:
-                    gdf.set_crs(4326, inplace=True)
-                else:
-                    gdf = gdf.to_crs(4326)
-            except Exception:
-                pass
-            return gdf
-    st.warning(f"Arquivo Parquet não encontrado para '{layer_name}' em {ADM_DIR}.")
-    return None
+    # tenta nomes exatos e variações observadas no repositório
+    cand_names = ADMIN_NAME_MAP.get(layer_name, [layer_name])
+    path = _first_parquet_matching(ADM_DIR, cand_names)
+    if path is None:
+        st.warning(f"Arquivo Parquet não encontrado para '{layer_name}' em {ADM_DIR}.")
+        return None
+    try:
+        gdf = gpd.read_parquet(path)
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Falha ao ler {path.name}: {exc}")
+        return None
+    try:
+        if gdf.crs is None:
+            gdf.set_crs(4326, inplace=True)
+        else:
+            gdf = gdf.to_crs(4326)
+    except Exception:
+        pass
+    return gdf
+
+# Variáveis (densidade): nomes observados no repo
+DENSITY_CANDIDATES = [
+    "Densidade", "Densidade2023",  # nomes corretos
+    "Desindade", "Desindade2023",   # variação com typo vista no repo
+]
 
 @st.cache_data(show_spinner=False)
 def load_density() -> Optional[pd.DataFrame]:
-    candidates = [
-        DENS_DIR.with_suffix(".parquet"),
-        DENS_DIR / "densidade.parquet",
-        DENS_DIR,
-    ]
-    for c in candidates:
+    # aceita arquivo direto em `dash_planbairros/densidade.parquet` OU dentro da pasta `densidade/`
+    direct = DENS_DIR.with_suffix(".parquet")
+    if direct.exists():
         try:
-            if c.is_file():
-                return pd.read_parquet(c)
-            if c.is_dir():
-                files = list(c.glob("*.parquet"))
-                if files:
-                    return pd.read_parquet(files[0])
+            return pd.read_parquet(direct)
         except Exception as exc:
-            st.warning(f"Falha ao ler {c}: {exc}")
+            st.warning(f"Falha ao ler {direct}: {exc}")
             return None
+    # procura candidatos por nome
+    p = _first_parquet_matching(DENS_DIR, DENSITY_CANDIDATES)
+    if p is not None:
+        try:
+            return pd.read_parquet(p)
+        except Exception as exc:
+            st.warning(f"Falha ao ler {p}: {exc}")
+            return None
+    # fallback: primeiro parquet encontrado
+    if DENS_DIR.exists():
+        files = list(DENS_DIR.glob("*.parquet"))
+        if files:
+            try:
+                return pd.read_parquet(files[0])
+            except Exception as exc:
+                st.warning(f"Falha ao ler {files[0]}: {exc}")
+                return None
     st.info("Dados de densidade não encontrados em 'dash_planbairros/densidade'.")
     return None
 
