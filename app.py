@@ -369,7 +369,7 @@ def plot_density_variable(m, setores_gdf, dens_df, var_name="densidade"):
             tooltip=folium.features.GeoJsonTooltip(fields=["densidade"], aliases=["Densidade:"]),
         ).add_to(m)
     except Exception as exc:  # noqa: BLE001
-        st.warning(f"Falha ao desenhar densidade: {exc}"):
+        st.warning(f"Falha ao desenhar densidade: {exc}")
     if folium is None or gpd is None or setores_gdf is None or dens_df is None:
         return
 
@@ -540,4 +540,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
