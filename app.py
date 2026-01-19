@@ -1,16 +1,27 @@
+# -*- coding: utf-8 -*-
+"""
+PlanBairros – app.py (reescrito com correções de performance e robustez)
+
+Principais ajustes:
+• Removido cálculo pesado de centroide via `unary_union`; agora usa `total_bounds` (O(1)).
+• `st_folium` só é chamado se `folium` **e** `streamlit-folium` estiverem disponíveis.
+• Leituras de Parquet protegidas com `try/except` + mensagens amigáveis.
+• Controles limpos e reordenados: Limites Administrativos → Variáveis → Métricas → Informações.
+• Limites renderizados apenas como contorno; fundo satélite com 50% de opacidade.
+• Variável "Densidade" aparece no mapa (choropleth por setor) e histograma ao lado; "Zoneamento" reservado.
+"""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Tuple
 import re
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# Opcional: mapas em folium (satélite Google/Esri) + exibição no Streamlit
-try:  # libs opcionais, só usadas para o mapa base satélite e GeoJSON
+# Bibliotecas opcionais para dados espaciais e mapa satélite
+try:
     import geopandas as gpd  # type: ignore
     import folium  # type: ignore
     from streamlit_folium import st_folium  # type: ignore
@@ -42,7 +53,7 @@ PB_COLORS = {
 }
 
 # ============================================================
-# Helpers de estilo e assets
+# Estilo e assets
 # ============================================================
 
 def inject_css() -> None:
@@ -60,7 +71,7 @@ def inject_css() -> None:
             }}
             html, body, .stApp {{ font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important; }}
             .pb-header {{ background: var(--pb-navy); color: #fff; border-radius: 18px; padding: 20px 24px; min-height: 110px; display: flex; align-items: center; gap: 16px; }}
-            .pb-title {{ font-size: 2.4rem; line-height: 1.15; font-weight: 700; letter-spacing: .5px; }}
+            .pb-title {{ font-size: 2.2rem; line-height: 1.15; font-weight: 700; letter-spacing: .5px; }}
             .pb-subtitle {{ opacity: .95; margin-top: 4px; font-size: 1.05rem; }}
             .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:16px; padding:16px; }}
             .stTabs [data-baseweb=\"tab-list\"] button[role=\"tab\"] {{ background:transparent; border-bottom:3px solid transparent; font-weight:600; }}
@@ -94,13 +105,12 @@ DENS_DIR = BASE_DIR / "densidade"
 
 @st.cache_data(show_spinner=False)
 def load_admin_layer(layer_name: str):
-    """Tenta carregar um layer administrativo do diretório de Parquets.
-    Retorna GeoDataFrame (EPSG:4326) ou None.
+    """Lê um layer administrativo (Parquet) e retorna GeoDataFrame WGS84.
+    Mostra mensagens amigáveis em caso de falha e não quebra o app.
     """
     if gpd is None:
-        st.info("Geopandas não disponível — instale `geopandas` e `pyarrow` para ler os Parquet de geometria.")
+        st.info("Geopandas não disponível — instale `geopandas`, `pyarrow` e `shapely`.")
         return None
-    # mapeia nomes amigáveis para possíveis arquivos
     candidates = [
         ADM_DIR / f"{layer_name}.parquet",
         ADM_DIR / layer_name / f"{layer_name}.parquet",
@@ -109,55 +119,57 @@ def load_admin_layer(layer_name: str):
         if path.exists():
             try:
                 gdf = gpd.read_parquet(path)
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"Falha ao ler {path.name}: {exc}")
+                return None
+            try:
                 if gdf.crs is None:
                     gdf.set_crs(4326, inplace=True)
                 else:
                     gdf = gdf.to_crs(4326)
-                return gdf
-            except Exception as exc:  # noqa: BLE001
-                st.warning(f"Falha ao ler {path.name}: {exc}")
-                return None
-    st.warning(f"Arquivo Parquet não encontrado para '{layer_name}'. Esperado em {ADM_DIR}.")
+            except Exception:
+                pass
+            return gdf
+    st.warning(f"Arquivo Parquet não encontrado para '{layer_name}' em {ADM_DIR}.")
     return None
 
 @st.cache_data(show_spinner=False)
 def load_density() -> Optional[pd.DataFrame]:
-    """Carrega dados de densidade/zoneamento (Parquet). Retorna DataFrame.
-    Procura por arquivos chamados 'densidade.parquet' ou pasta 'densidade/'.
-    """
+    """Carrega Parquet de densidade/zoneamento."""
     candidates = [
-        DENS_DIR.with_suffix(".parquet"),  # dash_planbairros/densidade.parquet
-        DENS_DIR / "densidade.parquet",    # dash_planbairros/densidade/densidade.parquet
-        DENS_DIR,                           # diretório com 1 parquet
+        DENS_DIR.with_suffix(".parquet"),
+        DENS_DIR / "densidade.parquet",
+        DENS_DIR,
     ]
     for c in candidates:
-        if c.is_file():
-            return pd.read_parquet(c)
-        if c.is_dir():
-            files = list(c.glob("*.parquet"))
-            if files:
-                return pd.read_parquet(files[0])
+        try:
+            if c.is_file():
+                return pd.read_parquet(c)
+            if c.is_dir():
+                files = list(c.glob("*.parquet"))
+                if files:
+                    return pd.read_parquet(files[0])
+        except Exception as exc:
+            st.warning(f"Falha ao ler {c}: {exc}")
+            return None
     st.info("Dados de densidade não encontrados em 'dash_planbairros/densidade'.")
     return None
 
-# util: tenta inferir chave de junção setor censitário
+# util: tenta inferir chave de junção do setor censitário
 
 def infer_setor_key(gdf_cols, df_cols) -> Optional[str]:
-    patterns = [
-        r"^cd[_-]?setor$", r"^setor[_-]?id$", r"^id[_-]?setor$", r"^setor$", r"^cd_setor_2023$",
-    ]
+    patterns = [r"^cd[_-]?setor$", r"^setor[_-]?id$", r"^id[_-]?setor$", r"^setor$", r"^cd_setor_2023$"]
     g = {c.lower() for c in gdf_cols}
     d = {c.lower() for c in df_cols}
     for pat in patterns:
         for col in g:
             if re.match(pat, col) and col in d:
                 return col
-    # fallback: interseção direta
     common = g.intersection(d)
     return next(iter(common)) if common else None
 
 # ============================================================
-# Componentes de UI
+# UI Components
 # ============================================================
 
 def build_header(logo_path: Optional[str]) -> None:
@@ -181,7 +193,6 @@ def build_header(logo_path: Optional[str]) -> None:
                 unsafe_allow_html=True,
             )
 
-
 def build_tabs() -> None:
     aba1, aba2, aba3, aba4 = st.tabs(["Aba 1", "Aba 2", "Aba 3", "Aba 4"])
     for i, aba in enumerate([aba1, aba2, aba3, aba4], start=1):
@@ -194,16 +205,14 @@ def build_controls() -> Tuple[str, str, str, str]:
     st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
     st.markdown("<h4>Configurações</h4>", unsafe_allow_html=True)
 
-    # 1) Limites Administrativos (primeiro)
     limite = st.selectbox(
         "Limites Administrativos",
         ["Distritos", "SetoresCensitarios2023", "ZonasOD2023", "Subprefeitura"],
         index=0,
-        help="Escolha a desagregação espacial que deseja exibir como contorno.",
+        help="Escolha a desagregação espacial para exibir como contorno.",
         key="pb_limite",
     )
 
-    # 2) Variáveis (do conjunto densidade)
     variavel = st.selectbox(
         "Variáveis",
         ["Densidade", "Zoneamento"],
@@ -212,38 +221,22 @@ def build_controls() -> Tuple[str, str, str, str]:
         key="pb_variavel",
     )
 
-    # 3) Métricas (placeholder limpo)
-    metrica = st.selectbox(
-        "Métricas",
-        ["—"],
-        index=0,
-        help="Reservado para cálculos/índices futuros.",
-        key="pb_metrica",
-    )
-
-    # 4) Informações (placeholder limpo)
-    info = st.selectbox(
-        "Informações",
-        ["—"],
-        index=0,
-        help="Espaço para notas e documentação.",
-        key="pb_info",
-    )
+    metrica = st.selectbox("Métricas", ["—"], index=0, help="Reservado para cálculos futuros.", key="pb_metrica")
+    info = st.selectbox("Informações", ["—"], index=0, help="Notas/documentação.", key="pb_info")
 
     st.markdown("</div>", unsafe_allow_html=True)
     return limite, variavel, metrica, info
 
 # ============================================================
-# Visualizações (mapa e gráfico)
+# Visualizações (Folium)
 # ============================================================
 
-def make_satellite_map(center=( -23.55, -46.63), zoom=10, tiles_opacity=0.5):
-    """Cria um mapa Folium com camada de satélite (Google; fallback Esri)."""
+def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
+    """Mapa Folium com camada satélite (Google; fallback Esri)."""
     if folium is None:
-        st.error("Bibliotecas de mapa (folium/streamlit-folium) não disponíveis no ambiente.")
+        st.error("Bibliotecas de mapa (folium/streamlit-folium) não disponíveis.")
         return None
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True)
-    # Google Satellite (pode exigir conectividade; usa fallback Esri se falhar)
     try:
         folium.TileLayer(
             tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
@@ -272,42 +265,36 @@ def add_admin_outline(m, gdf, color=PB_COLORS["navy"], weight=2):
         folium.GeoJson(
             gdf.to_json(),
             name="Limites",
-            style_function=lambda feat: {
-                "fillOpacity": 0.0,
-                "color": color,
-                "weight": weight,
-            },
+            style_function=lambda feat: {"fillOpacity": 0.0, "color": color, "weight": weight},
         ).add_to(m)
     except Exception as exc:  # noqa: BLE001
         st.warning(f"Não foi possível desenhar os limites: {exc}")
 
 
 def plot_density_variable(m, setores_gdf, dens_df, var_name="densidade"):
-    """Desenha a variável de densidade como choropleth (preenchimento)."""
+    """Choropleth de densidade por Setor Censitário."""
     if folium is None or gpd is None or setores_gdf is None or dens_df is None:
         return
     key = infer_setor_key(setores_gdf.columns, dens_df.columns)
     if key is None:
         st.info("Não foi possível inferir a chave de junção entre setores e densidade.")
         return
-    # normaliza o nome da chave
     gdf = setores_gdf.rename(columns={key: "setor_key"})
     df = dens_df.rename(columns={key: "setor_key"})
+
     if var_name.lower().startswith("dens"):
         if not any(c.lower() == "densidade" for c in df.columns):
-            # tenta localizar campo de densidade por aproximação
             cand = [c for c in df.columns if re.search(r"dens", c, re.I)]
             if cand:
                 df = df.rename(columns={cand[0]: "densidade"})
         df = df[["setor_key", "densidade"]].dropna()
         merged = gdf.merge(df, on="setor_key", how="inner")
-        # Choropleth via GeoJson + estilo por quantis
         try:
             q = merged["densidade"].quantile([0, .2, .4, .6, .8, 1]).tolist()
+            palette = ["#F4DD63", "#B1BF7C", "#6FA097", "#D58243", "#14407D"]
             def style_fn(feat):
                 v = feat["properties"].get("densidade")
                 idx = sum(v >= x for x in q[:-1]) if v is not None else 0
-                palette = ["#F4DD63", "#B1BF7C", "#6FA097", "#D58243", "#14407D"]
                 return {"fillOpacity": 0.65, "weight": 0.6, "color": "#ffffff", "fillColor": palette[min(idx, len(palette)-1)]}
             folium.GeoJson(
                 merged.to_json(),
@@ -320,20 +307,31 @@ def plot_density_variable(m, setores_gdf, dens_df, var_name="densidade"):
 
 
 def bar_for_density(dens_df: Optional[pd.DataFrame]):
-    """Gráfico simples para a variável densidade (distribuição)."""
     if dens_df is None:
         st.info("Sem dados de densidade para o gráfico.")
         return
-    col = next((c for c in dens_df.columns if c.lower() == "densidade" or re.search(r"dens", c, re.I)), None)
+    # tenta localizar a coluna de densidade
+    import re as _re
+    col = next((c for c in dens_df.columns if c.lower() == "densidade" or _re.search(r"dens", c, _re.I)), None)
     if col is None:
         st.info("Coluna de densidade não encontrada no Parquet.")
         return
     st.subheader("Densidade — distribuição")
-    # histograma com Plotly
     fig = px.histogram(dens_df, x=col, nbins=30, height=540)
     fig.update_traces(marker_color=PB_COLORS["laranja"])  # cor da marca
     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
     st.plotly_chart(fig, use_container_width=True)
+
+# ============================================================
+# Utilidades
+# ============================================================
+
+def center_from_gdf_bounds(gdf) -> tuple[float, float]:
+    """Centro (lat, lon) a partir do bounding box – rápido e leve."""
+    minx, miny, maxx, maxy = gdf.total_bounds
+    lat = (miny + maxy) / 2
+    lon = (minx + maxx) / 2
+    return (lat, lon)
 
 # ============================================================
 # App
@@ -356,28 +354,25 @@ def main() -> None:
 
     # Carregamentos
     gdf_limite = load_admin_layer(limite)
-    dens_df = load_density() if variavel == "Densidade" or variavel == "Zoneamento" else None
+    dens_df = load_density() if variavel in ("Densidade", "Zoneamento") else None
 
     # Centro/direita — mapa e gráfico
     with center:
-        if folium is not None:
-            # centroide do limite para centralizar o mapa
+        if folium is not None and st_folium is not None:
             center_latlon = (-23.55, -46.63)
             if gdf_limite is not None and len(gdf_limite) > 0:
-                center_latlon = tuple(reversed(list(gdf_limite.unary_union.centroid.coords)[0])) if gdf_limite.unary_union.geom_type != "Point" else (gdf_limite.geometry.iloc[0].y, gdf_limite.geometry.iloc[0].x)
+                center_latlon = center_from_gdf_bounds(gdf_limite)
             fmap = make_satellite_map(center=center_latlon, zoom=10, tiles_opacity=0.5)
             if fmap is not None:
                 if gdf_limite is not None:
                     add_admin_outline(fmap, gdf_limite)
-                # variável densidade sobreposta
-                if variavel == "Densidade" and gdf_limite is not None and dens_df is not None:
-                    # para a variável, usamos sempre setores censitários como geometria base
+                if variavel == "Densidade" and dens_df is not None:
                     setores = load_admin_layer("SetoresCensitarios2023")
                     if setores is not None:
                         plot_density_variable(fmap, setores, dens_df, var_name="densidade")
                 st_folium(fmap, use_container_width=True, height=600)
         else:
-            st.info("Para o mapa de fundo em satélite, instale `folium` e `streamlit-folium`. Enquanto isso, o mapa não será exibido.")
+            st.info("Para o mapa satélite, instale `folium` e `streamlit-folium`.")
 
     with right:
         if variavel == "Densidade":
