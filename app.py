@@ -1,17 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-PlanBairros – app.py (otimizado para destravar build/render)
-
-Ajustes principais para acabar com o travamento:
-• Sem `unary_union`: centro do mapa via `total_bounds` (O(1)).
-• `st_folium` só roda se **folium** e **streamlit-folium** estiverem instalados.
-• Leituras de Parquet com `try/except` e mensagens, sem quebrar a UI.
-• Choropleth de "Densidade" tem **guardas de desempenho**:
-    - Se o número de polígonos dos setores for grande, usa **marcadores por ponto representativo** (até 2.000 amostras) ao invés de preencher cada polígono.
-    - Caso contrário, aplica **simplificação geométrica** leve antes do `GeoJson`.
-• Limites desenhados apenas como **contorno**; fundo satélite (Google → fallback Esri) com **50%** de opacidade.
-• Controles limpos na ordem: **Limites Administrativos → Variáveis → Métricas → Informações**.
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -330,7 +316,7 @@ def add_admin_outline(m, gdf, color="#000000", weight=1.0):
             },
         ).add_to(m)
     except Exception as exc:  # noqa: BLE001
-        st.warning(f"Não foi possível desenhar os limites: {exc}"):
+        st.warning(f"Não foi possível desenhar os limites: {exc}")
     if gdf is None or folium is None:
         return
     try:
@@ -554,3 +540,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
