@@ -1,21 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-PlanBairros — Front‑end Streamlit (refatorado e organizado)
-
-• Cabeçalho com logo + nome do projeto
-• 4 abas (placeholders) para conteúdos futuros
-• Abaixo das abas: painel esquerdo com filtros/controles
-• Centro/Direita: visualizações (mapa e gráfico de barras, ambos placeholders)
-• Paleta de cores e identidade via CSS injetado
-• Estrutura em funções + cache p/ manter o app estável e legível
-• Fallback para versões antigas do Streamlit (sem argumento gap em st.columns)
-• Opção de upload de CSV para testar os componentes (lat, lon, valor, nome)
-
-Como usar:
-1) Salve como app.py (ou outro nome).
-2) Rode com: streamlit run app.py
-3) Opcional: crie uma pasta ./assets/ com um arquivo de logo (logo_todos.jpg).
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -370,6 +352,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
