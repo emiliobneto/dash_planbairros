@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Tuple
+from unicodedata import normalize as _ud_norm
 import re
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -86,10 +86,8 @@ def get_logo_path() -> Optional[str]:
     return None
 
 # ============================================================
-# Leitura de dados
+# Leitura de dados (robusta a nomes)
 # ============================================================
-from unicodedata import normalize as _ud_norm
-
 BASE_DIR = Path("dash_planbairros")
 ADM_DIR = BASE_DIR / "limites_administrativos"
 DENS_DIR = BASE_DIR / "densidade"
@@ -101,9 +99,6 @@ def _slug(s: str) -> str:
 
 
 def _first_parquet_matching(folder: Path, name_candidates: list[str]) -> Optional[Path]:
-    """Procura por .parquet em `folder` cujo nome (sem extensão) bata com qualquer candidato normalizado.
-    Retorna o primeiro Path encontrado; None caso contrário.
-    """
     if not folder.exists():
         return None
     wanted = {_slug(n) for n in name_candidates}
@@ -112,7 +107,7 @@ def _first_parquet_matching(folder: Path, name_candidates: list[str]) -> Optiona
             return fp
     return None
 
-# Mapas administrativos: mapeia rótulos do dropdown para nomes reais de arquivo
+# nomes reais observados
 ADMIN_NAME_MAP = {
     "Distritos": ["Distritos"],
     "SetoresCensitarios2023": ["SetoresCensitarios2023", "SetoresCensitarios"],
@@ -125,17 +120,36 @@ def load_admin_layer(layer_name: str):
     if gpd is None:
         st.info("Geopandas não disponível — instale `geopandas`, `pyarrow` e `shapely`.")
         return None
-    # tenta nomes exatos e variações observadas no repositório
-    cand_names = ADMIN_NAME_MAP.get(layer_name, [layer_name])
-    path = _first_parquet_matching(ADM_DIR, cand_names)
+    path = _first_parquet_matching(ADM_DIR, ADMIN_NAME_MAP.get(layer_name, [layer_name]))
     if path is None:
         st.warning(f"Arquivo Parquet não encontrado para '{layer_name}' em {ADM_DIR}.")
         return None
+    # leitura direta
     try:
         gdf = gpd.read_parquet(path)
-    except Exception as exc:  # noqa: BLE001
-        st.warning(f"Falha ao ler {path.name}: {exc}")
-        return None
+    except Exception:
+        # fallback: pandas + reconstrução de geometria
+        try:
+            pdf = pd.read_parquet(path)
+        except Exception as exc:
+            st.warning(f"Falha ao ler {path.name}: {exc}")
+            return None
+        geom_col = next((c for c in pdf.columns if c.lower() in ("geometry", "geom", "wkb", "wkt")), None)
+        if geom_col is None:
+            st.warning(f"{path.name}: coluna de geometria não encontrada.")
+            return None
+        try:
+            from shapely import wkb, wkt
+            vals = pdf[geom_col]
+            if vals.dropna().astype(str).str.startswith("POLY").any():
+                geo = vals.dropna().apply(wkt.loads)
+            else:
+                geo = vals.dropna().apply(lambda b: wkb.loads(b, hex=isinstance(b, str)))
+            gdf = gpd.GeoDataFrame(pdf.drop(columns=[geom_col]), geometry=geo)
+        except Exception as exc:
+            st.warning(f"{path.name}: não foi possível reconstruir geometria ({exc}).")
+            return None
+    # CRS → WGS84
     try:
         if gdf.crs is None:
             gdf.set_crs(4326, inplace=True)
@@ -145,15 +159,11 @@ def load_admin_layer(layer_name: str):
         pass
     return gdf
 
-# Variáveis (densidade): nomes observados no repo
-DENSITY_CANDIDATES = [
-    "Densidade", "Densidade2023",  # nomes corretos
-    "Desindade", "Desindade2023",   # variação com typo vista no repo
-]
+# densidade: aceita possíveis nomes/typos
+DENSITY_CANDIDATES = ["Densidade", "Densidade2023", "Desindade", "Desindade2023", "HabitacaoPrecaria"]
 
 @st.cache_data(show_spinner=False)
 def load_density() -> Optional[pd.DataFrame]:
-    # aceita arquivo direto em `dash_planbairros/densidade.parquet` OU dentro da pasta `densidade/`
     direct = DENS_DIR.with_suffix(".parquet")
     if direct.exists():
         try:
@@ -161,7 +171,6 @@ def load_density() -> Optional[pd.DataFrame]:
         except Exception as exc:
             st.warning(f"Falha ao ler {direct}: {exc}")
             return None
-    # procura candidatos por nome
     p = _first_parquet_matching(DENS_DIR, DENSITY_CANDIDATES)
     if p is not None:
         try:
@@ -169,7 +178,6 @@ def load_density() -> Optional[pd.DataFrame]:
         except Exception as exc:
             st.warning(f"Falha ao ler {p}: {exc}")
             return None
-    # fallback: primeiro parquet encontrado
     if DENS_DIR.exists():
         files = list(DENS_DIR.glob("*.parquet"))
         if files:
@@ -184,6 +192,18 @@ def load_density() -> Optional[pd.DataFrame]:
 # ============================================================
 # Utilidades
 # ============================================================
+
+def infer_setor_key(gdf_cols, df_cols) -> Optional[str]:
+    """Coluna de setor com prioridade para CD_GEOCODI / CD_SETOR (case-insensitive)."""
+    targets = ["cd_geocodi", "cd_setor", "cd_setor_2023", "setor", "setor_id"]
+    g = {c.lower(): c for c in gdf_cols}
+    d = {c.lower(): c for c in df_cols}
+    for t in targets:
+        if t in g and t in d:
+            return g[t]
+    inter = set(g.keys()).intersection(d.keys())
+    return g[next(iter(inter))] if inter else None
+
 
 def center_from_gdf_bounds(gdf) -> tuple[float, float]:
     minx, miny, maxx, maxy = gdf.total_bounds
@@ -252,21 +272,18 @@ def build_controls() -> Tuple[str, str, str, str]:
     return limite, variavel, metrica, info
 
 # ============================================================
-# Visualizações (Folium) com guardas de performance
+# Visualizações (Folium)
 # ============================================================
 
-CHORO_MAX_FEATURES = 8000   # acima disso, cai para marcadores de ponto
-POINTS_SAMPLE_MAX  = 2000   # limite de amostras de pontos
-SIMPLIFY_TOL       = 0.0005 # ~55m em latitude
+CHORO_MAX_FEATURES = 8000
+SIMPLIFY_TOL = 0.0005  # ~55m em latitude
 
 
 def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
-    """Mapa Folium com camada satélite (Google; fallback Esri) e pane exclusivo para vetores."""
     if folium is None:
         st.error("Bibliotecas de mapa (folium/streamlit-folium) não disponíveis.")
         return None
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True)
-    # pane para garantir que vetores fiquem acima do tile
     try:
         folium.map.CustomPane("vectors", z_index=650).add_to(m)
     except Exception:
@@ -276,7 +293,7 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
             tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
             attr="Google",
             name="Google Satellite",
-            overlay=False,  # base layer
+            overlay=False,
             control=False,
             opacity=tiles_opacity,
         ).add_to(m)
@@ -292,73 +309,83 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
     return m
 
 
-def add_admin_outline(m, gdf, color="#000000", weight=1.0):
-    """Desenha somente o contorno dos polígonos em um pane acima do tile.
-    - Converte polígonos em *linhas* (boundary) para ficar mais leve e visível.
-    - Simplifica suavemente para reduzir payload.
-    """
+def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
+    """Desenha contorno (boundary) do layer e mostra tooltip com o nome quando existir."""
     if gdf is None or folium is None:
         return
     try:
-        gdf_lines = gdf[["geometry"]].copy()
-        # só as linhas do contorno
-        gdf_lines["geometry"] = gdf_lines.geometry.boundary
-        # simplificação leve
-        gdf_lines["geometry"] = gdf_lines.geometry.simplify(0.0005, preserve_topology=True)
+        gf = gdf.copy()
+        gf["geometry"] = gf.geometry.boundary
+        gf["geometry"] = gf.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+    except Exception as exc:
+        st.warning(f"Falha ao preparar contorno: {exc}")
+        return
+    # tooltip fields por layer
+    fields, aliases = [], []
+    cols_lower = {c.lower(): c for c in gdf.columns}
+    if layer_name.lower().startswith("distr") and "ds_nome" in cols_lower:
+        fields, aliases = [cols_lower["ds_nome"]], ["Distrito:"]
+    elif layer_name.lower().startswith("subpref") and "sp_nome" in cols_lower:
+        fields, aliases = [cols_lower["sp_nome"]], ["Subprefeitura:"]
+    elif "setor" in layer_name.lower():
+        # mostra código do setor
+        key = infer_setor_key(gdf.columns, gdf.columns) or "CD_SETOR"
+        col = next((c for c in gdf.columns if c.lower() == key.lower()), None)
+        if col:
+            fields, aliases = [col], ["Setor:"]
+    try:
         folium.GeoJson(
-            data=gdf_lines.__geo_interface__,
-            name="Limites",
+            data=gf.__geo_interface__,
+            name=f"{layer_name} (contorno)",
             pane="vectors",
-            style_function=lambda feat: {
-                "fillOpacity": 0.0,
-                "color": color,
-                "weight": weight,
-            },
-        ).add_to(m)
-    except Exception as exc:  # noqa: BLE001
-        st.warning(f"Não foi possível desenhar os limites: {exc}")
-    if gdf is None or folium is None:
-        return
-    try:
-        folium.GeoJson(
-            gdf.to_json(),
-            name="Limites",
             style_function=lambda feat: {"fillOpacity": 0.0, "color": color, "weight": weight},
+            tooltip=folium.features.GeoJsonTooltip(fields=fields, aliases=aliases) if fields else None,
         ).add_to(m)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         st.warning(f"Não foi possível desenhar os limites: {exc}")
 
 
-def plot_density_variable(m, setores_gdf, dens_df, var_name="densidade"):
-    """Choropleth de densidade por Setor Censitário.
-    Garante pane dos vetores e estilização acima do tile.
-    """
+def plot_density_variable(m, setores_gdf, dens_df):
+    """Choropleth de `densidade_hec` por Setor Censitário (inteiro)."""
     if folium is None or gpd is None or setores_gdf is None or dens_df is None:
         return
-    key = infer_setor_key(setores_gdf.columns, dens_df.columns)
+    # chave de setor
+    key_pref = None
+    for cand in ("CD_GEOCODI", "CD_SETOR"):
+        if cand.lower() in [c.lower() for c in setores_gdf.columns] and cand.lower() in [c.lower() for c in dens_df.columns]:
+            key_pref = cand
+            break
+    key = key_pref or infer_setor_key(setores_gdf.columns, dens_df.columns)
     if key is None:
-        st.info("Não foi possível inferir a chave de junção entre setores e densidade.")
+        st.info("Não foi possível identificar a coluna de setor (CD_GEOCODI/CD_SETOR).")
         return
-    gdf = setores_gdf.rename(columns={key: "setor_key"})[["setor_key", "geometry"]].copy()
-    df = dens_df.rename(columns={key: "setor_key"}).copy()
-    # detecta coluna de densidade
-    dens_col = next((c for c in df.columns if c.lower() == "densidade" or re.search(r"dens", c, re.I)), None)
-    if dens_col is None:
-        st.info("Coluna de densidade não encontrada no Parquet.")
+    # nomes reais
+    def _real(df, name):
+        return next((c for c in df.columns if c.lower()==name.lower()), name)
+    key_g = _real(setores_gdf, key)
+    key_d = _real(dens_df, key)
+    val_d = _real(dens_df, "densidade_hec")
+    if val_d not in dens_df.columns:
+        st.info("Coluna `densidade_hec` não encontrada no Parquet de densidade.")
         return
-    df = df[["setor_key", dens_col]].rename(columns={dens_col: "densidade"}).dropna()
-    merged = gdf.merge(df, on="setor_key", how="inner")
-    if len(merged) == 0:
-        st.info("Sem setores para desenhar.")
+    gdf = setores_gdf[[key_g, "geometry"]].copy().rename(columns={key_g:"setor_key"})
+    df = dens_df[[key_d, val_d]].copy().rename(columns={key_d:"setor_key", val_d:"densidade_hec"})
+    # inteiros para exibição
+    df["densidade_hec"] = pd.to_numeric(df["densidade_hec"], errors="coerce").round(0).astype("Int64")
+    mg = gdf.merge(df, on="setor_key", how="inner").dropna(subset=["densidade_hec"])
+    if len(mg) == 0:
+        st.info("Nenhum setor para desenhar após o merge.")
         return
-    # simplificação leve
-    mg = merged.copy()
-    mg["geometry"] = mg.geometry.simplify(0.0005, preserve_topology=True)
-    q = mg["densidade"].quantile([0, .2, .4, .6, .8, 1]).tolist()
+    try:
+        mg["geometry"] = mg.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+    except Exception:
+        pass
+    vals = mg["densidade_hec"].astype(float)
+    q = vals.quantile([0, .2, .4, .6, .8, 1]).tolist()
     palette = ["#F4DD63", "#B1BF7C", "#6FA097", "#D58243", "#14407D"]
     def style_fn(feat):
-        v = feat["properties"].get("densidade")
-        idx = sum(v >= x for x in q[:-1]) if v is not None else 0
+        v = feat["properties"].get("densidade_hec")
+        idx = sum(float(v) >= x for x in q[:-1]) if v is not None else 0
         return {"fillOpacity": 0.65, "weight": 0.6, "color": "#ffffff", "fillColor": palette[min(idx, len(palette)-1)]}
     try:
         folium.GeoJson(
@@ -366,100 +393,23 @@ def plot_density_variable(m, setores_gdf, dens_df, var_name="densidade"):
             name="Densidade",
             pane="vectors",
             style_function=style_fn,
-            tooltip=folium.features.GeoJsonTooltip(fields=["densidade"], aliases=["Densidade:"]),
+            tooltip=folium.features.GeoJsonTooltip(fields=["setor_key", "densidade_hec"], aliases=["Setor:", "Densidade (hab/ha):"]),
         ).add_to(m)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         st.warning(f"Falha ao desenhar densidade: {exc}")
-    if folium is None or gpd is None or setores_gdf is None or dens_df is None:
-        return
-
-    key = infer_setor_key(setores_gdf.columns, dens_df.columns)
-    if key is None:
-        st.info("Não foi possível inferir a chave de junção entre setores e densidade.")
-        return
-
-    gdf = setores_gdf.rename(columns={key: "setor_key"})[["setor_key", "geometry"]].copy()
-    df = dens_df.rename(columns={key: "setor_key"}).copy()
-
-    # detecta coluna de densidade
-    dens_col = next((c for c in df.columns if c.lower() == "densidade" or re.search(r"dens", c, re.I)), None)
-    if dens_col is None:
-        st.info("Coluna de densidade não encontrada no Parquet.")
-        return
-
-    df = df[["setor_key", dens_col]].rename(columns={dens_col: "densidade"}).dropna()
-    merged = gdf.merge(df, on="setor_key", how="inner")
-
-    # Escolha do modo de desenho conforme tamanho
-    nfeat = len(merged)
-    if nfeat == 0:
-        st.info("Sem setores para desenhar.")
-        return
-
-    if nfeat <= CHORO_MAX_FEATURES:
-        # Simplificação leve para reduzir payload
-        try:
-            mg = merged.copy()
-            mg["geometry"] = mg.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
-            q = mg["densidade"].quantile([0, .2, .4, .6, .8, 1]).tolist()
-            palette = ["#F4DD63", "#B1BF7C", "#6FA097", "#D58243", "#14407D"]
-            def style_fn(feat):
-                v = feat["properties"].get("densidade")
-                idx = sum(v >= x for x in q[:-1]) if v is not None else 0
-                return {"fillOpacity": 0.65, "weight": 0.6, "color": "#ffffff", "fillColor": palette[min(idx, len(palette)-1)]}
-            folium.GeoJson(
-                mg.to_json(),
-                name="Densidade",
-                style_function=style_fn,
-                tooltip=folium.features.GeoJsonTooltip(fields=["densidade"], aliases=["Densidade:"]),
-            ).add_to(m)
-        except Exception as exc:  # noqa: BLE001
-            st.warning(f"Falha ao desenhar densidade (choropleth): {exc}")
-    else:
-        # Modo pontos: mais leve para muitos polígonos
-        try:
-            rp = merged.copy()
-            # ponto representativo dentro do polígono
-            rp["pt"] = rp.geometry.representative_point()
-            rp["lat"] = rp["pt"].y
-            rp["lon"] = rp["pt"].x
-            rp = rp[["lat", "lon", "densidade"]]
-            # amostra para não sobrecarregar o front
-            if len(rp) > POINTS_SAMPLE_MAX:
-                rp = rp.sample(POINTS_SAMPLE_MAX, random_state=42)
-            # escala simples de raio por quantis
-            q = rp["densidade"].quantile([.2, .4, .6, .8]).tolist()
-            for _, r in rp.iterrows():
-                v = r["densidade"]
-                radius = 3 + 2 * sum(v >= x for x in q)
-                folium.CircleMarker(
-                    location=(r["lat"], r["lon"]),
-                    radius=radius,
-                    color="#ffffff",
-                    weight=0.6,
-                    fill=True,
-                    fill_color=PB_COLORS["laranja"],
-                    fill_opacity=0.7,
-                    tooltip=f"Densidade: {v}",
-                ).add_to(m)
-        except Exception as exc:
-            st.warning(f"Falha ao desenhar densidade (pontos): {exc}")
 
 
 def bar_for_density(dens_df: Optional[pd.DataFrame]):
-    if dens_df is None:
+    if dens_df is None or len(dens_df)==0:
         st.info("Sem dados de densidade para o gráfico.")
         return
-    col = next((c for c in dens_df.columns if c.lower() == "densidade" or re.search(r"dens", c, re.I)), None)
+    col = next((c for c in dens_df.columns if c.lower()=="densidade_hec"), None)
     if col is None:
-        st.info("Coluna de densidade não encontrada no Parquet.")
+        st.info("Coluna `densidade_hec` não encontrada no Parquet.")
         return
-    st.subheader("Densidade — distribuição")
-    # Remove outliers extremos para visual mais estável
-    vals = dens_df[col].astype(float)
-    q1, q99 = np.nanpercentile(vals, 1), np.nanpercentile(vals, 99)
-    vals_clip = np.clip(vals, q1, q99)
-    fig = px.histogram(vals_clip, nbins=30, height=540)
+    vals = pd.to_numeric(dens_df[col], errors="coerce").dropna().round(0).astype(int)
+    st.subheader("Densidade (hab/ha) — distribuição")
+    fig = px.histogram(vals, nbins=30, height=540)
     fig.update_traces(marker_color=PB_COLORS["laranja"])  # cor da marca
     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
     st.plotly_chart(fig, use_container_width=True)
@@ -471,33 +421,29 @@ def bar_for_density(dens_df: Optional[pd.DataFrame]):
 def main() -> None:
     inject_css()
     logo_path = get_logo_path()
-    with st.spinner("Carregando interface..."):
-        # Header e abas
-        with st.container():
-            colh1, colh2 = st.columns([1, 7])
-            with colh1:
-                if logo_path:
-                    st.image(logo_path, width=140)
-                else:
-                    st.write("")
-            with colh2:
-                st.markdown(
-                    """
-                    <div class=\"pb-header\">
-                        <div style=\"display:flex;flex-direction:column\">
-                            <div class=\"pb-title\">PlanBairros</div>
-                            <div class=\"pb-subtitle\">Plataforma de visualização e planejamento em escala de bairro</div>
-                        </div>
+    # Header
+    with st.container():
+        col1, col2 = st.columns([1, 7])
+        with col1:
+            if logo_path:
+                st.image(logo_path, width=140)
+            else:
+                st.write("")
+        with col2:
+            st.markdown(
+                """
+                <div class=\"pb-header\">
+                    <div style=\"display:flex;flex-direction:column\">
+                        <div class=\"pb-title\">PlanBairros</div>
+                        <div class=\"pb-subtitle\">Plataforma de visualização e planejamento em escala de bairro</div>
                     </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-        st.write("")
-        aba1, aba2, aba3, aba4 = st.tabs(["Aba 1", "Aba 2", "Aba 3", "Aba 4"])
-        for i, aba in enumerate([aba1, aba2, aba3, aba4], start=1):
-            with aba:
-                st.markdown(f"**Conteúdo da Aba {i}** — espaço para textos/explicações.")
-        st.write("")
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    st.write("")
+    # Abas
+    build_tabs()
 
     try:
         left, center, right = st.columns([1, 2, 2], gap="large")
@@ -507,12 +453,11 @@ def main() -> None:
     with left:
         limite, variavel, _, _ = build_controls()
 
-    # Carregamentos (com spinner leve)
-    with st.spinner("Lendo camadas..."):
-        gdf_limite = load_admin_layer(limite)
-        dens_df = load_density() if variavel in ("Densidade", "Zoneamento") else None
+    # Dados
+    gdf_limite = load_admin_layer(limite)
+    dens_df = load_density() if variavel == "Densidade" else None
 
-    # Centro/direita — mapa e gráfico
+    # Visualizações
     with center:
         if folium is not None and st_folium is not None:
             center_latlon = (-23.55, -46.63)
@@ -521,11 +466,11 @@ def main() -> None:
             fmap = make_satellite_map(center=center_latlon, zoom=10, tiles_opacity=0.5)
             if fmap is not None:
                 if gdf_limite is not None:
-                    add_admin_outline(fmap, gdf_limite)
+                    add_admin_outline(fmap, gdf_limite, layer_name=limite, color="#000000", weight=1.0)
                 if variavel == "Densidade" and dens_df is not None:
                     setores = load_admin_layer("SetoresCensitarios2023")
                     if setores is not None:
-                        plot_density_variable(fmap, setores, dens_df, var_name="densidade")
+                        plot_density_variable(fmap, setores, dens_df)
                 st_folium(fmap, use_container_width=True, height=600)
         else:
             st.info("Para o mapa satélite, instale `folium` e `streamlit-folium`.")
@@ -540,5 +485,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
