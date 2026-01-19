@@ -364,12 +364,12 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
                 labels=False,
                 style=(
                     "background-color: white; color: #111;"
-                    "font-size: 64px; font-weight: 800;"  # 4x maior
+                    "font-size: 320px; font-weight: 900;"  # 4x maior
                     "white-space: nowrap;"
                     "border: 1px solid #222; border-radius: 8px;"
-                    "padding: 10px 14px;"
+                    "padding: 18px 24px;"
                 ),
-                max_width=1200,
+                max_width=3000,
             ),
         ).add_to(m)
 
@@ -432,12 +432,12 @@ def plot_density_variable(m, setores_gdf, dens_df):
             labels=True,
             style=(
                 "background-color: white; color: #111;"
-                "font-size: 64px; font-weight: 800;"  # 4x maior
+                "font-size: 320px; font-weight: 900;"  # 4x maior
                 "white-space: nowrap;"
                 "border: 1px solid #222; border-radius: 8px;"
                 "padding: 10px 14px;"
             ),
-            max_width=1200,
+            max_width=3000,
         ),
     ).add_to(m)
 
@@ -520,3 +520,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
