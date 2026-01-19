@@ -40,6 +40,7 @@ PB_COLORS = {
     "navy": "#14407D",
 }
 
+
 def inject_css() -> None:
     st.markdown(
         f"""
@@ -60,12 +61,12 @@ def inject_css() -> None:
             .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:16px; padding:16px; }}
             .stTabs [data-baseweb="tab-list"] button[role="tab"] {{ background:transparent; border-bottom:3px solid transparent; font-weight:600; }}
             .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {{ border-bottom:3px solid var(--pb-teal) !important; color:var(--pb-navy) !important; }}
-            /* reduzir margens para dar mais área ao mapa */
-            .main .block-container {{ padding-top: 0.75rem; padding-bottom: 0.75rem; }}
+            .main .block-container {{ padding-top: .6rem; padding-bottom: .6rem; }}
         </style>
         """,
         unsafe_allow_html=True,
     )
+
 
 def get_logo_path() -> Optional[str]:
     for p in [
@@ -86,6 +87,7 @@ def get_logo_path() -> Optional[str]:
 # ============================================================================
 REPO_ROOT = Path(__file__).resolve().parent
 
+
 def _resolve_dir(subdir: str) -> Path:
     for base in (REPO_ROOT, REPO_ROOT / "dash_planbairros"):
         p = base / subdir
@@ -93,12 +95,15 @@ def _resolve_dir(subdir: str) -> Path:
             return p
     return REPO_ROOT / subdir  # fallback
 
+
 ADM_DIR = _resolve_dir("limites_administrativos")
 DENS_DIR = _resolve_dir("densidade")
+
 
 def _slug(s: str) -> str:
     s2 = _ud_norm("NFKD", str(s)).encode("ASCII", "ignore").decode("ASCII")
     return re.sub(r"[^a-z0-9]+", "", s2.strip().lower())
+
 
 def _first_parquet_matching(folder: Path, name_candidates: list[str]) -> Optional[Path]:
     if not folder.exists():
@@ -109,6 +114,7 @@ def _first_parquet_matching(folder: Path, name_candidates: list[str]) -> Optiona
             return fp
     return None
 
+
 ADMIN_NAME_MAP = {
     "Distritos": ["Distritos"],
     "SetoresCensitarios2023": ["SetoresCensitarios2023", "SetoresCensitarios"],
@@ -116,10 +122,12 @@ ADMIN_NAME_MAP = {
     "Subprefeitura": ["Subprefeitura", "Subprefeituras", "subprefeitura"],
 }
 
+
 # ============================================================================
 # Leitura de dados
 # ============================================================================
 def _safe_read_parquet(path: Path) -> Optional[pd.DataFrame]:
+    """Ignora arquivos muito pequenos/corrompidos; tenta ler com pandas."""
     try:
         if path.stat().st_size < 1024:  # 1 KB — LFS/placeholder
             return None
@@ -130,8 +138,10 @@ def _safe_read_parquet(path: Path) -> Optional[pd.DataFrame]:
     except Exception:
         return None
 
+
 @st.cache_data(show_spinner=False)
 def load_admin_layer(layer_name: str):
+    """Lê um Parquet geográfico e retorna GeoDataFrame em WGS84."""
     if gpd is None:
         st.info("Geopandas não disponível — instale `geopandas`, `shapely` e `pyarrow`.")
         return None
@@ -170,11 +180,15 @@ def load_admin_layer(layer_name: str):
         pass
     return gdf
 
+
 DENSITY_CANDIDATES = ["Densidade", "Densidade2023", "Desindade", "Desindade2023", "HabitacaoPrecaria"]
+
 
 @st.cache_data(show_spinner=False)
 def load_density() -> Optional[pd.DataFrame]:
+    """Procura um Parquet válido que contenha a coluna `densidade_hec`."""
     search_order: list[Path] = []
+
     direct = DENS_DIR.with_suffix(".parquet")
     if direct.exists():
         search_order.append(direct)
@@ -199,15 +213,9 @@ def load_density() -> Optional[pd.DataFrame]:
     st.info("Dados de densidade não encontrados com coluna `densidade_hec` (substitua eventuais arquivos corrompidos).")
     return None
 
-# ============================================================================
-# Utilidades
-# ============================================================================
-def center_from_gdf_bounds(gdf) -> tuple[float, float]:
-    minx, miny, maxx, maxy = gdf.total_bounds
-    return ((miny + maxy) / 2, (minx + maxx) / 2)
 
 # ============================================================================
-# UI
+# UI helpers
 # ============================================================================
 def build_header(logo_path: Optional[str]) -> None:
     with st.container():
@@ -215,8 +223,6 @@ def build_header(logo_path: Optional[str]) -> None:
         with col1:
             if logo_path:
                 st.image(logo_path, width=140)
-            else:
-                st.write("")
         with col2:
             st.markdown(
                 """
@@ -230,6 +236,7 @@ def build_header(logo_path: Optional[str]) -> None:
                 unsafe_allow_html=True,
             )
 
+
 def build_tabs() -> None:
     t1, t2, t3, t4 = st.tabs(["Aba 1", "Aba 2", "Aba 3", "Aba 4"])
     for i, aba in enumerate([t1, t2, t3, t4], start=1):
@@ -237,7 +244,8 @@ def build_tabs() -> None:
             st.markdown(f"**Conteúdo da Aba {i}** — espaço para textos/explicações.")
     st.write("")
 
-def build_controls() -> Tuple[str, str, str, str]:
+
+def build_controls(key_prefix: str = "main_") -> Tuple[str, str, str, str]:
     st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
     st.markdown("<h4>Configurações</h4>", unsafe_allow_html=True)
 
@@ -246,25 +254,37 @@ def build_controls() -> Tuple[str, str, str, str]:
         ["Distritos", "SetoresCensitarios2023", "ZonasOD2023", "Subprefeitura"],
         index=0,
         help="Escolha a desagregação espacial para exibir como contorno.",
-        key="pb_limite",
+        key=f"{key_prefix}pb_limite",
     )
+
+    # por padrão queremos mapa em tela cheia → começa em Zoneamento
+    default_var = st.session_state.get(f"{key_prefix}pb_variavel", "Zoneamento")
+    var_index = 0 if default_var == "Densidade" else 1
+
     variavel = st.selectbox(
         "Variáveis",
         ["Densidade", "Zoneamento"],
-        index=0,
+        index=var_index,
         help="Variáveis agregadas por Setor Censitário a partir do mapa de densidade.",
-        key="pb_variavel",
+        key=f"{key_prefix}pb_variavel",
     )
-    metrica = st.selectbox("Métricas", ["—"], index=0, help="Reservado para cálculos futuros.", key="pb_metrica")
-    info = st.selectbox("Informações", ["—"], index=0, help="Notas/documentação.", key="pb_info")
+
+    metrica = st.selectbox(
+        "Métricas", ["—"], index=0, help="Reservado para cálculos futuros.", key=f"{key_prefix}pb_metrica"
+    )
+    info = st.selectbox(
+        "Informações", ["—"], index=0, help="Notas/documentação.", key=f"{key_prefix}pb_info"
+    )
 
     st.markdown("</div>", unsafe_allow_html=True)
     return limite, variavel, metrica, info
+
 
 # ============================================================================
 # Folium (mapa + camadas)
 # ============================================================================
 SIMPLIFY_TOL = 0.0005  # ~55m
+
 
 def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
     if folium is None:
@@ -286,6 +306,7 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
             attr="Esri World Imagery", name="Esri Satellite", overlay=False, control=False, opacity=tiles_opacity
         ).add_to(m)
     return m
+
 
 def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
     """
@@ -330,8 +351,8 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
             name=f"{layer_name} (hover)",
             pane="vectors",
             style_function=lambda f: {
-                "fillOpacity": 0.05,   # leve para hover "grudar"
-                "opacity": 0.0,        # sem stroke
+                "fillOpacity": 0.05,
+                "opacity": 0.0,
                 "weight": 0,
                 "color": "#00000000",
             },
@@ -351,6 +372,7 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
                 max_width=1200,
             ),
         ).add_to(m)
+
 
 def plot_density_variable(m, setores_gdf, dens_df):
     """Choropleth de `densidade_hec` por Setor Censitário (inteiro)."""
@@ -419,6 +441,7 @@ def plot_density_variable(m, setores_gdf, dens_df):
         ),
     ).add_to(m)
 
+
 def bar_for_density(dens_df: Optional[pd.DataFrame]):
     if dens_df is None or dens_df.empty:
         st.info("Sem dados de densidade para o gráfico.")
@@ -434,77 +457,54 @@ def bar_for_density(dens_df: Optional[pd.DataFrame]):
     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
     st.plotly_chart(fig, use_container_width=True)
 
+
 # ============================================================================
 # App
 # ============================================================================
 def main() -> None:
     inject_css()
-    # Header
-    with st.container():
-        col1, col2 = st.columns([1, 7])
-        with col1:
-            lp = get_logo_path()
-            if lp:
-                st.image(lp, width=140)
-        with col2:
-            st.markdown(
-                """
-                <div class="pb-header">
-                    <div style="display:flex;flex-direction:column">
-                        <div class="pb-title">PlanBairros</div>
-                        <div class="pb-subtitle">Plataforma de visualização e planejamento em escala de bairro</div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    # Abas (placeholders)
-    t1, t2, t3, t4 = st.tabs(["Aba 1", "Aba 2", "Aba 3", "Aba 4"])
-    for i, aba in enumerate([t1, t2, t3, t4], start=1):
-        with aba:
-            st.markdown(f"**Conteúdo da Aba {i}** — espaço para textos/explicações.")
+    build_header(get_logo_path())
     st.write("")
+    build_tabs()
 
-    # Filtros à esquerda + mapa ocupando área máxima
-    # Quando há infográfico (Densidade), abrimos uma coluna estreita à direita.
-    # Caso contrário, o mapa pega toda a largura à direita do painel de filtros.
-    limite, variavel, _, _ = None, None, None, None
-    try:
-        # se houver gráfico: [filtros, mapa, gráfico] ; senão: [filtros, mapa]
-        dens_df_preview = load_density()
-        show_chart = False  # será habilitado se usuário escolher "Densidade" e houver dados
-        left_filt = st.columns([1, 5])[0]  # cria temporário para pegar seleções
-        with left_filt:
-            limite, variavel, _, _ = build_controls()
-        show_chart = (variavel == "Densidade") and (dens_df_preview is not None)
+    # estado que decide o layout antes de renderizar os widgets
+    pre_show_chart = st.session_state.get("_show_chart", False)
 
-        if show_chart:
+    layout = st.container()
+    with layout:
+        if pre_show_chart:
             left, map_col, right = st.columns([1, 5, 1], gap="small")
         else:
             left, map_col = st.columns([1, 6], gap="small")
             right = None
 
-        # refaz filtros na coluna final "left"
+        # ---- Controles (uma única vez; chaves 'main_' evitam conflitos)
         with left:
-            limite, variavel, _, _ = build_controls()
+            limite, variavel, _, _ = build_controls("main_")
 
-        # Carregamentos finais
+        # Carregamentos (usam as escolhas atuais)
         gdf_limite = load_admin_layer(limite)
         dens_df = load_density() if variavel == "Densidade" else None
+        show_chart = (variavel == "Densidade") and (dens_df is not None)
+
+        # Se a escolha mudou o layout, refaz a página com novas colunas
+        if show_chart != pre_show_chart:
+            st.session_state["_show_chart"] = show_chart
+            st.experimental_rerun()
 
         # --- MAPA
         with map_col:
             if folium is not None and st_folium is not None:
                 center_latlon = (-23.55, -46.63)
                 if gdf_limite is not None and len(gdf_limite) > 0:
-                    center_latlon = center_from_gdf_bounds(gdf_limite)
-                height = 850 if right is None else 700  # mais alto quando não há gráfico
+                    minx, miny, maxx, maxy = gdf_limite.total_bounds
+                    center_latlon = ((miny + maxy) / 2, (minx + maxx) / 2)
+                height = 850 if right is None else 700
                 fmap = make_satellite_map(center=center_latlon, zoom=10, tiles_opacity=0.5)
                 if fmap is not None:
                     if gdf_limite is not None:
                         add_admin_outline(fmap, gdf_limite, layer_name=limite, color="#000000", weight=1.0)
-                    if (variavel == "Densidade") and (dens_df is not None):
+                    if show_chart:
                         setores = load_admin_layer("SetoresCensitarios2023")
                         if setores is not None:
                             plot_density_variable(fmap, setores, dens_df)
@@ -512,13 +512,11 @@ def main() -> None:
             else:
                 st.info("Para o mapa satélite, instale `folium` e `streamlit-folium`.")
 
-        # --- GRÁFICO (aparece apenas quando necessário)
-        if right is not None and (variavel == "Densidade"):
+        # --- GRÁFICO (apenas quando necessário)
+        if right is not None and show_chart:
             with right:
                 bar_for_density(dens_df)
 
-    except Exception as e:
-        st.exception(e)
 
 if __name__ == "__main__":
     main()
