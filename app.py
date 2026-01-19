@@ -336,10 +336,15 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
 
 
 def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
-    """Desenha apenas o contorno (boundary) acima do tile, com tooltip se a coluna existir."""
+    """
+    Desenha:
+      • 1) camada de LINHA (boundary) para o visual
+      • 2) camada de ÁREA invisível para tooltip legível (hover na área inteira)
+    """
     if gdf is None or folium is None:
         return
 
+    # descobrir coluna de rótulo (nome/código) pelo layer
     cols_lower = {c.lower(): c for c in gdf.columns}
     label_col: Optional[str] = None
     lname = layer_name.lower()
@@ -353,36 +358,55 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.0):
                 label_col = cols_lower[k]
                 break
 
-    keep_cols = ["geometry"] + ([label_col] if label_col else [])
+    # 1) LINHA (boundary)
     try:
-        gf = gdf[keep_cols].copy()
-        gf["geometry"] = gf.geometry.boundary
-        gf["geometry"] = gf.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+        gf_line = gdf[["geometry"]].copy()
+        gf_line["geometry"] = gf_line.geometry.boundary
+        gf_line["geometry"] = gf_line.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+
+        folium.GeoJson(
+            data=gf_line.to_json(),
+            name=f"{layer_name} (contorno)",
+            pane="vectors",
+            style_function=lambda f: {"fillOpacity": 0, "color": color, "weight": weight},
+        ).add_to(m)
     except Exception as exc:
         st.warning(f"Falha ao preparar contorno: {exc}")
         return
 
-    fields = [label_col] if label_col else []
-    aliases = []
+    # 2) ÁREA (preenchimento transparente) — só para tooltip grande e hover confortável
     if label_col:
-        lc = label_col.lower()
-        if lc == "ds_nome":
-            aliases = ["Distrito:"]
-        elif lc == "sp_nome":
-            aliases = ["Subprefeitura:"]
-        elif lc in ("cd_geocodi", "cd_setor"):
-            aliases = ["Setor:"]
+        try:
+            gf_area = gdf[[label_col, "geometry"]].copy()
+            gf_area["geometry"] = gf_area.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
 
-    try:
-        folium.GeoJson(
-            data=gf.to_json(),
-            name=f"{layer_name} (contorno)",
-            pane="vectors",
-            style_function=lambda f: {"fillOpacity": 0, "color": color, "weight": weight},
-            tooltip=folium.features.GeoJsonTooltip(fields=fields, aliases=aliases) if fields else None,
-        ).add_to(m)
-    except Exception as exc:
-        st.warning(f"Não foi possível desenhar os limites: {exc}")
+            folium.GeoJson(
+                data=gf_area.to_json(),
+                name=f"{layer_name} (hover)",
+                pane="vectors",
+                style_function=lambda f: {
+                    "fillOpacity": 0.05,   # levemente visível para o hover "grudar"
+                    "opacity": 0.0,        # sem stroke
+                    "weight": 0,
+                    "color": "#00000000",   # transparente
+                },
+                highlight_function=lambda f: {"weight": 2, "color": PB_COLORS["teal"], "fillOpacity": 0.10},
+                tooltip=folium.features.GeoJsonTooltip(
+                    fields=[label_col],
+                    aliases=[""],          # sem prefixo
+                    sticky=True,
+                    labels=False,
+                    style=(
+                        "background-color: white; color: #111;"
+                        "font-size: 16px; font-weight: 700;"
+                        "border: 1px solid #222; border-radius: 8px;"
+                        "padding: 6px 10px;"
+                    ),
+                    max_width=400,
+                ),
+            ).add_to(m)
+        except Exception as exc:
+            st.warning(f"Falha ao criar tooltip de área: {exc}")
 
 
 def plot_density_variable(m, setores_gdf, dens_df):
@@ -441,6 +465,15 @@ def plot_density_variable(m, setores_gdf, dens_df):
             tooltip=folium.features.GeoJsonTooltip(
                 fields=["setor_key", "densidade_hec"],
                 aliases=["Setor:", "Densidade (hab/ha):"],
+                sticky=True,
+                labels=True,
+                style=(
+                    "background-color: white; color: #111;"
+                    "font-size: 16px; font-weight: 600;"
+                    "border: 1px solid #222; border-radius: 8px;"
+                    "padding: 6px 10px;"
+                ),
+                max_width=420,
             ),
         ).add_to(m)
     except Exception as exc:
@@ -466,6 +499,14 @@ def bar_for_density(dens_df: Optional[pd.DataFrame]):
 # ============================================================================
 # App
 # ============================================================================
+def build_tabs():  # (mantém placeholders das abas)
+    t1, t2, t3, t4 = st.tabs(["Aba 1", "Aba 2", "Aba 3", "Aba 4"])
+    for i, aba in enumerate([t1, t2, t3, t4], start=1):
+        with aba:
+            st.markdown(f"**Conteúdo da Aba {i}** — espaço para textos/explicações.")
+    st.write("")
+
+
 def main() -> None:
     inject_css()
     build_header(get_logo_path())
