@@ -1,17 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-PlanBairros – app.py (otimizado para destravar build/render)
-
-Ajustes principais para acabar com o travamento:
-• Sem `unary_union`: centro do mapa via `total_bounds` (O(1)).
-• `st_folium` só roda se **folium** e **streamlit-folium** estiverem instalados.
-• Leituras de Parquet com `try/except` e mensagens, sem quebrar a UI.
-• Choropleth de "Densidade" tem **guardas de desempenho**:
-    - Se o número de polígonos dos setores for grande, usa **marcadores por ponto representativo** (até 2.000 amostras) ao invés de preencher cada polígono.
-    - Caso contrário, aplica **simplificação geométrica** leve antes do `GeoJson`.
-• Limites desenhados apenas como **contorno**; fundo satélite (Google → fallback Esri) com **50%** de opacidade.
-• Controles limpos na ordem: **Limites Administrativos → Variáveis → Métricas → Informações**.
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -234,16 +220,22 @@ SIMPLIFY_TOL       = 0.0005 # ~55m em latitude
 
 
 def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
+    """Mapa Folium com camada satélite (Google; fallback Esri) e pane exclusivo para vetores."""
     if folium is None:
         st.error("Bibliotecas de mapa (folium/streamlit-folium) não disponíveis.")
         return None
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True)
+    # pane para garantir que vetores fiquem acima do tile
+    try:
+        folium.map.CustomPane("vectors", z_index=650).add_to(m)
+    except Exception:
+        pass
     try:
         folium.TileLayer(
             tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
             attr="Google",
             name="Google Satellite",
-            overlay=True,
+            overlay=False,  # base layer
             control=False,
             opacity=tiles_opacity,
         ).add_to(m)
@@ -252,14 +244,38 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
             tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
             attr="Esri World Imagery",
             name="Esri Satellite",
-            overlay=True,
+            overlay=False,
             control=False,
             opacity=tiles_opacity,
         ).add_to(m)
     return m
 
 
-def add_admin_outline(m, gdf, color=PB_COLORS["navy"], weight=2):
+def add_admin_outline(m, gdf, color="#000000", weight=1.0):
+    """Desenha somente o contorno dos polígonos em um pane acima do tile.
+    - Converte polígonos em *linhas* (boundary) para ficar mais leve e visível.
+    - Simplifica suavemente para reduzir payload.
+    """
+    if gdf is None or folium is None:
+        return
+    try:
+        gdf_lines = gdf[["geometry"]].copy()
+        # só as linhas do contorno
+        gdf_lines["geometry"] = gdf_lines.geometry.boundary
+        # simplificação leve
+        gdf_lines["geometry"] = gdf_lines.geometry.simplify(0.0005, preserve_topology=True)
+        folium.GeoJson(
+            data=gdf_lines.__geo_interface__,
+            name="Limites",
+            pane="vectors",
+            style_function=lambda feat: {
+                "fillOpacity": 0.0,
+                "color": color,
+                "weight": weight,
+            },
+        ).add_to(m)
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Não foi possível desenhar os limites: {exc}"):
     if gdf is None or folium is None:
         return
     try:
@@ -273,6 +289,46 @@ def add_admin_outline(m, gdf, color=PB_COLORS["navy"], weight=2):
 
 
 def plot_density_variable(m, setores_gdf, dens_df, var_name="densidade"):
+    """Choropleth de densidade por Setor Censitário.
+    Garante pane dos vetores e estilização acima do tile.
+    """
+    if folium is None or gpd is None or setores_gdf is None or dens_df is None:
+        return
+    key = infer_setor_key(setores_gdf.columns, dens_df.columns)
+    if key is None:
+        st.info("Não foi possível inferir a chave de junção entre setores e densidade.")
+        return
+    gdf = setores_gdf.rename(columns={key: "setor_key"})[["setor_key", "geometry"]].copy()
+    df = dens_df.rename(columns={key: "setor_key"}).copy()
+    # detecta coluna de densidade
+    dens_col = next((c for c in df.columns if c.lower() == "densidade" or re.search(r"dens", c, re.I)), None)
+    if dens_col is None:
+        st.info("Coluna de densidade não encontrada no Parquet.")
+        return
+    df = df[["setor_key", dens_col]].rename(columns={dens_col: "densidade"}).dropna()
+    merged = gdf.merge(df, on="setor_key", how="inner")
+    if len(merged) == 0:
+        st.info("Sem setores para desenhar.")
+        return
+    # simplificação leve
+    mg = merged.copy()
+    mg["geometry"] = mg.geometry.simplify(0.0005, preserve_topology=True)
+    q = mg["densidade"].quantile([0, .2, .4, .6, .8, 1]).tolist()
+    palette = ["#F4DD63", "#B1BF7C", "#6FA097", "#D58243", "#14407D"]
+    def style_fn(feat):
+        v = feat["properties"].get("densidade")
+        idx = sum(v >= x for x in q[:-1]) if v is not None else 0
+        return {"fillOpacity": 0.65, "weight": 0.6, "color": "#ffffff", "fillColor": palette[min(idx, len(palette)-1)]}
+    try:
+        folium.GeoJson(
+            data=mg.__geo_interface__,
+            name="Densidade",
+            pane="vectors",
+            style_function=style_fn,
+            tooltip=folium.features.GeoJsonTooltip(fields=["densidade"], aliases=["Densidade:"]),
+        ).add_to(m)
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Falha ao desenhar densidade: {exc}"):
     if folium is None or gpd is None or setores_gdf is None or dens_df is None:
         return
 
