@@ -319,7 +319,7 @@ def inject_leaflet_css(m, font_px: int = 900):
     m.get_root().html.add_child(Element(css))
 
 
-def inject_label_scaler(m, min_px=16, max_px=26, min_zoom=9, max_zoom=18):
+def inject_label_scaler(m, min_px=16, max_px=26, min_zoom=16, max_zoom=32):
     """
     Redimensiona '.pb-static-label' conforme zoom do Leaflet.
     - min_px/max_px: tamanho da fonte (px) em min_zoom/max_zoom
@@ -626,3 +626,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
