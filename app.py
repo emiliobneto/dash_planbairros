@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from unicodedata import normalize as _ud_norm
 import re
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
 # Geo libs (opcionais – o app funciona sem, só não mostra o mapa)
@@ -15,7 +14,7 @@ try:
     import geopandas as gpd  # type: ignore
     import folium  # type: ignore
     from streamlit_folium import st_folium  # type: ignore
-except Exception:
+except Exception:  # noqa: BLE001
     gpd = None  # type: ignore
     folium = None  # type: ignore
     st_folium = None  # type: ignore
@@ -40,7 +39,44 @@ PB_COLORS = {
     "navy": "#14407D",
 }
 
+# Gradiente para variáveis CONTÍNUAS (sem azul/verde) → amarelo→laranja→telha
+VAR_GRADIENT = ["#F4DD63", "#D58243", "#C65534"]  # amarelo, laranja, telha
 
+# Paleta CLUSTERS (0..4) + outros
+CLUSTER_COLORS = {
+    0: "#bf7db2",
+    1: "#f7bd6a",
+    2: "#cf651f",
+    3: "#ede4e6",
+    4: "#793393",
+    "outros": "#c8c8c8",
+}
+CLUSTER_LABELS = {
+    0: "1 - Periférico com predominância residencial de alta densidade construtiva",
+    1: "2 - Uso misto de média densidade construtiva",
+    2: "3 - Periférico com predominância residencial de média densidade construtiva",
+    3: "4 - Verticalizado de uso-misto",
+    4: "5 - Predominancia de uso comercial e serviços",
+}
+
+# Paleta ÁREA DE INFLUÊNCIA (nova_class 0..9)
+AIB_COLORS = {
+    0: ("#542788", "Predominância uso misto"),
+    1: ("#f7f7f7", "Zona de transição local"),
+    2: ("#d8daeb", "Periférico residencial de média densidade"),
+    3: ("#b35806", "Transição central verticalizada"),
+    4: ("#b2abd2", "Periférico adensado em transição"),
+    5: ("#8073ac", "Centralidade comercial e de serviços"),
+    6: ("#fdb863", "Predominância residencial média densidade"),
+    7: ("#7f3b08", "Áreas íngremes e de encosta"),
+    8: ("#e08214", "Alta densidade residencial"),
+    9: ("#fee0b6", "Central verticalizado"),
+}
+
+
+# ============================================================================
+# CSS / UI
+# ============================================================================
 def inject_css() -> None:
     st.markdown(
         f"""
@@ -87,6 +123,32 @@ def inject_css() -> None:
     )
 
 
+def inject_leaflet_css(m, tooltip_px: int = 28):
+    """CSS dentro do mapa para tooltips dos GeoJson (hover)."""
+    if folium is None:
+        return
+    css = f"""
+    <style>
+      .leaflet-tooltip.pb-big-tooltip,
+      .leaflet-tooltip.pb-big-tooltip * {{
+        font-size: {tooltip_px}px !important;
+        font-weight: 800 !important;
+        color: #111 !important;
+        line-height: 1.05 !important;
+      }}
+      .leaflet-tooltip.pb-big-tooltip {{
+        background: #fff !important;
+        border: 2px solid #222 !important; border-radius: 8px !important;
+        padding: 10px 14px !important; white-space: nowrap !important;
+        pointer-events: none !important; box-shadow: 0 2px 6px rgba(0,0,0,.25) !important;
+        z-index: 200000 !important;
+      }}
+    </style>
+    """
+    from folium import Element  # type: ignore
+    m.get_root().html.add_child(Element(css))
+
+
 def get_logo_path() -> Optional[str]:
     for p in [
         "assets/logo_todos.jpg",
@@ -102,7 +164,7 @@ def get_logo_path() -> Optional[str]:
 
 
 # ============================================================================
-# Caminhos e loaders
+# Caminhos / leitura de dados
 # ============================================================================
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -116,15 +178,13 @@ def _resolve_dir(subdir: str) -> Path:
 
 
 ADM_DIR = _resolve_dir("limites_administrativos")
-DENS_DIR = _resolve_dir("densidade")
-
 
 def _slug(s: str) -> str:
     s2 = _ud_norm("NFKD", str(s)).encode("ASCII", "ignore").decode("ASCII")
     return re.sub(r"[^a-z0-9]+", "", s2.strip().lower())
 
 
-def _first_parquet_matching(folder: Path, names: list[str]) -> Optional[Path]:
+def _first_parquet_matching(folder: Path, names: List[str]) -> Optional[Path]:
     if not folder.exists():
         return None
     wanted = {_slug(n) for n in names}
@@ -134,18 +194,9 @@ def _first_parquet_matching(folder: Path, names: list[str]) -> Optional[Path]:
     return None
 
 
-ADMIN_NAME_MAP = {
-    "Distritos": ["Distritos"],
-    "SetoresCensitarios2023": ["SetoresCensitarios2023", "SetoresCensitarios"],
-    "ZonasOD2023": ["ZonasOD2023", "ZonasOD"],
-    "Subprefeitura": ["Subprefeitura", "Subprefeituras", "subprefeitura"],
-}
-DENSITY_CANDIDATES = ["Densidade", "Densidade2023", "Desindade", "Desindade2023", "HabitacaoPrecaria"]
-
-
 def _safe_read_parquet(path: Path) -> Optional[pd.DataFrame]:
     try:
-        if path.stat().st_size < 1024:
+        if path.stat().st_size < 1024:  # ignora LFS/placeholder
             return None
     except Exception:
         return None
@@ -156,24 +207,22 @@ def _safe_read_parquet(path: Path) -> Optional[pd.DataFrame]:
 
 
 @st.cache_data(show_spinner=False)
-def load_admin_layer(layer_name: str):
+def load_gdf_from_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
     if gpd is None:
-        st.info("Geopandas não disponível — instale `geopandas`, `shapely` e `pyarrow`.")
-        return None
-    path = _first_parquet_matching(ADM_DIR, ADMIN_NAME_MAP.get(layer_name, [layer_name]))
-    if path is None:
-        st.warning(f"Arquivo Parquet não encontrado para '{layer_name}' em {ADM_DIR}.")
         return None
     try:
         gdf = gpd.read_parquet(path)
+        try:
+            gdf = gdf.set_crs(4326) if gdf.crs is None else gdf.to_crs(4326)
+        except Exception:
+            pass
+        return gdf
     except Exception:
         pdf = _safe_read_parquet(path)
         if pdf is None:
-            st.warning(f"Falha ao ler {path.name}.")
             return None
         geom_col = next((c for c in pdf.columns if c.lower() in ("geometry", "geom", "wkb", "wkt")), None)
         if geom_col is None:
-            st.warning(f"{path.name}: coluna de geometria não encontrada.")
             return None
         try:
             from shapely import wkb, wkt
@@ -182,87 +231,49 @@ def load_admin_layer(layer_name: str):
                 geo = vals.dropna().apply(wkt.loads)
             else:
                 geo = vals.dropna().apply(lambda b: wkb.loads(b, hex=isinstance(b, str)))
-            gdf = gpd.GeoDataFrame(pdf.drop(columns=[geom_col]), geometry=geo)
-        except Exception as exc:
-            st.warning(f"{path.name}: não foi possível reconstruir geometria ({exc}).")
+            gdf = gpd.GeoDataFrame(pdf.drop(columns=[geom_col]), geometry=geo, crs=4326)
+            return gdf
+        except Exception:
             return None
-    try:
-        gdf = gdf.set_crs(4326) if gdf.crs is None else gdf.to_crs(4326)
-    except Exception:
-        pass
-    return gdf
+
+
+# Names fixos conhecidos
+ADMIN_NAME_MAP = {
+    # (1) REMOVIDO SetoresCensitarios dos LIMITES
+    "Distritos": ["Distritos"],
+    "ZonasOD2023": ["ZonasOD2023", "ZonasOD"],
+    "Subprefeitura": ["Subprefeitura", "Subprefeituras", "subprefeitura"],
+}
+SETORES_NAMES = ["SetoresCensitarios2023", "SetoresCensitarios"]
+ISO_NAMES = ["isocronas", "isócronas", "isocronas2023", "isocronas_parquet"]
 
 
 @st.cache_data(show_spinner=False)
-def load_density() -> Optional[pd.DataFrame]:
-    search: list[Path] = []
-    direct = DENS_DIR.with_suffix(".parquet")
-    if direct.exists():
-        search.append(direct)
-    for base in (DENS_DIR, ADM_DIR):
-        if base.exists():
-            by_name = _first_parquet_matching(base, DENSITY_CANDIDATES)
-            if by_name is not None:
-                search.append(by_name)
-            search += sorted(base.glob("*.parquet"))
-    seen = set()
-    for p in search:
-        if p in seen:
-            continue
-        seen.add(p)
-        df = _safe_read_parquet(p)
-        if df is None:
-            continue
-        if any(c.lower() == "densidade_hec" for c in df.columns):
-            return df
-    st.info("Dados de densidade não encontrados com coluna `densidade_hec`.")
-    return None
+def load_admin_layer(layer_name: str) -> Optional["gpd.GeoDataFrame"]:
+    if layer_name not in ADMIN_NAME_MAP:
+        return None
+    path = _first_parquet_matching(ADM_DIR, ADMIN_NAME_MAP[layer_name])
+    return load_gdf_from_parquet(path) if path else None
+
+
+@st.cache_data(show_spinner=False)
+def load_setores() -> Optional["gpd.GeoDataFrame"]:
+    p = _first_parquet_matching(ADM_DIR, SETORES_NAMES)
+    if not p:
+        return None
+    return load_gdf_from_parquet(p)
+
+
+@st.cache_data(show_spinner=False)
+def load_isocronas() -> Optional["gpd.GeoDataFrame"]:
+    p = _first_parquet_matching(ADM_DIR, ISO_NAMES)
+    if not p:
+        return None
+    return load_gdf_from_parquet(p)
 
 
 # ============================================================================
-# UI helpers
-# ============================================================================
-def build_tabs() -> None:
-    a1, a2, a3, a4 = st.tabs(["Aba 1", "Aba 2", "Aba 3", "Aba 4"])
-    for i, aba in enumerate([a1, a2, a3, a4], start=1):
-        with aba:
-            st.markdown(f"**Conteúdo da Aba {i}** — espaço para textos/explicações.")
-    st.write("")
-
-
-def build_controls(key_prefix="main_") -> Tuple[str, str, str, str, bool]:
-    st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
-    st.markdown("<h4>Configurações</h4>", unsafe_allow_html=True)
-
-    limite = st.selectbox(
-        "Limites Administrativos",
-        ["Distritos", "SetoresCensitarios2023", "ZonasOD2023", "Subprefeitura"],
-        index=0,
-        key=f"{key_prefix}pb_limite",
-        help="Escolha a desagregação espacial para exibir como contorno.",
-    )
-    variavel = st.selectbox(
-        "Variáveis",
-        ["Densidade", "Zoneamento"],
-        index=1,
-        key=f"{key_prefix}pb_variavel",
-        help="Variáveis agregadas por Setor Censitário (densidade/zoneamento).",
-    )
-    metrica = st.selectbox("Métricas", ["—"], index=0, key=f"{key_prefix}pb_metrica")
-    info = st.selectbox("Informações", ["—"], index=0, key=f"{key_prefix}pb_info")
-    labels_on = st.checkbox(
-        "Rótulos",
-        value=False,
-        key=f"{key_prefix}pb_labels_on",
-        help="Mostra nomes fixos nos centróides (tamanho dinâmico por zoom).",
-    )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-    return limite, variavel, metrica, info, labels_on
-
-
-# ============================================================================
-# Folium
+# Helpers folium: mapa e legendas
 # ============================================================================
 SIMPLIFY_TOL = 0.0005  # ~55m
 
@@ -277,7 +288,7 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
     except Exception:
         pass
 
-    # Esri Imagery (sem rótulos)
+    # Esri Imagery (sem rótulos) para não conflitar com tooltips/rótulos
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri World Imagery",
@@ -289,37 +300,33 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
     return m
 
 
-def inject_leaflet_css(m, font_px: int = 900):
-    """CSS dentro do mapa para tooltips gigantes (classe própria)."""
+def inject_leaflet_css(m, tooltip_px: int = 28):
+    """CSS do tooltip (hover)."""
     if folium is None:
         return
     css = f"""
     <style>
-      .leaflet-tooltip-pane, .leaflet-pane.leaflet-tooltip-pane, .leaflet-pane.leaflet-tooltip-pane * {{
-        transform: none !important; -webkit-transform: none !important;
-      }}
       .leaflet-tooltip.pb-big-tooltip,
       .leaflet-tooltip.pb-big-tooltip * {{
-        font-size: {font_px}px !important;
-        font-weight: 900 !important;
+        font-size: {tooltip_px}px !important;
+        font-weight: 800 !important;
         color: #111 !important;
-        line-height: 1 !important;
+        line-height: 1.05 !important;
       }}
       .leaflet-tooltip.pb-big-tooltip {{
         background: #fff !important;
-        border: 3px solid #222 !important; border-radius: 12px !important;
-        padding: 26px 34px !important; white-space: nowrap !important;
+        border: 2px solid #222 !important; border-radius: 8px !important;
+        padding: 10px 14px !important; white-space: nowrap !important;
         pointer-events: none !important; box-shadow: 0 2px 6px rgba(0,0,0,.25) !important;
         z-index: 200000 !important;
       }}
     </style>
     """
     from folium import Element  # type: ignore
-
     m.get_root().html.add_child(Element(css))
 
 
-def inject_label_scaler(m, min_px=16, max_px=26, min_zoom=16, max_zoom=32):
+def inject_label_scaler(m, min_px=16, max_px=26, min_zoom=9, max_zoom=18):
     """
     Redimensiona '.pb-static-label' conforme zoom do Leaflet.
     - min_px/max_px: tamanho da fonte (px) em min_zoom/max_zoom
@@ -328,7 +335,6 @@ def inject_label_scaler(m, min_px=16, max_px=26, min_zoom=16, max_zoom=32):
     if folium is None:
         return
     from folium import Element  # type: ignore
-
     map_var = m.get_name()
     js = f"""
     <script>
@@ -338,7 +344,7 @@ def inject_label_scaler(m, min_px=16, max_px=26, min_zoom=16, max_zoom=32):
         function scaleFont(z) {{
           if (z < minZ) z = minZ;
           if (z > maxZ) z = maxZ;
-          var t = (z - minZ) / (maxZ - minZ);   // 0..1
+          var t = (z - minZ) / (maxZ - minZ);
           var px = Math.round(minPx + t * (maxPx - minPx));
           return px;
         }}
@@ -358,26 +364,16 @@ def inject_label_scaler(m, min_px=16, max_px=26, min_zoom=16, max_zoom=32):
     m.get_root().html.add_child(Element(js))
 
 
-def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.2):
+def add_outline_layer(m, gdf, layer_name: str, color="#000000", weight=1.2):
+    """Desenha contorno (linha) de camadas administrativas selecionadas."""
     if gdf is None or folium is None:
         return
-    cols_lower = {c.lower(): c for c in gdf.columns}
-    label_col: Optional[str] = None
-    lname = layer_name.lower()
-    if "distr" in lname and "ds_nome" in cols_lower:
-        label_col = cols_lower["ds_nome"]
-    elif "subpref" in lname and "sp_nome" in cols_lower:
-        label_col = cols_lower["sp_nome"]
-    elif "setor" in lname:
-        for k in ("cd_geocodi", "cd_setor"):
-            if k in cols_lower:
-                label_col = cols_lower[k]
-                break
-
-    # Linha (contorno)
     gf_line = gdf[["geometry"]].copy()
-    gf_line["geometry"] = gf_line.geometry.boundary
-    gf_line["geometry"] = gf_line.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+    try:
+        gf_line["geometry"] = gf_line.geometry.boundary
+        gf_line["geometry"] = gf_line.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+    except Exception:
+        pass
     folium.GeoJson(
         data=gf_line.to_json(),
         name=f"{layer_name} (contorno)",
@@ -385,36 +381,59 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.2):
         style_function=lambda f: {"fillOpacity": 0, "color": color, "weight": weight},
     ).add_to(m)
 
-    # Área para hover (tooltip grande)
-    if label_col:
-        gf_area = gdf[[label_col, "geometry"]].copy()
-        gf_area["geometry"] = gf_area.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
-        folium.GeoJson(
-            data=gf_area.to_json(),
-            name=f"{layer_name} (hover)",
-            pane="vectors",
-            style_function=lambda f: {"fillOpacity": 0.05, "opacity": 0, "weight": 0, "color": "#00000000"},
-            highlight_function=lambda f: {"weight": 2, "color": PB_COLORS["teal"], "fillOpacity": 0.10},
-            tooltip=folium.features.GeoJsonTooltip(
-                fields=[label_col],
-                aliases=[""],
-                sticky=True,
-                labels=False,
-                class_name="pb-big-tooltip",
-                style=(
-                    "background:#fff;color:#111;font-size:64px;font-weight:800;white-space:nowrap;"
-                    "border:1px solid #222;border-radius:8px;padding:10px 14px;"
-                ),
-                max_width=1200,
-            ),
-        ).add_to(m)
+
+def add_vertical_gradient_legend(m, title: str, colors: List[str], vmin: float, vmax: float, unit: str = ""):
+    """Legenda vertical (régua) de gradiente."""
+    if folium is None:
+        return
+    grad_css = f"linear-gradient(to top, {', '.join(colors)})"
+    html = f"""
+    <div style="
+        position: absolute; bottom: 40px; right: 16px; z-index: 9999;
+        background: rgba(255,255,255,0.95); padding: 10px 12px; border: 1px solid #aaa;
+        border-radius: 8px; font-family: Roboto, Arial; font-size: 12px; color: #111;">
+      <div style="font-weight: 700; margin-bottom: 6px;">{title}</div>
+      <div style="display:flex; align-items:stretch; gap:10px;">
+        <div style="width: 16px; height: 140px; background: {grad_css}; border: 1px solid #888;"></div>
+        <div style="display:flex; flex-direction:column; justify-content:space-between; height: 140px;">
+          <div>{(vmax):,.2f}{(' ' + unit) if unit else ''}</div>
+          <div>{(vmin):,.2f}{(' ' + unit) if unit else ''}</div>
+        </div>
+      </div>
+    </div>
+    """
+    from folium import Element  # type: ignore
+    m.get_root().html.add_child(Element(html))
+
+
+def add_categorical_legend(m, title: str, items: List[tuple[str, str]]):
+    """Legenda categórica (lista de cores e labels)."""
+    if folium is None:
+        return
+    rows = "".join(
+        f"""
+        <div style="display:flex; align-items:center; gap:8px; margin:2px 0;">
+          <div style="width:14px;height:14px;background:{color};border:1px solid #555;"></div>
+          <div style="font-size:12px;">{label}</div>
+        </div>
+        """
+        for color, label in items
+    )
+    html = f"""
+    <div style="
+        position: absolute; bottom: 40px; right: 16px; z-index: 9999;
+        background: rgba(255,255,255,0.95); padding: 10px 12px; border: 1px solid #aaa;
+        border-radius: 8px; font-family: Roboto, Arial; color: #111; max-width: 360px;">
+      <div style="font-weight:700; margin-bottom:6px; font-size:12px;">{title}</div>
+      <div>{rows}</div>
+    </div>
+    """
+    from folium import Element  # type: ignore
+    m.get_root().html.add_child(Element(html))
 
 
 def add_centroid_labels(m, gdf, label_col: str):
-    """
-    Rótulos permanentes com classe 'pb-static-label'.
-    O tamanho será controlado dinamicamente por 'inject_label_scaler'.
-    """
+    """Rótulos permanentes (dinâmicos por zoom) no representative_point()."""
     if folium is None:
         return
     try:
@@ -426,7 +445,7 @@ def add_centroid_labels(m, gdf, label_col: str):
             continue
         html = (
             "<div class='pb-static-label' "
-            "style=\"font: 500 12px/1 Roboto, -apple-system, Segoe UI, Helvetica, Arial, sans-serif;"
+            "style=\"font: 600 12px/1 Roboto, -apple-system, Segoe UI, Helvetica, Arial, sans-serif;"
             "color:#111; text-shadow:0 0 2px #fff, 0 0 6px #fff; white-space:nowrap;\">"
             f"{name}</div>"
         )
@@ -437,111 +456,266 @@ def add_centroid_labels(m, gdf, label_col: str):
         ).add_to(m)
 
 
-def plot_density_variable(m, setores_gdf, dens_df):
-    if folium is None or gpd is None or setores_gdf is None or dens_df is None:
+# ============================================================================
+# Visualizações conforme requisitos (1–6)
+# ============================================================================
+def draw_variables_on_setores(
+    m,
+    setores: "gpd.GeoDataFrame",
+    var_col: str,
+    var_title: str,
+    unit: str = "",
+):
+    """
+    (2) Desenha variável contínua por Setor:
+        - Apenas preenchimento (SEM linhas)
+        - Gradiente VAR_GRADIENT (sem azul/verde)
+        - Legenda vertical (régua)
+    """
+    if folium is None or setores is None or setores.empty:
         return
 
-    def _real(df, name):
-        return next((c for c in df.columns if c.lower() == name.lower()), name)
-
-    key = None
-    for cand in ("CD_GEOCODI", "CD_SETOR"):
-        if cand.lower() in [c.lower() for c in setores_gdf.columns] and cand.lower() in [
-            c.lower() for c in dens_df.columns
-        ]:
-            key = cand
-            break
-    if key is None:
-        st.info("Não foi possível identificar a coluna de setor (CD_GEOCODI/CD_SETOR).")
-        return
-    key_g = _real(setores_gdf, key)
-    key_d = _real(dens_df, key)
-    val_d = _real(dens_df, "densidade_hec")
-    if val_d not in dens_df.columns:
-        st.info("Coluna `densidade_hec` não encontrada.")
+    df = setores.copy()
+    if var_col not in df.columns:
+        st.info(f"Coluna '{var_col}' não encontrada nos Setores Censitários.")
         return
 
-    gdf = setores_gdf[[key_g, "geometry"]].rename(columns={key_g: "setor_key"})
-    df = dens_df[[key_d, val_d]].rename(columns={key_d: "setor_key", val_d: "densidade_hec"})
-    df["densidade_hec"] = pd.to_numeric(df["densidade_hec"], errors="coerce").round(0).astype("Int64")
-    mg = gdf.merge(df, on="setor_key", how="inner").dropna(subset=["densidade_hec"])
-    if mg.empty:
-        st.info("Nenhum setor para desenhar após o merge.")
+    # Numérico e limpeza
+    s = pd.to_numeric(df[var_col], errors="coerce")
+    df[var_col] = s
+    df = df.dropna(subset=[var_col])
+    if df.empty:
+        st.info(f"Sem dados válidos para '{var_col}'.")
         return
+
+    # Simplify e gradiente
     try:
-        mg["geometry"] = mg.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+        df["geometry"] = df.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
     except Exception:
         pass
 
-    q = mg["densidade_hec"].astype(float).quantile([0, 0.2, 0.4, 0.6, 0.8, 1]).tolist()
-    palette = ["#F4DD63", "#B1BF7C", "#6FA097", "#D58243", "#14407D"]
+    vmin, vmax = float(s.min()), float(s.max())
+
+    def ramp_color(val: float) -> str:
+        if vmax == vmin:
+            return VAR_GRADIENT[-1]
+        t = (val - vmin) / (vmax - vmin)
+        if t <= 0.5:
+            a, b = VAR_GRADIENT[0], VAR_GRADIENT[1]
+            tt = t / 0.5
+        else:
+            a, b = VAR_GRADIENT[1], VAR_GRADIENT[2]
+            tt = (t - 0.5) / 0.5
+
+        def _hex_to_rgb(h: str):
+            h = h.lstrip("#")
+            return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
+
+        def _rgb_to_hex(rgb):
+            return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+        ra, ga, ba = _hex_to_rgb(a)
+        rb, gb, bb = _hex_to_rgb(b)
+        rc = int(ra + tt * (rb - ra))
+        gc = int(ga + tt * (gb - ga))
+        bc = int(ba + tt * (bb - ba))
+        return _rgb_to_hex((rc, gc, bc))
 
     def style_fn(feat):
-        v = feat["properties"].get("densidade_hec")
-        idx = sum(float(v) >= x for x in q[:-1]) if v is not None else 0
-        return {
-            "fillOpacity": 0.65,
-            "weight": 0.6,
-            "color": "#ffffff",
-            "fillColor": palette[min(idx, len(palette) - 1)],
-        }
+        v = feat["properties"].get(var_col)
+        if v is None:
+            color = "#dddddd"
+        else:
+            color = ramp_color(float(v))
+        return {"fillOpacity": 0.80, "weight": 0.0, "color": "#00000000", "fillColor": color}
 
     folium.GeoJson(
-        data=mg.to_json(),
-        name="Densidade",
+        data=df.to_json(),
+        name=var_title,
         pane="vectors",
         style_function=style_fn,
         tooltip=folium.features.GeoJsonTooltip(
-            fields=["setor_key", "densidade_hec"],
-            aliases=["Setor:", "Densidade (hab/ha):"],
+            fields=[var_col],
+            aliases=[var_title + ": "],
             sticky=True,
             labels=True,
             class_name="pb-big-tooltip",
-            style=(
-                "background:#fff;color:#111;font-size:64px;font-weight:800;white-space:nowrap;"
-                "border:1px solid #222;border-radius:8px;padding:10px 14px;"
-            ),
+            style=("background:#fff;color:#111;font-size:24px;font-weight:700;"
+                   "border:1px solid #222;border-radius:8px;padding:8px 12px;"),
             max_width=1200,
         ),
     ).add_to(m)
 
+    add_vertical_gradient_legend(m, title=var_title, colors=VAR_GRADIENT, vmin=vmin, vmax=vmax, unit=unit)
 
-def bar_for_density(dens_df: Optional[pd.DataFrame]):
-    if dens_df is None or dens_df.empty:
-        st.info("Sem dados de densidade para o gráfico.")
+
+def draw_isocronas_limits(m, isoc: "gpd.GeoDataFrame"):
+    """
+    (5) Nos LIMITES: incluir isócronas como 'área de transição'
+        (nova_class ∈ {1,3,4,6}) em #836e60 + legenda.
+    """
+    if folium is None or isoc is None or isoc.empty:
         return
-    col = next((c for c in dens_df.columns if c.lower() == "densidade_hec"), None)
-    if col is None:
-        st.info("Coluna `densidade_hec` não encontrada.")
+
+    df = isoc.copy()
+    if "nova_class" not in df.columns:
+        st.info("`nova_class` não encontrada em isócronas.")
         return
-    vals = pd.to_numeric(dens_df[col], errors="coerce").dropna().round(0).astype(int)
-    st.subheader("Densidade (hab/ha) — distribuição")
-    fig = px.histogram(vals, nbins=30, height=520)
-    fig.update_traces(marker_color=PB_COLORS["laranja"])
-    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
-    st.plotly_chart(fig, use_container_width=True)
 
-
-# ============================================================================
-# App
-# ============================================================================
-def _safe_rerun() -> None:
     try:
-        st.rerun()
+        df["geometry"] = df.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
     except Exception:
-        st.experimental_rerun()
+        pass
+
+    mask_trans = df["nova_class"].isin([1, 3, 4, 6])
+    if not mask_trans.any():
+        return
+
+    df_trans = df.loc[mask_trans, ["nova_class", "geometry"]].copy()
+
+    def style_fn(feat):
+        return {"fillOpacity": 0.25, "weight": 0.0, "color": "#00000000", "fillColor": "#836e60"}
+
+    folium.GeoJson(
+        data=df_trans.to_json(),
+        name="Área de transição (isócronas)",
+        pane="vectors",
+        style_function=style_fn,
+        tooltip=folium.features.GeoJsonTooltip(
+            fields=["nova_class"],
+            aliases=["Nova Class: "],
+            sticky=True,
+            labels=True,
+            class_name="pb-big-tooltip",
+            style=("background:#fff;color:#111;font-size:22px;font-weight:700;"
+                   "border:1px solid #222;border-radius:8px;padding:8px 12px;"),
+            max_width=1200,
+        ),
+    ).add_to(m)
+
+    add_categorical_legend(m, "Área de influência de bairro (limites)", [("#836e60", "Área de transição (1,3,4,6)")])
+    # Demais classes não preenchidas (foco: transição)
 
 
-def main() -> None:
-    inject_css()
+def draw_isocronas_variable(m, isoc: "gpd.GeoDataFrame"):
+    """
+    (6) Em VARIÁVEIS: usar isócronas com `nova_class` renomeada para
+        'Área de influência de bairro' + paleta categórica AIB_COLORS + legenda.
+    """
+    if folium is None or isoc is None or isoc.empty:
+        return
 
-    # Header
+    df = isoc.copy()
+    if "nova_class" not in df.columns:
+        st.info("`nova_class` não encontrada em isócronas.")
+        return
+
+    try:
+        df["geometry"] = df.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+    except Exception:
+        pass
+
+    def style_fn(feat):
+        v = feat["properties"].get("nova_class")
+        try:
+            v = int(v)
+        except Exception:
+            v = None
+        color = AIB_COLORS.get(v, ("#c8c8c8", "Outros"))[0]
+        return {"fillOpacity": 0.80, "weight": 0.0, "color": "#00000000", "fillColor": color}
+
+    folium.GeoJson(
+        data=df.to_json(),
+        name="Área de influência de bairro",
+        pane="vectors",
+        style_function=style_fn,
+        tooltip=folium.features.GeoJsonTooltip(
+            fields=["nova_class"],
+            aliases=["Área de influência de bairro: "],
+            sticky=True,
+            labels=True,
+            class_name="pb-big-tooltip",
+            style=("background:#fff;color:#111;font-size:24px;font-weight:700;"
+                   "border:1px solid #222;border-radius:8px;padding:8px 12px;"),
+            max_width=1200,
+        ),
+    ).add_to(m)
+
+    items = [(hex_, label) for code, (hex_, label) in AIB_COLORS.items()]
+    add_categorical_legend(m, "Área de influência de bairro", items)
+
+
+def draw_clusters(m, setores: "gpd.GeoDataFrame", cluster_col: str = "cluster"):
+    """
+    (3) e (4) Aba Cluster:
+        - Cores fixas por classe (0..4), outros cinza
+        - Legenda com rótulos 1..5 (label encoding)
+    """
+    if folium is None or setores is None or setores.empty:
+        return
+    df = setores.copy()
+    if cluster_col not in df.columns:
+        # tenta nome aproximado
+        c2 = next((c for c in df.columns if re.match(r"^cluster(_id)?$", c, re.I)), None)
+        if c2 is None:
+            st.info("Coluna de cluster não encontrada nos Setores.")
+            return
+        cluster_col = c2
+
+    try:
+        df["geometry"] = df.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+    except Exception:
+        pass
+
+    def style_fn(feat):
+        v = feat["properties"].get(cluster_col)
+        try:
+            v = int(v)
+        except Exception:
+            v = "outros"
+        color = CLUSTER_COLORS.get(v, CLUSTER_COLORS["outros"])
+        return {"fillOpacity": 0.85, "weight": 0.0, "color": "#00000000", "fillColor": color}
+
+    folium.GeoJson(
+        data=df.to_json(),
+        name="Clusters",
+        pane="vectors",
+        style_function=style_fn,
+        tooltip=folium.features.GeoJsonTooltip(
+            fields=[cluster_col],
+            aliases=["Cluster: "],
+            sticky=True,
+            labels=True,
+            class_name="pb-big-tooltip",
+            style=("background:#fff;color:#111;font-size:24px;font-weight:700;"
+                   "border:1px solid #222;border-radius:8px;padding:8px 12px;"),
+            max_width=1200,
+        ),
+    ).add_to(m)
+
+    items = []
+    for k in [0, 1, 2, 3, 4]:
+        items.append((CLUSTER_COLORS[k], CLUSTER_LABELS[k]))
+    items.append((CLUSTER_COLORS["outros"], "Outros"))
+    add_categorical_legend(m, "Clusters", items)
+
+
+# ============================================================================
+# UI (cabeçalho, abas e controles)
+# ============================================================================
+def build_header():
     with st.container():
         c1, c2 = st.columns([1, 7])
         with c1:
-            lp = get_logo_path()
-            if lp:
-                st.image(lp, width=140)
+            # logo (best-effort)
+            for p in [
+                "assets/logo_todos.jpg", "assets/logo_paleta.jpg",
+                "logo_todos.jpg", "logo_paleta.jpg",
+                "/mnt/data/logo_todos.jpg", "/mnt/data/logo_paleta.jpg",
+            ]:
+                if Path(p).exists():
+                    st.image(p, width=140)
+                    break
         with c2:
             st.markdown(
                 """
@@ -555,75 +729,163 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
 
-    build_tabs()
 
-    pre_show_chart = st.session_state.get("_show_chart", False)
+def build_controls(key_prefix: str) -> tuple[str, bool]:
+    st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
+    st.markdown("<h4>Configurações</h4>", unsafe_allow_html=True)
 
-    with st.container():
-        if pre_show_chart:
-            left, map_col, right = st.columns([1, 5, 1], gap="small")
+    # (1) REMOVIDO Setores Censitários dos LIMITES
+    limite = st.selectbox(
+        "Limites Administrativos",
+        ["Distritos", "ZonasOD2023", "Subprefeitura"],
+        index=0,
+        key=f"{key_prefix}pb_limite",
+        help="Escolha a desagregação para contorno.",
+    )
+    labels_on = st.checkbox(
+        "Rótulos permanentes (dinâmicos por zoom)",
+        value=False,
+        key=f"{key_prefix}pb_labels",
+        help="Mostra nomes fixos nos centróides e ajusta o tamanho conforme zoom.",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+    return limite, labels_on
+
+
+# ============================================================================
+# App
+# ============================================================================
+def main() -> None:
+    inject_css()
+    build_header()
+    st.write("")
+
+    # Abas principais: Variáveis & Cluster (mais 2 placeholders)
+    tab_vars, tab_cluster, tab3, tab4 = st.tabs(["Variáveis", "Cluster", "Aba 3", "Aba 4"])
+
+    # Carregamentos base (setores/isócronas)
+    gdf_setores = load_setores()
+    gdf_iso = load_isocronas()
+
+    # ====== Aba VARIÁVEIS ======
+    with tab_vars:
+        st.markdown("### Variáveis (Setores Censitários e Isócronas)")
+
+        # (2.1) Labels de variáveis corrigidos
+        VAR_OPTIONS = {
+            "populacao": "População (Pessoa/hec)",
+            "densidade_demografica": "Densidade demográfica (hab/he)",
+            "diferenca_elevacao": "Variação de elevação média",
+            "elevacao": "Elevação média",
+            "aib": "Área de influência de bairro",  # isócronas.nova_class
+        }
+        var_key = st.selectbox(
+            "Selecione a variável",
+            list(VAR_OPTIONS.keys()),
+            format_func=lambda k: VAR_OPTIONS[k],
+            index=0,
+            key="vars_var_sel",
+        )
+
+        # Controles (com prefixo de chave exclusivo para evitar DuplicateWidgetID)
+        limite, labels_on = build_controls("vars_")
+
+        # Mapa
+        if folium is None or st_folium is None:
+            st.info("Para o mapa, instale `folium` e `streamlit-folium`.")
         else:
-            left, map_col = st.columns([1, 6], gap="small")
-            right = None
+            center = (-23.55, -46.63)
+            gdf_lim = load_admin_layer(limite)
+            if gdf_lim is not None and len(gdf_lim) > 0:
+                minx, miny, maxx, maxy = gdf_lim.total_bounds
+                center = ((miny + maxy) / 2, (minx + maxx) / 2)
 
-        with left:
-            limite, variavel, _, _, labels_on = build_controls("main_")
+            fmap = make_satellite_map(center=center, zoom=10, tiles_opacity=0.5)
+            inject_leaflet_css(fmap, tooltip_px=28)
+            inject_label_scaler(fmap, min_px=16, max_px=26, min_zoom=9, max_zoom=18)
 
-        gdf_limite = load_admin_layer(limite)
-        dens_df = load_density() if variavel == "Densidade" else None
-        show_chart = (variavel == "Densidade") and (dens_df is not None)
-        if show_chart != pre_show_chart:
-            st.session_state["_show_chart"] = show_chart
-            _safe_rerun()
+            # contorno dos limites selecionados
+            if gdf_lim is not None:
+                add_outline_layer(fmap, gdf_lim, layer_name=limite, color="#000", weight=1.2)
 
-        with map_col:
-            if folium is not None and st_folium is not None:
-                center = (-23.55, -46.63)
-                if gdf_limite is not None and len(gdf_limite) > 0:
-                    minx, miny, maxx, maxy = gdf_limite.total_bounds
-                    center = ((miny + maxy) / 2, (minx + maxx) / 2)
-                height = 850 if right is None else 700
+                # rótulos (Distritos/Subprefeitura)
+                if labels_on:
+                    cols_lower = {c.lower(): c for c in gdf_lim.columns}
+                    label_col = cols_lower.get("ds_nome") or cols_lower.get("sp_nome")
+                    if label_col:
+                        add_centroid_labels(fmap, gdf_lim, label_col)
 
-                fmap = make_satellite_map(center=center, zoom=10, tiles_opacity=0.5)
+            # (5) sobrepor isócronas como “área de transição” nos LIMITES
+            if gdf_iso is not None:
+                draw_isocronas_limits(fmap, gdf_iso)
 
-                # Tooltip gigante (hover) e escala dinâmica dos rótulos estáticos
-                inject_leaflet_css(fmap, font_px=900)
-                # <<< Ajuste aqui a faixa de tamanhos/zooms (16px quando afastado):
-                inject_label_scaler(fmap, min_px=16, max_px=26, min_zoom=9, max_zoom=18)
-
-                if fmap is not None:
-                    if gdf_limite is not None:
-                        add_admin_outline(fmap, gdf_limite, layer_name=limite, color="#000000", weight=1.2)
-
-                        # rótulos permanentes (dinâmicos por zoom)
-                        if labels_on:
-                            cols_lower = {c.lower(): c for c in gdf_limite.columns}
-                            label_col = None
-                            if "ds_nome" in cols_lower:
-                                label_col = cols_lower["ds_nome"]
-                            elif "sp_nome" in cols_lower:
-                                label_col = cols_lower["sp_nome"]
-                            elif "cd_geocodi" in cols_lower:
-                                label_col = cols_lower["cd_geocodi"]
-                            elif "cd_setor" in cols_lower:
-                                label_col = cols_lower["cd_setor"]
-                            if label_col:
-                                add_centroid_labels(fmap, gdf_limite, label_col)
-
-                    if show_chart:
-                        setores = load_admin_layer("SetoresCensitarios2023")
-                        if setores is not None:
-                            plot_density_variable(fmap, setores, dens_df)
-
-                    st_folium(fmap, use_container_width=True, height=height)
+            # (2) variáveis contínuas por Setor (preenchimento) OU (6) AIB por isócronas
+            if var_key != "aib":
+                if gdf_setores is None:
+                    st.info("Setores Censitários não encontrados.")
+                else:
+                    VAR_MAP = {
+                        "populacao": ("populacao", "Pessoa/hec"),
+                        "densidade_demografica": ("densidade_demografica", "hab/he"),
+                        "diferenca_elevacao": ("diferenca_elevacao", ""),
+                        "elevacao": ("elevacao", ""),
+                    }
+                    col, unit = VAR_MAP[var_key]
+                    draw_variables_on_setores(
+                        fmap, gdf_setores, var_col=col, var_title=VAR_OPTIONS[var_key], unit=unit
+                    )
             else:
-                st.info("Para o mapa satélite, instale `folium` e `streamlit-folium`.")
+                if gdf_iso is None:
+                    st.info("Camada de isócronas não encontrada para 'Área de influência de bairro'.")
+                else:
+                    draw_isocronas_variable(fmap, gdf_iso)
 
-        if right is not None and show_chart:
-            with right:
-                bar_for_density(dens_df)
+            st_folium(fmap, use_container_width=True, height=820)
+
+    # ====== Aba CLUSTER ======
+    with tab_cluster:
+        st.markdown("### Clusters (Setores Censitários)")
+
+        limite, labels_on = build_controls("clus_")
+
+        if folium is None or st_folium is None:
+            st.info("Para o mapa, instale `folium` e `streamlit-folium`.")
+        else:
+            center = (-23.55, -46.63)
+            gdf_lim = load_admin_layer(limite)
+            if gdf_lim is not None and len(gdf_lim) > 0:
+                minx, miny, maxx, maxy = gdf_lim.total_bounds
+                center = ((miny + maxy) / 2, (minx + maxx) / 2)
+
+            fmap = make_satellite_map(center=center, zoom=10, tiles_opacity=0.5)
+            inject_leaflet_css(fmap, tooltip_px=28)
+            inject_label_scaler(fmap, min_px=16, max_px=26, min_zoom=9, max_zoom=18)
+
+            if gdf_lim is not None:
+                add_outline_layer(fmap, gdf_lim, layer_name=limite, color="#000", weight=1.2)
+                if labels_on:
+                    cols_lower = {c.lower(): c for c in gdf_lim.columns}
+                    label_col = cols_lower.get("ds_nome") or cols_lower.get("sp_nome")
+                    if label_col:
+                        add_centroid_labels(fmap, gdf_lim, label_col)
+
+            if gdf_setores is None:
+                st.info("Setores Censitários não encontrados.")
+            else:
+                draw_clusters(fmap, gdf_setores, cluster_col="cluster")
+
+            # (5) opcional: manter a sobreposição de transição das isócronas aqui também
+            if gdf_iso is not None:
+                draw_isocronas_limits(fmap, gdf_iso)
+
+            st_folium(fmap, use_container_width=True, height=820)
+
+    # Abas 3/4 (placeholders)
+    with tab3:
+        st.write("Conteúdo a definir.")
+    with tab4:
+        st.write("Conteúdo a definir.")
 
 
 if __name__ == "__main__":
     main()
-
