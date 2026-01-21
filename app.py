@@ -288,7 +288,7 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.2):
             ),
         ).add_to(m)
 
-def add_centroid_labels(m, gdf, label_col: str, font_px: int = 10):
+def add_centroid_labels(m, gdf, label_col: str, font_px: int = 20):
     """Rótulos (opcional)."""
     if folium is None: return
     try:
@@ -422,7 +422,7 @@ def main() -> None:
                             elif "sp_nome" in cols_lower: label_col = cols_lower["sp_nome"]
                             elif "cd_geocodi" in cols_lower: label_col = cols_lower["cd_geocodi"]
                             elif "cd_setor" in cols_lower: label_col = cols_lower["cd_setor"]
-                            if label_col: add_centroid_labels(fmap, gdf_limite, label_col, font_px=10)
+                            if label_col: add_centroid_labels(fmap, gdf_limite, label_col, font_px=20)
 
                     if show_chart:
                         setores = load_admin_layer("SetoresCensitarios2023")
@@ -439,6 +439,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
