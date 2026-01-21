@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Dict, Any
 from unicodedata import normalize as _ud_norm
 import math
 import re
@@ -43,7 +43,6 @@ PB_COLORS = {
 }
 
 # Gradiente contínuo de alto contraste (sem azul/verde)
-# amarelo claro -> laranja -> marrom
 HIGH_CONTRAST = ["#fff7bc", "#fec44f", "#fe9929", "#ec7014", "#cc4c02", "#993404"]
 
 
@@ -65,14 +64,14 @@ def inject_css() -> None:
             }}
             .pb-header {{
                 background: var(--pb-navy); color: #fff; border-radius: 18px;
-                padding: 20px 24px; min-height: 94px; display: flex; align-items: center; gap: 16px;
+                padding: 16px 20px; min-height: 88px; display: flex; align-items: center; gap: 16px;
             }}
-            .pb-title {{ font-size: 2.0rem; line-height: 1.15; font-weight: 700; letter-spacing: .5px; }}
-            .pb-subtitle {{ opacity: .95; margin-top: 4px; font-size: 1.00rem; }}
+            .pb-title {{ font-size: 1.9rem; line-height: 1.15; font-weight: 700; letter-spacing: .4px; }}
+            .pb-subtitle {{ opacity: .95; margin-top: 3px; font-size: .98rem; }}
 
             .pb-card {{
                 background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04);
-                border-radius:16px; padding:16px;
+                border-radius:16px; padding:14px;
             }}
             .pb-card h4 {{ margin: 0 0 .6rem 0; }}
             .main .block-container {{ padding-top: .6rem; padding-bottom: .6rem; }}
@@ -97,19 +96,16 @@ def get_logo_path() -> Optional[str]:
 
 
 # ============================================================================
-# Caminhos e loaders ROBUSTOS (on-demand)
+# Caminhos e loaders (ON-DEMAND + robustos)
+#   - Finder SEM cache (para não "memorizar" ausência de arquivo)
+#   - Leitura COM cache (só quando existir o path)
+#   - Evita manter várias camadas pesadas ao mesmo tempo
 # ============================================================================
 REPO_ROOT = Path(__file__).resolve().parent
 
 def _slug(s: str) -> str:
     s2 = _ud_norm("NFKD", str(s)).encode("ASCII", "ignore").decode("ASCII")
     return re.sub(r"[^a-z0-9]+", "", s2.strip().lower())
-
-def _list_parquets(d: Path) -> list[str]:
-    try:
-        return sorted([p.name for p in d.glob("*.parquet")])
-    except Exception:
-        return []
 
 def _find_parquet_anywhere(names: list[str]) -> Optional[Path]:
     """Procura por nomes-alvo (sem extensão) em locais comuns do deploy."""
@@ -132,65 +128,44 @@ def _find_parquet_anywhere(names: list[str]) -> Optional[Path]:
                 return p
     return None
 
-def _read_gdf_parquet(path: Path) -> "gpd.GeoDataFrame | None":
+@st.cache_data(show_spinner=False, max_entries=6)
+def _read_gdf_parquet(path_str: str) -> "gpd.GeoDataFrame | None":
+    """Lê e garante CRS=4326. Cacheia somente quando path existe."""
     if gpd is None:
         st.error("Geopandas não está disponível no ambiente.")
         return None
     try:
-        gdf = gpd.read_parquet(path)
+        gdf = gpd.read_parquet(Path(path_str))
     except Exception as exc:
-        st.warning(f"Falha ao ler {path.name}: {exc}")
+        st.warning(f"Falha ao ler {Path(path_str).name}: {exc}")
         return None
     try:
         gdf = gdf if gdf.crs is not None else gdf.set_crs(4326)
-        # Se não for 4326, converte
         if str(gdf.crs).lower() not in ("epsg:4326", "epsg: 4326", "wgs84", "wgs 84"):
             gdf = gdf.to_crs(4326)
     except Exception:
         pass
     return gdf
 
-def _dir_signature() -> tuple:
-    """Assinatura simples para invalidar cache quando os arquivos mudam."""
-    dirs = [
-        REPO_ROOT / "limites_administrativos",
-        REPO_ROOT / "dash_planbairros" / "limites_administrativos",
-        Path.cwd() / "limites_administrativos",
-    ]
-    listing = []
-    for d in dirs:
-        if d.exists():
-            listing.extend([d.as_posix()] + _list_parquets(d))
-    return tuple(listing)
 
-@st.cache_data(show_spinner=False)
-def load_setores(sig: tuple) -> "gpd.GeoDataFrame | None":
-    path = _find_parquet_anywhere(["SetoresCensitarios2023", "SetoresCensitários2023"])
-    if path is None:
-        st.warning("Arquivo 'SetoresCensitarios2023.parquet' não encontrado.")
-        _ = _dir_signature()  # força exibir nas próximas chamadas
-        return None
-    return _read_gdf_parquet(path)
+def load_setores() -> "gpd.GeoDataFrame | None":
+    """ON-DEMAND: encontra o arquivo toda vez, e só lê (com cache) se existir."""
+    p = _find_parquet_anywhere(["SetoresCensitarios2023", "SetoresCensitários2023"])
+    return _read_gdf_parquet(str(p)) if p else None
 
-@st.cache_data(show_spinner=False)
-def load_isocronas(sig: tuple) -> "gpd.GeoDataFrame | None":
-    path = _find_parquet_anywhere(["isocronas", "isócronas"])
-    if path is None:
-        st.info("Arquivo de isócronas não encontrado.")
-        return None
-    return _read_gdf_parquet(path)
+def load_isocronas() -> "gpd.GeoDataFrame | None":
+    p = _find_parquet_anywhere(["isocronas", "isócronas"])
+    return _read_gdf_parquet(str(p)) if p else None
 
-@st.cache_data(show_spinner=False)
-def load_admin_layer(name: str, sig: tuple) -> "gpd.GeoDataFrame | None":
-    # Sem setores aqui — apenas limites
+def load_admin_layer(name: str) -> "gpd.GeoDataFrame | None":
     alias = {
         "Distritos": ["Distritos"],
         "ZonasOD2023": ["ZonasOD2023", "ZonasOD"],
         "Subprefeitura": ["subprefeitura", "Subprefeituras"],
         "Isócronas": ["isocronas", "isócronas"],
     }.get(name, [name])
-    path = _find_parquet_anywhere(alias)
-    return _read_gdf_parquet(path) if path else None
+    p = _find_parquet_anywhere(alias)
+    return _read_gdf_parquet(str(p)) if p else None
 
 
 # ============================================================================
@@ -212,6 +187,13 @@ def find_col(df_cols, *cands) -> Optional[str]:
 def center_from_bounds(gdf) -> tuple[float, float]:
     minx, miny, maxx, maxy = gdf.total_bounds
     return ((miny + maxy) / 2, (minx + maxx) / 2)
+
+def _to_float_series(s: pd.Series) -> pd.Series:
+    """Converte valores (inclui Decimal/str) para float."""
+    try:
+        return pd.to_numeric(s, errors="coerce")
+    except Exception:
+        return pd.to_numeric(s.astype(str), errors="coerce")
 
 
 # ============================================================================
@@ -239,7 +221,7 @@ def left_controls() -> Dict[str, Any]:
         ["Distritos", "ZonasOD2023", "Subprefeitura", "Isócronas"],
         index=0,
         key="pb_limite",
-        help="Exibe contorno do limite selecionado (Setores foram movidos para 'Variáveis').",
+        help="Exibe contorno do limite selecionado (Setores não aparecem aqui).",
     )
     labels_on = st.checkbox(
         "Rótulos permanentes (dinâmicos por zoom)",
@@ -251,7 +233,7 @@ def left_controls() -> Dict[str, Any]:
 
 
 # ============================================================================
-# Folium – mapa, camadas e legendas
+# Folium – mapa, camadas e legendas (sem reruns no zoom)
 # ============================================================================
 SIMPLIFY_TOL = 0.00045  # equilíbrio velocidade/forma
 
@@ -342,7 +324,7 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.15):
         style_function=lambda f: {"fillOpacity": 0, "color": color, "weight": weight},
     ).add_to(m)
 
-    # Regra especial 5) – isócronas como "área de transição" nos limites
+    # Regra especial (Isócronas nos limites → área de transição)
     if layer_name.lower().startswith("isócron") or layer_name.lower().startswith("isocron"):
         cls = find_col(gdf.columns, "nova_class")
         if cls:
@@ -432,13 +414,6 @@ def add_categorical_legend(m, title: str, items: list[tuple[str, str]], topright
 
 
 # ---------- Pintura por Setor (variáveis numéricas e cluster) ----------
-def _to_float_series(s: pd.Series) -> pd.Series:
-    """Converte valores (inclui Decimal/str) para float."""
-    try:
-        return pd.to_numeric(s, errors="coerce")
-    except Exception:
-        return pd.to_numeric(s.astype(str), errors="coerce")
-
 def ramp_color(value: float, vmin: float, vmax: float, colors: list[str]) -> str:
     """Interpolação linear simples sobre uma lista de cores hex."""
     if value is None or (isinstance(value, float) and math.isnan(value)):
@@ -467,7 +442,7 @@ def paint_setores_numeric(
     if folium is None or setores is None or value_col not in setores.columns:
         return
     df = setores[[value_col, "geometry"]].copy()
-    # força float (corrige Decimal e afins)
+    # força float (corrige Decimal/str) e remove NA
     df["__v__"] = _to_float_series(df[value_col])
     df = df.dropna(subset=["__v__"])
     if df.empty:
@@ -498,7 +473,7 @@ def paint_setores_numeric(
     add_gradient_legend(m, label, vmin, vmax, colors)
 
 def paint_setores_cluster(m, setores: "gpd.GeoDataFrame", cluster_col: str):
-    """Regra 3 e 4 — cores + legenda nominal (com fallback para 'Outros')."""
+    """Cores + legenda nominal (com fallback para 'Outros')."""
     if folium is None or setores is None or cluster_col not in setores.columns:
         return
     color_map = {0: "#bf7db2", 1: "#f7bd6a", 2: "#cf651f", 3: "#ede4e6", 4: "#793393"}
@@ -511,7 +486,6 @@ def paint_setores_cluster(m, setores: "gpd.GeoDataFrame", cluster_col: str):
     }
     default_color = "#c8c8c8"
     df = setores[[cluster_col, "geometry"]].copy()
-    # força inteiro (corrige Decimal/str)
     df["__c__"] = pd.to_numeric(df[cluster_col], errors="coerce").astype("Int64")
     try:
         df["geometry"] = df.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
@@ -535,7 +509,7 @@ def paint_setores_cluster(m, setores: "gpd.GeoDataFrame", cluster_col: str):
     add_categorical_legend(m, "Cluster (perfil urbano)", items)
 
 def paint_isocronas_area(m, iso: "gpd.GeoDataFrame"):
-    """Regra 6 — variável 'Área de influência de bairro' via nova_class."""
+    """Variável 'Área de influência de bairro' via nova_class."""
     if folium is None or iso is None:
         return
     cls = find_col(iso.columns, "nova_class")
@@ -589,7 +563,7 @@ def main() -> None:
         with c1:
             lp = get_logo_path()
             if lp:
-                st.image(lp, width=120)
+                st.image(lp, width=110)
         with c2:
             st.markdown(
                 """
@@ -616,31 +590,28 @@ def main() -> None:
             st.error("Instale `geopandas`, `folium` e `streamlit-folium`.")
             return
 
-        # Assinatura (faz o cache observar mudanças na pasta)
-        sig = _dir_signature()
-
-        # Cria o mapa imediatamente (sem dados)
+        # 1) cria o mapa imediatamente (sem dados)
         fmap = make_satellite_map(center=(-23.55, -46.63), zoom=11, tiles_opacity=0.5)
         inject_tooltip_css(fmap, font_px=48)
         inject_label_scaler(fmap, 16, 26, 9, 18)
 
-        # Limites administrativos — carregamento on-demand
-        lim_gdf = load_admin_layer(ui["limite"], sig)
+        # 2) limites administrativos — ON-DEMAND (apenas o selecionado)
+        lim_gdf = load_admin_layer(ui["limite"])
         if lim_gdf is not None and not lim_gdf.empty:
             add_admin_outline(fmap, lim_gdf, ui["limite"])
             if ui["labels_on"]:
                 add_centroid_labels(fmap, lim_gdf)
 
-        # Variável — carregamento on-demand
+        # 3) variável — ON-DEMAND (apenas a escolhida)
         var = ui["variavel"]
         if var == "Área de influência de bairro":
-            iso = load_isocronas(sig)
+            iso = load_isocronas()
             if iso is None or iso.empty:
                 st.info("Isócronas não encontradas.")
             else:
                 paint_isocronas_area(fmap, iso)
         else:
-            setores = load_setores(sig)
+            setores = load_setores()
             if setores is None or setores.empty:
                 st.info("Setores não encontrados.")
             else:
@@ -664,7 +635,7 @@ def main() -> None:
                     else:
                         paint_setores_numeric(fmap, setores, col, var, HIGH_CONTRAST)
 
-        # Renderiza mapa
+        # 4) renderiza o mapa (sem causar rerun em zoom/pan)
         st_folium(fmap, use_container_width=True, height=820)
 
 
