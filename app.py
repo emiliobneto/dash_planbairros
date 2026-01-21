@@ -57,7 +57,7 @@ def inject_css() -> None:
             .pb-card label, .pb-card .stMarkdown p {{ font-size: 1.9rem !important; font-weight: 800 !important; }}
             .pb-card div[role="combobox"] {{ font-size: 1.7rem !important; min-height: 58px !important; }}
             .pb-card [data-baseweb="select"] * {{ font-size: 1.7rem !important; }}
-            .pb-card .stSelectbox svg {{ transform: scale(0.5); }}
+            .pb-card .stSelectbox svg {{ transform: scale(1.7); }}
 
             .stTabs [data-baseweb="tab-list"] button[role="tab"] {{ background:transparent; border-bottom:3px solid transparent; font-weight:700; font-size: 1.1rem; }}
             .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {{ border-bottom:3px solid var(--pb-teal) !important; color:var(--pb-navy) !important; }}
@@ -196,7 +196,7 @@ def build_controls(key_prefix="main_") -> Tuple[str,str,str,str,bool]:
                             help="Variáveis agregadas por Setor Censitário (densidade/zoneamento).")
     metrica = st.selectbox("Métricas", ["—"], index=0, key=f"{key_prefix}pb_metrica")
     info = st.selectbox("Informações", ["—"], index=0, key=f"{key_prefix}pb_info")
-    labels_on = st.checkbox("Rótulos permanentes grandes", value=False, key=f"{key_prefix}pb_labels_on",
+    labels_on = st.checkbox("Rótulos", value=False, key=f"{key_prefix}pb_labels_on",
                             help="Mostra nomes grandes fixos no mapa (centróides).")
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -288,8 +288,8 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.2):
             ),
         ).add_to(m)
 
-def add_centroid_labels(m, gdf, label_col: str, font_px: int = 180):
-    """Rótulos permanentes grandes (opcional)."""
+def add_centroid_labels(m, gdf, label_col: str, font_px: int = 50):
+    """Rótulos (opcional)."""
     if folium is None: return
     try:
         centers = gdf.copy().to_crs(4326).centroid
@@ -422,7 +422,7 @@ def main() -> None:
                             elif "sp_nome" in cols_lower: label_col = cols_lower["sp_nome"]
                             elif "cd_geocodi" in cols_lower: label_col = cols_lower["cd_geocodi"]
                             elif "cd_setor" in cols_lower: label_col = cols_lower["cd_setor"]
-                            if label_col: add_centroid_labels(fmap, gdf_limite, label_col, font_px=180)
+                            if label_col: add_centroid_labels(fmap, gdf_limite, label_col, font_px=50)
 
                     if show_chart:
                         setores = load_admin_layer("SetoresCensitarios2023")
@@ -439,5 +439,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
