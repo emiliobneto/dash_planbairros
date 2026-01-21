@@ -57,7 +57,7 @@ def inject_css() -> None:
             .pb-card label, .pb-card .stMarkdown p {{ font-size: 1.9rem !important; font-weight: 800 !important; }}
             .pb-card div[role="combobox"] {{ font-size: 1.7rem !important; min-height: 58px !important; }}
             .pb-card [data-baseweb="select"] * {{ font-size: 1.7rem !important; }}
-            .pb-card .stSelectbox svg {{ transform: scale(1.7); }}
+            .pb-card .stSelectbox svg {{ transform: scale(1.0); }}
 
             .stTabs [data-baseweb="tab-list"] button[role="tab"] {{ background:transparent; border-bottom:3px solid transparent; font-weight:700; font-size: 1.1rem; }}
             .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {{ border-bottom:3px solid var(--pb-teal) !important; color:var(--pb-navy) !important; }}
@@ -439,3 +439,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
