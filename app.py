@@ -11,16 +11,19 @@ import re
 import pandas as pd
 import streamlit as st
 
-# Geo libs (o mapa exige estas libs)
+# Geo libs
 try:
     import geopandas as gpd  # type: ignore
-    from shapely import set_precision  # type: ignore
     from shapely.geometry import box  # type: ignore
     import folium  # type: ignore
-    from folium import Element  # type: ignore
+    try:
+        # folium 0.16 usa branca.element.Element
+        from branca.element import Element  # type: ignore
+    except Exception:
+        from folium import Element  # type: ignore
     from streamlit_folium import st_folium  # type: ignore
 except Exception:
-    gpd = None; set_precision = None; folium = None; Element = None; st_folium = None
+    gpd = None; box = None; folium = None; Element = None; st_folium = None
 
 # =============================================================================
 # Página / identidade visual
@@ -35,20 +38,18 @@ PB_COLORS = {
     "teal":    "#6FA097",
     "navy":    "#14407D",
 }
-# Gradiente contínuo (sem azul/verde), usado para as variáveis numéricas
-PB_GRADIENT = ["#F4DD63", "#D58243", "#C65534"]
+
+# Paleta de ALTO CONTRASTE (sem azul/verde) para choropleth discreto (6 classes)
+NUM_PALETTE = ["#fff0d6", "#ffd36a", "#f2a93b", "#d46f1e", "#ad3c19", "#7a1e10"]
 
 def inject_css() -> None:
     st.markdown(
         f"""
         <style>
           @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
-          :root {{ --pb-navy: {PB_COLORS['navy']}; }}
-          html, body, .stApp {{
-            font-family: Roboto, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif !important;
-          }}
+          html, body, .stApp {{ font-family: Roboto, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif !important; }}
           .pb-header {{
-            background: var(--pb-navy); color:#fff; border-radius:18px;
+            background: {PB_COLORS['navy']}; color:#fff; border-radius:18px;
             padding:20px 24px; min-height:110px; display:flex; align-items:center; gap:16px;
           }}
           .pb-title {{ font-size: 2.2rem; font-weight: 700; }}
@@ -65,15 +66,13 @@ def inject_css() -> None:
 def get_logo_path() -> Optional[str]:
     for p in ["assets/logo_todos.jpg","assets/logo_paleta.jpg","logo_todos.jpg","logo_paleta.jpg",
               "/mnt/data/logo_todos.jpg","/mnt/data/logo_paleta.jpg"]:
-        if Path(p).exists():
-            return p
+        if Path(p).exists(): return p
     return None
 
 # =============================================================================
 # Caminhos / utilidades
 # =============================================================================
 REPO_ROOT = Path(__file__).resolve().parent
-
 def _resolve_dir(subdir: str) -> Path:
     for base in (REPO_ROOT, REPO_ROOT / "dash_planbairros"):
         p = base / subdir
@@ -112,35 +111,28 @@ def center_from_bounds(gdf) -> tuple[float,float]:
     minx,miny,maxx,maxy = gdf.total_bounds
     return ((miny+maxy)/2,(minx+maxx)/2)
 
-def ramp_color(value: float, vmin: float, vmax: float, colors: list[str]) -> str:
-    if value is None or math.isnan(value): return "#cccccc"
-    t = 0.0 if vmax == vmin else (value - vmin) / (vmax - vmin)
-    t = max(0.0, min(1.0, t))
-    n = len(colors) - 1
-    i = min(int(t * n), n - 1)
-    frac = (t * n) - i
-    h1, h2 = colors[i].lstrip("#"), colors[i+1].lstrip("#")
-    c1 = tuple(int(h1[k:k+2], 16) for k in (0,2,4))
-    c2 = tuple(int(h2[k:k+2], 16) for k in (0,2,4))
-    rgb = tuple(int(c1[j] + frac * (c2[j] - c1[j])) for j in range(3))
-    return "#{:02x}{:02x}{:02x}".format(*rgb)
-
 # =============================================================================
-# Leitura on-demand (cache leve) + simplificação na hora de desenhar
+# Leitura on-demand (assumindo EPSG:4326)
 # =============================================================================
 def read_gdf(path: Path, columns: Optional[list[str]] = None) -> Optional["gpd.GeoDataFrame"]:
-    if gpd is None: return None
+    if gpd is None or path is None: return None
     try:
         gdf = gpd.read_parquet(path, columns=columns) if columns else gpd.read_parquet(path)
-        if gdf.crs is None: gdf = gdf.set_crs(4326)
-        else: gdf = gdf.to_crs(4326)
-        return gdf
     except Exception:
         return None
+    # Todos já em 4326 segundo o usuário; apenas garante a definição
+    try:
+        if gdf.crs is None:
+            gdf = gdf.set_crs(4326)
+        elif int(str(gdf.crs).split(":")[-1]) != 4326:
+            gdf = gdf.to_crs(4326)
+    except Exception:
+        try: gdf = gdf.set_crs(4326)
+        except Exception: pass
+    return gdf
 
 @st.cache_data(max_entries=2, ttl=300, show_spinner=False)
 def load_limits(name: str) -> Optional["gpd.GeoDataFrame"]:
-    """Carrega limite administrativo por nome (on-demand)."""
     fn = {
         "Distritos": ["Distritos"],
         "ZonasOD2023": ["ZonasOD2023","ZonasOD"],
@@ -153,7 +145,6 @@ def load_limits(name: str) -> Optional["gpd.GeoDataFrame"]:
 
 @st.cache_data(max_entries=2, ttl=300, show_spinner=False)
 def load_setores_for(kind: str) -> Optional["gpd.GeoDataFrame"]:
-    """Carrega setores com apenas as colunas necessárias para a variável."""
     p = find_file(ADM_DIR, "SetoresCensitarios2023")
     if not p: return None
     if kind == "cluster":
@@ -168,45 +159,26 @@ def load_setores_for(kind: str) -> Optional["gpd.GeoDataFrame"]:
         cols = ["geometry","elevacao"]
     return read_gdf(p, columns=cols)
 
-def simplify_3857(gdf: "gpd.GeoDataFrame", tol_m: int = 60, precision_m: float = 1.0) -> "gpd.GeoDataFrame":
-    if gdf is None or gdf.empty or gpd is None: return gdf
-    g = gdf.to_crs(3857).copy()
-    try:
-        g["geometry"] = g.geometry.simplify(tol_m, preserve_topology=True)
-        if set_precision is not None:
-            g["geometry"] = set_precision(g.geometry, grid_size=precision_m)
-    except Exception:
-        pass
-    return g.to_crs(4326)
-
 def filter_bbox(gdf: "gpd.GeoDataFrame", b: Optional[tuple[float,float,float,float]]) -> "gpd.GeoDataFrame":
-    if gdf is None or gdf.empty or b is None: return gdf
+    if gdf is None or gdf.empty or b is None or box is None: return gdf
     try: return gdf[gdf.intersects(box(*b))]
     except Exception: return gdf
 
-def pick_tol(limite_gdf, fallback_gdf=None) -> int:
-    g = limite_gdf if (limite_gdf is not None and len(limite_gdf)>0) else fallback_gdf
-    if g is None or g.empty: return 60
-    minx,miny,maxx,maxy = g.total_bounds
-    largura_km = (maxx-minx)*111
-    return 160 if largura_km>100 else 120 if largura_km>50 else 60 if largura_km>20 else 30 if largura_km>8 else 15
-
 # =============================================================================
-# Folium (mapa e elementos visuais)
+# Folium (mapa/legendas)
 # =============================================================================
 def make_satellite_map(center=(-23.55,-46.63), zoom=11, tiles_opacity=0.55):
     if folium is None: return None
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True)
     try: folium.map.CustomPane("vectors", z_index=650).add_to(m)
     except Exception: pass
-    # Esri Imagery (sem rótulos)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri World Imagery", name="Esri Satellite", overlay=False, control=False, opacity=tiles_opacity
     ).add_to(m)
     return m
 
-def inject_tooltip_css(m, font_px: int = 48):
+def inject_tooltip_css(m, font_px: int = 64):
     if Element is None: return
     m.get_root().html.add_child(Element(f"""
     <style>
@@ -216,7 +188,7 @@ def inject_tooltip_css(m, font_px: int = 48):
       .leaflet-tooltip.pb-big-tooltip {{
         background:#fff !important; border:2px solid #222 !important; border-radius:10px !important;
         padding:10px 14px !important; white-space:nowrap !important; pointer-events:none !important;
-        box-shadow:0 2px 6px rgba(0,0,0,.2) !important; z-index:200000 !important;
+        box-shadow:0 2px 6px rgba(0,0,0,.2) !important; z-index:999999 !important;
       }}
     </style>"""))
 
@@ -233,14 +205,14 @@ def inject_label_scaler(m, min_px=16, max_px=26, min_zoom=9, max_zoom=18):
       }})();
     </script>"""))
 
-def add_outline(m, gdf, layer_name: str, tol_m: int):
+def add_outline(m, gdf, layer_name: str, weight=1.1):
     if gdf is None or gdf.empty or folium is None: return
-    line = simplify_3857(gdf[["geometry"]], tol_m=max(30,tol_m))
+    line = gdf[["geometry"]].copy()
     line["geometry"] = line.geometry.boundary
     folium.GeoJson(
-        data=line.to_json(), name=f"{layer_name} (contorno)", pane="vectors",
-        style_function=lambda f: {"fillOpacity":0, "color":"#000000", "weight":1.1},
-        smooth_factor=1.2,
+        data=line.__geo_interface__, name=f"{layer_name} (contorno)", pane="vectors",
+        style_function=lambda f: {"fillOpacity":0, "color":"#000000", "weight":weight},
+        smooth_factor=0.8,
     ).add_to(m)
 
 def add_centroids(m, gdf):
@@ -260,20 +232,20 @@ def add_centroids(m, gdf):
             z_index_offset=1000,
         ).add_to(m)
 
-def add_gradient_legend(m, title: str, vmin: float, vmax: float, colors: list[str]):
+def add_gradient_legend(m, title: str, ticks: list[float], colors: list[str]):
     if Element is None: return
+    # monta gradiente (de baixo p/ cima) e rótulos de quantis
     gradient_css = f"background: linear-gradient(to top, {', '.join(colors)});"
+    labels = "".join(f"<div>{v:,.0f}</div>" for v in [ticks[-1], ticks[len(ticks)//2], ticks[0]])
     html = f"""
-    <div style="position:absolute; left:16px; bottom:24px; z-index:9999; background:rgba(255,255,255,.95);
+    <div style="position:absolute; left:16px; bottom:24px; z-index:999999; background:rgba(255,255,255,.97);
                 padding:10px 12px; border-radius:10px; box-shadow:0 2px 6px rgba(0,0,0,.25);
                 font:500 12px Roboto, sans-serif;">
       <div style="font-weight:700; margin-bottom:6px">{title}</div>
       <div style="display:flex; gap:10px; align-items:stretch;">
-        <div style="width:18px; height:120px; {gradient_css}; border-radius:4px;"></div>
+        <div style="width:18px; height:120px; {gradient_css}; border-radius:4px; border:1px solid #333;"></div>
         <div style="display:flex; flex-direction:column; justify-content:space-between; height:120px;">
-          <div>{vmax:,.0f}</div>
-          <div>{(vmin+vmax)/2:,.0f}</div>
-          <div>{vmin:,.0f}</div>
+          {labels}
         </div>
       </div>
     </div>
@@ -285,12 +257,12 @@ def add_categorical_legend(m, title: str, items: list[tuple[str, str]], topright
     pos = "right: 16px; top: 24px;" if topright else "left: 16px; bottom: 24px;"
     rows = "".join(
         f'<div style="display:flex;align-items:center;gap:8px;margin:2px 0">'
-        f'<span style="width:16px;height:16px;border-radius:3px;background:{color};display:inline-block"></span>'
+        f'<span style="width:16px;height:16px;border-radius:3px;background:{color};display:inline-block;border:1px solid #333"></span>'
         f'<span>{label}</span></div>'
         for label, color in items
     )
     html = f"""
-    <div style="position:absolute; {pos} z-index:9999; background:rgba(255,255,255,.95);
+    <div style="position:absolute; {pos} z-index:999999; background:rgba(255,255,255,.97);
                 padding:10px 12px; border-radius:10px; box-shadow:0 2px 6px rgba(0,0,0,.25);
                 font:500 12px Roboto, sans-serif;">
       <div style="font-weight:700; margin-bottom:6px">{title}</div>
@@ -302,61 +274,75 @@ def add_categorical_legend(m, title: str, items: list[tuple[str, str]], topright
 # =============================================================================
 # Pintura das camadas
 # =============================================================================
-def draw_numeric(m, setores: "gpd.GeoDataFrame", value_col: str, label: str, colors: list[str] = PB_GRADIENT):
+def quantile_bins(s: pd.Series, k: int = 6) -> list[float]:
+    qs = s.quantile([i/(k-1) for i in range(k)]).tolist()
+    # Garantir monotonia estrita (evita bins iguais para dados com pouca variação)
+    eps = 1e-9
+    for i in range(1, len(qs)):
+        if qs[i] <= qs[i-1]:
+            qs[i] = qs[i-1] + eps
+    return qs
+
+def draw_numeric(m, setores: "gpd.GeoDataFrame", value_col: str, label: str, colors: list[str] = NUM_PALETTE):
     s = pd.to_numeric(setores[value_col], errors="coerce")
-    vmin, vmax = float(s.min()), float(s.max())
+    s = s.replace([float("inf"), -float("inf")], pd.NA).dropna()
+    if s.empty: return
+    ticks = quantile_bins(s, k=len(colors))
+
+    def color_for(v: float) -> str:
+        # encontra classe por quantil
+        if v is None or pd.isna(v): return "#cccccc"
+        for i in range(1, len(ticks)):
+            if v <= ticks[i]: return colors[i-1]
+        return colors[-1]
 
     def style_fn(feat):
         v = feat["properties"].get(value_col)
         try: v = float(v)
         except Exception: v = float("nan")
-        return {"fillOpacity": 0.75, "weight": 0.0, "color": "#00000000",
-                "fillColor": ramp_color(v, vmin, vmax, colors)}
+        return {"fillOpacity": 0.78, "weight": 0.0, "color": "#00000000", "fillColor": color_for(v)}
 
     folium.GeoJson(
-        setores.to_json(),
+        setores.__geo_interface__,
         name=label,
         pane="vectors",
         style_function=style_fn,
-        smooth_factor=1.2,
+        smooth_factor=0.8,
         tooltip=folium.features.GeoJsonTooltip(
             fields=[value_col], aliases=[label + ": "], sticky=True, labels=False, class_name="pb-big-tooltip"
         ),
     ).add_to(m)
-    add_gradient_legend(m, label, vmin, vmax, colors)
+    add_gradient_legend(m, label, ticks, colors)
 
 def draw_cluster(m, setores: "gpd.GeoDataFrame", cluster_col: str):
-    color_map = {
-        0: "#bf7db2",
-        1: "#f7bd6a",
-        2: "#cf651f",
-        3: "#ede4e6",
-        4: "#793393",
-    }
+    # aceita 0..4 ou 1..5
+    vals = pd.to_numeric(setores[cluster_col], errors="coerce")
+    offset = 1 if vals.dropna().between(1,5).all() else 0
+
+    color_map = {0:"#bf7db2",1:"#f7bd6a",2:"#cf651f",3:"#ede4e6",4:"#793393"}
     label_map = {
-        0: "1 - Periférico com predominância residencial de alta densidade construtiva",
-        1: "2 - Uso misto de média densidade construtiva",
-        2: "3 - Periférico com predominância residencial de média densidade construtiva",
-        3: "4 - Verticalizado de uso-misto",
-        4: "5 - Predominância de uso comercial e serviços",
+        0:"1 - Periférico com predominância residencial de alta densidade construtiva",
+        1:"2 - Uso misto de média densidade construtiva",
+        2:"3 - Periférico com predominância residencial de média densidade construtiva",
+        3:"4 - Verticalizado de uso-misto",
+        4:"5 - Predominância de uso comercial e serviços",
     }
     default_color = "#c8c8c8"
 
     def style_fn(feat):
         v = feat["properties"].get(cluster_col)
-        try: vi = int(v)
+        try: vi = int(v) - offset
         except Exception: vi = -1
         return {"fillOpacity": 0.75, "weight": 0.0, "color": "#00000000",
                 "fillColor": color_map.get(vi, default_color)}
 
     folium.GeoJson(
-        setores.to_json(),
+        setores.__geo_interface__,
         name="Cluster (perfil urbano)",
         pane="vectors",
         style_function=style_fn,
-        smooth_factor=1.2,
+        smooth_factor=0.8,
     ).add_to(m)
-
     items = [(label_map[k], color_map[k]) for k in sorted(color_map)]
     items.append(("Outros", default_color))
     add_categorical_legend(m, "Cluster (perfil urbano)", items)
@@ -384,13 +370,12 @@ def draw_isoc_area(m, iso: "gpd.GeoDataFrame"):
                 "fillColor": lut.get(vi, ("Outros", "#c8c8c8"))[1]}
 
     folium.GeoJson(
-        iso.to_json(),
+        iso.__geo_interface__,
         name="Área de influência de bairro",
         pane="vectors",
         style_function=style_fn,
-        smooth_factor=1.2,
+        smooth_factor=0.8,
     ).add_to(m)
-
     legend_items = [(f"{k} - {v[0]}", v[1]) for k, v in lut.items()]
     add_categorical_legend(m, "Área de influência de bairro (nova_class)", legend_items)
 
@@ -410,25 +395,15 @@ def left_controls() -> Dict[str, Any]:
             "Cluster (perfil urbano)",
             "Área de influência de bairro",
         ],
-        index=0,
-        key="pb_var",
-        help="Com '— Nenhuma —', nada é carregado.",
+        index=0, key="pb_var",
     )
-
     st.markdown("### Configurações")
     lim = st.selectbox(
         "Limites Administrativos",
         ["— Nenhum —", "Distritos", "ZonasOD2023", "Subprefeitura", "Isócronas"],
-        index=0,
-        key="pb_limite",
-        help="Exibe contorno do limite selecionado.",
+        index=0, key="pb_limite",
     )
-    labels_on = st.checkbox(
-        "Rótulos permanentes (dinâmicos por zoom)",
-        value=False,
-        key="pb_labels_on",
-        help="Rotula centróides com fonte proporcional ao nível de zoom.",
-    )
+    labels_on = st.checkbox("Rótulos permanentes (dinâmicos por zoom)", value=False, key="pb_labels_on")
     return {"variavel": var, "limite": lim, "labels_on": labels_on}
 
 # =============================================================================
@@ -455,7 +430,6 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
-    # Abas (conteúdo principal na Aba 1)
     a1, a2, a3, a4 = st.tabs(["Aba 1", "Aba 2", "Aba 3", "Aba 4"])
     with a1:
         left, map_col = st.columns([1, 5], gap="small")
@@ -470,50 +444,41 @@ def main() -> None:
                 st.error("Instale `geopandas`, `folium` e `streamlit-folium` para exibir o mapa.")
                 return
 
-            # 1) Carrega limite somente se selecionado (on-demand)
+            # 1) Limite (lazy)
             lim_gdf = None
             if ui["limite"] != "— Nenhum —":
                 with st.spinner(f"Carregando limite: {ui['limite']}"):
                     lim_gdf = load_limits(ui["limite"])
 
-            # 2) Centro do mapa
+            # 2) Centro
             center = (-23.55, -46.63)
             if lim_gdf is not None and not lim_gdf.empty:
                 center = center_from_bounds(lim_gdf)
 
             fmap = make_satellite_map(center=center, zoom=11, tiles_opacity=0.55)
-            inject_tooltip_css(fmap, font_px=48)       # tooltip “grande”
-            inject_label_scaler(fmap, 16, 26, 9, 18)   # rótulos fixos por zoom
+            inject_tooltip_css(fmap, font_px=64)   # tooltips legíveis
+            inject_label_scaler(fmap, 16, 26, 9, 18)
 
-            # 3) Desenha limite (contorno) + regras de isócronas (área de transição)
-            tol = pick_tol(lim_gdf, None)
+            # 3) Contorno + regra Isócronas (área de transição)
             if lim_gdf is not None and not lim_gdf.empty:
-                add_outline(fmap, lim_gdf, ui["limite"], tol_m=tol)
+                add_outline(fmap, lim_gdf, ui["limite"], weight=1.1)
                 if ui["labels_on"]:
                     add_centroids(fmap, lim_gdf)
-
-                # Regra 5 — isócronas como “área de transição” quando limite = Isócronas
                 if ui["limite"].startswith("Isócron"):
                     cls = find_col(lim_gdf.columns, "nova_class")
                     if cls:
-                        trans = lim_gdf[lim_gdf[cls].isin([1, 3, 4, 6])][["geometry"]]
+                        trans = lim_gdf[lim_gdf[cls].isin([1,3,4,6])][["geometry"]]
                         if not trans.empty:
-                            trans = simplify_3857(trans, tol_m=max(30, tol))
                             folium.GeoJson(
-                                data=trans.to_json(), name="Área de transição", pane="vectors",
+                                data=trans.__geo_interface__, name="Área de transição", pane="vectors",
                                 style_function=lambda f: {"fillOpacity": 0.2, "color": "#836e60", "weight": 0.8},
-                                smooth_factor=1.2,
+                                smooth_factor=0.8,
                             ).add_to(fmap)
                             add_categorical_legend(
-                                fmap,
-                                "Limites — Isócronas",
-                                [("Área de transição (1,3,4,6)", "#836e60")],
-                                topright=True,
+                                fmap, "Limites — Isócronas", [("Área de transição (1,3,4,6)", "#836e60")], topright=True
                             )
-            else:
-                tol = 60  # fallback para simplificação das variáveis
 
-            # 4) Variável (carrega e desenha somente a escolhida)
+            # 4) Variável (lazy)
             var = ui["variavel"]
             var_gdf = None
             if var != "— Nenhuma —":
@@ -531,18 +496,16 @@ def main() -> None:
                     with st.spinner(f"Carregando setores ({var})…"):
                         var_gdf = load_setores_for(kind)
 
-                # filtra por bbox do limite (menos dados em tela = mais rápido)
                 if var_gdf is not None and lim_gdf is not None and not lim_gdf.empty:
                     var_gdf = filter_bbox(var_gdf, bounds_tuple(lim_gdf))
 
-            # 5) Desenha variável selecionada
+            # 5) Desenho (sem linhas para setores)
             if var_gdf is not None and not var_gdf.empty:
-                gsim = simplify_3857(var_gdf, tol_m=max(15, tol), precision_m=1.0)
                 if var == "Área de influência de bairro":
-                    draw_isoc_area(fmap, gsim)
+                    draw_isoc_area(fmap, var_gdf)
                 elif var == "Cluster (perfil urbano)":
-                    ccol = find_col(gsim.columns, "cluster", "cluster_label", "classe", "label") or "cluster"
-                    draw_cluster(fmap, gsim, ccol)
+                    ccol = find_col(var_gdf.columns, "cluster", "cluster_label", "classe", "label") or "cluster"
+                    draw_cluster(fmap, var_gdf, ccol)
                 else:
                     col = {
                         "População (Pessoa/ha)": "populacao",
@@ -550,17 +513,13 @@ def main() -> None:
                         "Variação de elevação média": "diferenca_elevacao",
                         "Elevação média": "elevacao",
                     }[var]
-                    col = find_col(gsim.columns, col) or col
-                    draw_numeric(fmap, gsim, col, var, PB_GRADIENT)
+                    col = find_col(var_gdf.columns, col) or col
+                    draw_numeric(fmap, var_gdf, col, var, NUM_PALETTE)
 
-            # 6) Render do mapa
             st_folium(fmap, use_container_width=True, height=850)
-
-            # descarrega referências locais (deixa o GC trabalhar)
-            del lim_gdf, var_gdf, gsim
+            del lim_gdf, var_gdf
             gc.collect()
 
-    # Demais abas (placeholder)
     with a2: st.info("Conteúdo a definir.")
     with a3: st.info("Conteúdo a definir.")
     with a4: st.info("Conteúdo a definir.")
