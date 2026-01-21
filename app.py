@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from unicodedata import normalize as _ud_norm
+from decimal import Decimal
 import gc
 import re
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components  # entrega o HTML do mapa (evita reruns)
 
-# --- Geo libs (o app exibe o fundo mesmo sem elas; overlays são opcionais) ---
+# --- Geo libs (opcionais) ---
 try:
     import geopandas as gpd  # type: ignore
     from shapely.geometry import box  # type: ignore
@@ -19,14 +21,18 @@ try:
         from branca.element import Element  # type: ignore
     except Exception:
         from folium import Element  # type: ignore
-    from streamlit_folium import st_folium  # type: ignore
 except Exception:
-    gpd = None; box = None; folium = None; Element = None; st_folium = None
+    gpd = None; box = None; folium = None; Element = None
 
 # =============================================================================
 # Página / identidade visual
 # =============================================================================
-st.set_page_config(page_title="PlanBairros", page_icon="🏙️", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(
+    page_title="PlanBairros",
+    page_icon="🏙️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 PB_COLORS = {
     "amarelo": "#F4DD63",
@@ -37,7 +43,7 @@ PB_COLORS = {
     "navy":    "#14407D",
 }
 
-# Paleta de ALTO CONTRASTE (sem azul/verde) para choropleth discreto
+# Paleta numérica (alto contraste, sem azul/verde)
 NUM_PALETTE = ["#fff0d6", "#ffd36a", "#f2a740", "#d46f1e", "#ad3c19", "#7a1e10"]
 
 def inject_css() -> None:
@@ -115,12 +121,11 @@ def filter_bbox(gdf, b):
     except Exception: return gdf
 
 # =============================================================================
-# Leitura robusta (GeoParquet) — garante CRS=4326 e reconstrói geometria se precisar
+# Leitura robusta (GeoParquet) — CRS=4326 + fallback via WKB/WKT
 # =============================================================================
-@st.cache_data(show_spinner=False, ttl=300, max_entries=4)
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=6)
 def read_gdf_from_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
     if gpd is None or path is None: return None
-    # 1) tentativa direta
     try:
         gdf = gpd.read_parquet(path)
         if gdf.crs is None: gdf = gdf.set_crs(4326)
@@ -128,7 +133,6 @@ def read_gdf_from_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
         return gdf
     except Exception:
         pass
-    # 2) fallback via pandas + WKB/WKT
     try:
         pdf = pd.read_parquet(path)
     except Exception:
@@ -147,10 +151,9 @@ def read_gdf_from_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
     except Exception:
         return None
 
-# --- loaders on-demand (sem filtrar colunas na leitura) ---
-@st.cache_data(show_spinner=False, ttl=300, max_entries=4)
+# loaders on-demand
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=6)
 def load_limits(name: str) -> Optional["gpd.GeoDataFrame"]:
-    # NUNCA inclui Setores aqui — setores só em Variáveis
     fn = {
         "Distritos": ["Distritos"],
         "ZonasOD2023": ["ZonasOD2023","ZonasOD"],
@@ -160,21 +163,63 @@ def load_limits(name: str) -> Optional["gpd.GeoDataFrame"]:
     p = find_file(ADM_DIR, *fn)
     return read_gdf_from_parquet(p) if p else None
 
-@st.cache_data(show_spinner=False, ttl=300, max_entries=4)
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=6)
 def load_setores() -> Optional["gpd.GeoDataFrame"]:
     p = find_file(ADM_DIR, "SetoresCensitarios2023")
     return read_gdf_from_parquet(p) if p else None
 
 # =============================================================================
-# Folium (mapa/legendas)
+# Sanitização universal para evitar `Decimal`/NaN no GeoJSON
 # =============================================================================
-def make_satellite_map(center=(-23.55,-46.63), zoom=11, tiles_opacity=0.55):
+def sanitize_df_for_geojson(df: pd.DataFrame, int_cols: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Mantém somente as colunas passadas no df (já deve estar filtrado),
+    converte Decimals para float/int, força numéricos e troca NaN/NA por None.
+    """
+    int_cols = int_cols or []
+    out = df.copy()
+
+    for c in out.columns:
+        if c == "geometry":
+            continue
+
+        # Converte Decimal -> float (ou int, se solicitado)
+        out[c] = out[c].apply(lambda x: (int(x) if isinstance(x, Decimal) else float(x))
+                              if isinstance(x, Decimal) else x)
+
+        if c in int_cols:
+            out[c] = pd.to_numeric(out[c], errors="coerce").round(0).astype("Int64")
+        else:
+            # força float para tudo que for numérico (evita objects mistos)
+            if pd.api.types.is_numeric_dtype(out[c]):
+                out[c] = pd.to_numeric(out[c], errors="coerce").astype(float)
+            else:
+                # se ainda houver Decimal ou algo bizarro
+                def _coerce(v):
+                    if isinstance(v, Decimal):
+                        return float(v)
+                    return v
+                out[c] = out[c].map(_coerce)
+
+    # substitui NaN/NA por None (null no JSON)
+    out = out.where(pd.notnull(out), None)
+    return out
+
+def simplify_safe(gdf):
+    try:
+        return gdf.set_geometry(gdf.geometry.simplify(0.0004, preserve_topology=True))
+    except Exception:
+        return gdf
+
+# =============================================================================
+# Folium (mapa, tooltip/legendas) – apenas colunas necessárias
+# =============================================================================
+def make_base_map(center=(-23.55,-46.63), zoom=11, tiles_opacity=0.55):
     if folium is None:
         return None
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True)
     try: folium.map.CustomPane("vectors", z_index=650).add_to(m)
     except Exception: pass
-    # Esri Imagery (estável). Se preferir Google, troque pela URL dos tiles do Google.
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri World Imagery", overlay=False, control=False, opacity=tiles_opacity
@@ -213,10 +258,11 @@ def add_outline(m, gdf, layer_name: str, weight=1.1):
     try:
         line = gdf[["geometry"]].copy()
         line["geometry"] = line.geometry.boundary
+        line = simplify_safe(line)
+        # só geometry (sem propriedades -> sem Decimals)
         folium.GeoJson(
             data=line.to_json(), name=f"{layer_name} (contorno)", pane="vectors",
-            style_function=lambda f: {"fillOpacity":0, "color":"#000000", "weight":weight},
-            smooth_factor=0.8,
+            style_function=lambda f: {"fillOpacity":0, "color":"#000000", "weight":weight}, smooth_factor=0.8,
         ).add_to(m)
     except Exception as exc:
         st.warning(f"Falha ao desenhar contorno de {layer_name}: {exc}")
@@ -243,13 +289,13 @@ def add_centroids(m, gdf):
         except Exception:
             continue
 
-def add_gradient_legend(m, title: str, ticks: list[float], colors: list[str]):
+def add_gradient_legend(m, title: str, ticks: List[float], colors: List[str]):
     if Element is None: return
     gradient_css = f"background: linear-gradient(to top, {', '.join(colors)});"
     html = f"""
     <div style="position:absolute; left:16px; bottom:24px; z-index:999999; background:rgba(255,255,255,.97);
                 padding:10px 12px; border-radius:10px; box-shadow:0 2px 6px rgba(0,0,0,.25);
-                font:500 12px Roboto, sans-serif; border: 1px solid #333;">
+                font:500 12px Roboto, sans-serif; border:1px solid #333;">
       <div style="font-weight:700; margin-bottom:6px">{title}</div>
       <div style="display:flex; gap:10px; align-items:stretch;">
         <div style="width:18px; height:120px; {gradient_css}; border-radius:4px; border:1px solid #333;"></div>
@@ -263,7 +309,7 @@ def add_gradient_legend(m, title: str, ticks: list[float], colors: list[str]):
     """
     m.get_root().html.add_child(Element(html))
 
-def add_categorical_legend(m, title: str, items: list[tuple[str, str]], topright: bool = False):
+def add_categorical_legend(m, title: str, items: List[tuple[str, str]], topright: bool = False):
     if Element is None: return
     pos = "right: 16px; top: 24px;" if topright else "left: 16px; bottom: 24px;"
     rows = "".join(
@@ -283,9 +329,9 @@ def add_categorical_legend(m, title: str, items: list[tuple[str, str]], topright
     m.get_root().html.add_child(Element(html))
 
 # =============================================================================
-# Pintura das camadas (sem linhas nos setores)
+# Variáveis – apenas colunas necessárias + sanitização
 # =============================================================================
-def quantile_bins(s: pd.Series, k: int = 6) -> list[float]:
+def quantile_bins(s: pd.Series, k: int = 6) -> List[float]:
     s = pd.to_numeric(s, errors="coerce").replace([float("inf"), -float("inf")], pd.NA).dropna()
     if s.empty: return [0,1,2,3,4,5]
     qs = s.quantile([i/(k-1) for i in range(k)]).tolist()
@@ -296,19 +342,28 @@ def quantile_bins(s: pd.Series, k: int = 6) -> list[float]:
 
 def draw_numeric(m, setores, value_col: str, label: str, colors=NUM_PALETTE):
     try:
-        ticks = quantile_bins(setores[value_col], k=len(colors))
+        df = setores[[value_col, "geometry"]].copy()
+        # sanitiza (converte Decimal -> float; NaN->None)
+        df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+        df = sanitize_df_for_geojson(df)
+        df = simplify_safe(df)
+
+        ticks = quantile_bins(df[value_col], k=len(colors))
+
         def color_for(v):
             if v is None or pd.isna(v): return "#cccccc"
             for i in range(1, len(ticks)):
                 if float(v) <= ticks[i]: return colors[i-1]
             return colors[-1]
+
         def style_fn(feat):
             v = feat["properties"].get(value_col)
             try: v = float(v)
             except Exception: v = float("nan")
             return {"fillOpacity":0.78, "weight":0.0, "color":"#00000000", "fillColor": color_for(v)}
+
         folium.GeoJson(
-            data=setores.to_json(),
+            data=df.to_json(),  # só value_col + geometry
             name=label, pane="vectors", style_function=style_fn, smooth_factor=0.8,
             tooltip=folium.features.GeoJsonTooltip(
                 fields=[value_col], aliases=[label + ": "], sticky=True, labels=False, class_name="pb-big-tooltip"
@@ -320,9 +375,16 @@ def draw_numeric(m, setores, value_col: str, label: str, colors=NUM_PALETTE):
 
 def draw_cluster(m, setores, cluster_col: str):
     try:
-        vals = pd.to_numeric(setores[cluster_col], errors="coerce")
-        offset = 1 if vals.dropna().between(1,5).all() else 0
-        color_map = {0:"#bf7db2",1:"#f7bd6a",2:"#cf651f",3:"#ede4e6",4:"#793393"}
+        df = setores[[cluster_col, "geometry"]].copy()
+        # força inteiro + sanitiza (evita Decimal)
+        df[cluster_col] = pd.to_numeric(df[cluster_col], errors="coerce").round(0).astype("Int64")
+        df = sanitize_df_for_geojson(df, int_cols=[cluster_col])
+        df = simplify_safe(df)
+
+        vals = df[cluster_col].dropna().astype(int)
+        offset = 1 if (not vals.empty and vals.between(1, 5).all()) else 0
+
+        color_map = {0:"#bf7db2", 1:"#f7bd6a", 2:"#cf651f", 3:"#ede4e6", 4:"#793393"}
         label_map = {
             0:"1 - Periférico com predominância residencial de alta densidade construtiva",
             1:"2 - Uso misto de média densidade construtiva",
@@ -331,16 +393,19 @@ def draw_cluster(m, setores, cluster_col: str):
             4:"5 - Predominância de uso comercial e serviços",
         }
         default_color = "#c8c8c8"
+
         def style_fn(feat):
             v = feat["properties"].get(cluster_col)
             try: vi = int(v) - offset
             except Exception: vi = -1
             return {"fillOpacity":0.75, "weight":0.0, "color":"#00000000",
                     "fillColor": color_map.get(vi, default_color)}
+
         folium.GeoJson(
-            data=setores.to_json(),
+            data=df.to_json(),  # só cluster + geometry
             name="Cluster (perfil urbano)", pane="vectors", style_function=style_fn, smooth_factor=0.8,
         ).add_to(m)
+
         items = [(label_map[k], color_map[k]) for k in sorted(color_map)]
         items.append(("Outros", default_color))
         add_categorical_legend(m, "Cluster (perfil urbano)", items)
@@ -349,6 +414,12 @@ def draw_cluster(m, setores, cluster_col: str):
 
 def draw_isoc_area(m, iso):
     try:
+        col = find_col(iso.columns, "nova_class") or "nova_class"
+        df = iso[[col, "geometry"]].copy()
+        df[col] = pd.to_numeric(df[col], errors="coerce").round(0).astype("Int64")
+        df = sanitize_df_for_geojson(df, int_cols=[col])
+        df = simplify_safe(df)
+
         lut = {
             0: ("Predominância uso misto", "#542788"),
             1: ("Zona de transição local", "#f7f7f7"),
@@ -361,17 +432,19 @@ def draw_isoc_area(m, iso):
             8: ("Alta densidade residencial", "#e08214"),
             9: ("Central verticalizado", "#fee0b6"),
         }
-        col = find_col(iso.columns, "nova_class") or "nova_class"
+
         def style_fn(feat):
             v = feat["properties"].get(col)
             try: vi = int(v)
             except Exception: vi = -1
             return {"fillOpacity":0.65, "weight":0.0, "color":"#00000000",
                     "fillColor": lut.get(vi, ("Outros", "#c8c8c8"))[1]}
+
         folium.GeoJson(
-            data=iso.to_json(), name="Área de influência de bairro", pane="vectors",
+            data=df.to_json(), name="Área de influência de bairro", pane="vectors",
             style_function=style_fn, smooth_factor=0.8,
         ).add_to(m)
+
         legend_items = [(f"{k} - {v[0]}", v[1]) for k, v in lut.items()]
         add_categorical_legend(m, "Área de influência de bairro (nova_class)", legend_items)
     except Exception as exc:
@@ -437,37 +510,48 @@ def main() -> None:
             ui = left_controls()
             st.markdown("</div>", unsafe_allow_html=True)
 
-        with map_col:
-            if folium is None or st_folium is None:
-                st.error("Instale `folium` e `streamlit-folium` para exibir o mapa.")
-                return
+        ui_sig = f"{ui['variavel']}|{ui['limite']}|{int(ui['labels_on'])}"
+        need_rebuild = st.session_state.get("_ui_sig") != ui_sig
 
-            # 1) Limite (on-demand)
+        if need_rebuild:
+            # 1) Carrega apenas o necessário (on-demand)
             lim_gdf = None
             if ui["limite"] != "— Nenhum —":
                 with st.spinner(f"Carregando limite: {ui['limite']}"):
                     lim_gdf = load_limits(ui["limite"])
 
-            # 2) Centro do mapa a partir do limite (se houver)
+            var_gdf = None
+            if ui["variavel"] != "— Nenhuma —":
+                if ui["variavel"] == "Área de influência de bairro":
+                    with st.spinner("Carregando isócronas…"):
+                        var_gdf = load_limits("Isócronas")
+                else:
+                    with st.spinner("Carregando setores…"):
+                        var_gdf = load_setores()
+
+            # 2) Centro
             center = (-23.55, -46.63)
             if lim_gdf is not None and not lim_gdf.empty:
                 center = center_from_bounds(lim_gdf)
 
-            fmap = make_satellite_map(center=center, zoom=11, tiles_opacity=0.55)
+            # 3) Folium base
+            fmap = make_base_map(center=center, zoom=11, tiles_opacity=0.55)
             inject_tooltip_css(fmap, font_px=64)
             inject_label_scaler(fmap, 16, 26, 9, 18)
 
-            # 3) Contorno + regra especial (Isócronas -> área de transição)
+            # 4) Limites (contorno) + regra especial de transição (isócronas 1/3/4/6)
             if lim_gdf is not None and not lim_gdf.empty:
                 add_outline(fmap, lim_gdf, ui["limite"], weight=1.1)
                 if ui["labels_on"]:
                     add_centroids(fmap, lim_gdf)
+
                 if ui["limite"].startswith("Isócron"):
                     try:
                         cls = find_col(lim_gdf.columns, "nova_class")
                         if cls:
                             trans = lim_gdf[lim_gdf[cls].isin([1,3,4,6])][["geometry"]]
                             if not trans.empty:
+                                trans = simplify_safe(trans)
                                 folium.GeoJson(
                                     data=trans.to_json(), name="Área de transição", pane="vectors",
                                     style_function=lambda f: {"fillOpacity": 0.2, "color": "#836e60", "weight": 0.8},
@@ -479,23 +563,14 @@ def main() -> None:
                     except Exception as exc:
                         st.warning(f"Falha ao desenhar 'Área de transição': {exc}")
 
-            # 4) Variável (on-demand)
-            var = ui["variavel"]
-            var_gdf = None
-            if var != "— Nenhuma —":
-                if var == "Área de influência de bairro":
-                    with st.spinner("Carregando isócronas…"):
-                        var_gdf = load_limits("Isócronas")
-                else:
-                    with st.spinner("Carregando setores…"):
-                        var_gdf = load_setores()
-                # 4.1 filtro por bbox do limite (se houver) para acelerar
-                if var_gdf is not None and lim_gdf is not None and not lim_gdf.empty:
-                    var_gdf = filter_bbox(var_gdf, bounds_tuple(lim_gdf))
-
-            # 5) Desenho das variáveis (sem linhas nos setores)
+            # 5) Variável
             if var_gdf is not None and not var_gdf.empty:
                 try:
+                    # recorte bbox para reduzir GeoJSON
+                    if lim_gdf is not None and not lim_gdf.empty:
+                        var_gdf = filter_bbox(var_gdf, bounds_tuple(lim_gdf))
+
+                    var = ui["variavel"]
                     if var == "Área de influência de bairro":
                         draw_isoc_area(fmap, var_gdf)
                     elif var == "Cluster (perfil urbano)":
@@ -511,14 +586,17 @@ def main() -> None:
                         col = find_col(var_gdf.columns, col_map[var]) or col_map[var]
                         draw_numeric(fmap, var_gdf, col, var, NUM_PALETTE)
                 except Exception as exc:
-                    st.warning(f"Falha ao desenhar variável '{var}': {exc}")
+                    st.warning(f"Falha ao desenhar variável '{ui['variavel']}': {exc}")
 
-            # 6) Render final
-            st_folium(fmap, use_container_width=True, height=850)
+            # 6) HTML estático no estado (interações não rerodam o script)
+            html = fmap.get_root().render()
+            st.session_state["_ui_sig"] = ui_sig
+            st.session_state["_map_html"] = html
 
-            # 7) “descarrega” referências (o cache persiste; isso só libera RAM extra)
-            del lim_gdf, var_gdf
+            del lim_gdf, var_gdf, fmap
             gc.collect()
+
+        components.html(st.session_state.get("_map_html", ""), height=850, scrolling=False)
 
     with a2: st.info("Conteúdo a definir.")
     with a3: st.info("Conteúdo a definir.")
