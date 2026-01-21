@@ -8,7 +8,7 @@ import math
 import re
 
 import pandas as pd
-import plotly.express as px  # (mantido caso queira um gráfico depois)
+import plotly.express as px  # opcional (gráficos futuros)
 import streamlit as st
 
 # Geo libs (opcionais – o app funciona sem, só não mostra o mapa)
@@ -163,6 +163,13 @@ def read_gdf_from_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
 # nomes de arquivos
 SETORES_FILE = _first_parquet_matching(ADM_DIR, ["SetoresCensitarios2023"])
 ISO_FILE = _first_parquet_matching(ADM_DIR, ["isocronas", "isócronas"])
+# Limites administrativos (sem setores)
+ADM_FILES = {
+    "Distritos": _first_parquet_matching(ADM_DIR, ["Distritos"]),
+    "ZonasOD2023": _first_parquet_matching(ADM_DIR, ["ZonasOD2023", "ZonasOD"]),
+    "Subprefeitura": _first_parquet_matching(ADM_DIR, ["subprefeitura", "Subprefeitura", "Subprefeituras"]),
+    "Isócronas": ISO_FILE,
+}
 
 # caches
 @st.cache_data(show_spinner=False)
@@ -178,13 +185,7 @@ def load_isocronas() -> Optional["gpd.GeoDataFrame"]:
 @st.cache_data(show_spinner=False)
 def load_admin_layer(layer_name: str) -> Optional["gpd.GeoDataFrame"]:
     """Limites administrativos (sem Setores)."""
-    filename = {
-        "Distritos": "Distritos",
-        "ZonasOD2023": "ZonasOD2023",
-        "Subprefeitura": "subprefeitura",
-        "Isócronas": "isocronas",
-    }.get(layer_name, layer_name)
-    path = _first_parquet_matching(ADM_DIR, [filename])
+    path = ADM_FILES.get(layer_name)
     return read_gdf_from_parquet(path) if path else None
 
 
@@ -195,9 +196,7 @@ def find_col(df_cols, *cands) -> Optional[str]:
     """Localiza coluna por lista de candidatos (case-insensitive)."""
     low = {c.lower(): c for c in df_cols}
     for c in cands:
-        if c is None:
-            continue
-        if c.lower() in low:
+        if c and c.lower() in low:
             return low[c.lower()]
     # tenta por equivalência com underscores/tildes
     norm = {re.sub(r"[^a-z0-9]", "", k.lower()): v for k, v in low.items()}
@@ -267,6 +266,7 @@ def left_controls() -> Dict[str, Any]:
 SIMPLIFY_TOL = 0.0005  # ~55m
 
 def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
+    """Base com fallback (Esri → OSM) para evitar tela branca se o servidor cair."""
     if folium is None:
         return None
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True)
@@ -274,15 +274,17 @@ def make_satellite_map(center=(-23.55, -46.63), zoom=10, tiles_opacity=0.5):
         folium.map.CustomPane("vectors", z_index=650).add_to(m)
     except Exception:
         pass
-    # Esri Imagery (sem rótulos)
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri World Imagery",
-        name="Esri Satellite",
-        overlay=False,
-        control=False,
-        opacity=tiles_opacity,
-    ).add_to(m)
+    try:
+        folium.TileLayer(
+            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            attr="Esri World Imagery",
+            name="Esri Satellite",
+            overlay=False,
+            control=False,
+            opacity=tiles_opacity,
+        ).add_to(m)
+    except Exception:
+        folium.TileLayer("OpenStreetMap", control=False, opacity=1.0).add_to(m)
     return m
 
 
@@ -357,11 +359,10 @@ def add_admin_outline(m, gdf, layer_name: str, color="#000000", weight=1.2):
         style_function=lambda f: {"fillOpacity": 0, "color": color, "weight": weight},
     ).add_to(m)
 
-    # Regra especial 5) – isócronas como área de transição nos limites
+    # Regra especial – isócronas como área de transição nos limites
     if layer_name.lower().startswith("isócron") or layer_name.lower().startswith("isocron"):
         cls = find_col(gdf.columns, "nova_class")
         if cls:
-            # classes {1,3,4,6} = área de transição
             trans = gdf[gdf[cls].isin([1, 3, 4, 6])][["geometry"]].copy()
             if not trans.empty:
                 try:
@@ -386,7 +387,6 @@ def add_centroid_labels(m, gdf):
     """Rótulos permanentes (tamanho dinâmico com inject_label_scaler)."""
     if folium is None:
         return
-    # tenta descobrir uma coluna de nome
     cols_lower = {c.lower(): c for c in gdf.columns}
     name_col = cols_lower.get("ds_nome") or cols_lower.get("sp_nome") or cols_lower.get("nome")
     if name_col is None:
@@ -415,7 +415,6 @@ def add_centroid_labels(m, gdf):
 def add_gradient_legend(m, title: str, vmin: float, vmax: float, colors: list[str]):
     if Element is None:
         return
-    # CSS gradiente vertical
     gradient_css = f"background: linear-gradient(to top, {', '.join(colors)});"
     html = f"""
     <div style="
@@ -460,11 +459,10 @@ def add_categorical_legend(m, title: str, items: list[tuple[str, str]], topright
 # ---------- Pintura por Setor (variáveis numéricas e cluster) ----------
 def ramp_color(value: float, vmin: float, vmax: float, colors: list[str]) -> str:
     """Interpolação linear simples sobre uma lista de cores hex."""
-    if value is None or math.isnan(value):
+    if value is None or pd.isna(value):
         return "#cccccc"
     t = 0.0 if vmax == vmin else (value - vmin) / (vmax - vmin)
     t = max(0.0, min(1.0, t))
-    # posição no gradiente
     n = len(colors) - 1
     i = min(int(t * n), n - 1)
     frac = (t * n) - i
@@ -485,16 +483,27 @@ def ramp_color(value: float, vmin: float, vmax: float, colors: list[str]) -> str
 def paint_setores_numeric(
     m, setores: "gpd.GeoDataFrame", value_col: str, label: str, colors: list[str] = PB_GRADIENT
 ):
+    """Variáveis numéricas por setor (sem linhas), com simplificação de geometria."""
     if folium is None or setores is None:
         return
     s = pd.to_numeric(setores[value_col], errors="coerce")
     vmin, vmax = float(s.min()), float(s.max())
     df = setores[[value_col, "geometry"]].copy()
     df["__v__"] = s
+    # Simplificação para evitar HTML gigante (tela branca)
+    try:
+        df["geometry"] = df.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+    except Exception:
+        pass
 
     def style_fn(feat):
         v = feat["properties"].get("__v__")
-        return {"fillOpacity": 0.75, "weight": 0.0, "color": "#00000000", "fillColor": ramp_color(v, vmin, vmax, colors)}
+        return {
+            "fillOpacity": 0.75,
+            "weight": 0.0,
+            "color": "#00000000",
+            "fillColor": ramp_color(v, vmin, vmax, colors),
+        }
 
     folium.GeoJson(
         df.to_json(),
@@ -513,11 +522,10 @@ def paint_setores_numeric(
 
 
 def paint_setores_cluster(m, setores: "gpd.GeoDataFrame", cluster_col: str):
-    """Regra 3 e 4 — cores + legenda nominal."""
+    """Regra 3 e 4 — cores + legenda nominal (com simplificação)."""
     if folium is None or setores is None:
         return
 
-    # Cores (0..4) + outros
     color_map = {
         0: "#bf7db2",
         1: "#f7bd6a",
@@ -533,8 +541,13 @@ def paint_setores_cluster(m, setores: "gpd.GeoDataFrame", cluster_col: str):
         4: "5 - Predominância de uso comercial e serviços",
     }
     default_color = "#c8c8c8"
+
     df = setores[[cluster_col, "geometry"]].copy()
     df["__c__"] = pd.to_numeric(df[cluster_col], errors="coerce").astype("Int64")
+    try:
+        df["geometry"] = df.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+    except Exception:
+        pass
 
     def style_fn(feat):
         v = feat["properties"].get("__c__")
@@ -554,14 +567,13 @@ def paint_setores_cluster(m, setores: "gpd.GeoDataFrame", cluster_col: str):
 
 
 def paint_isocronas_area(m, iso: "gpd.GeoDataFrame"):
-    """Regra 6 — variável 'Área de influência de bairro' via nova_class."""
+    """Regra 6 — variável 'Área de influência de bairro' via nova_class (com simplificação)."""
     if folium is None or iso is None:
         return
     cls = find_col(iso.columns, "nova_class")
     if cls is None:
         st.info("A coluna 'nova_class' não foi encontrada em isócronas.")
         return
-    # Tabela de cores e rótulos
     lut = {
         0: ("Predominância uso misto", "#542788"),
         1: ("Zona de transição local", "#f7f7f7"),
@@ -576,6 +588,10 @@ def paint_isocronas_area(m, iso: "gpd.GeoDataFrame"):
     }
     df = iso[[cls, "geometry"]].copy()
     df["__k__"] = pd.to_numeric(df[cls], errors="coerce").astype("Int64")
+    try:
+        df["geometry"] = df.geometry.simplify(SIMPLIFY_TOL, preserve_topology=True)
+    except Exception:
+        pass
 
     def style_fn(feat):
         v = feat["properties"].get("__k__")
@@ -619,8 +635,9 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
 
-    # (opcional) Abas de topo
+    # Abas
     a1, a2, a3, a4 = st.tabs(["Aba 1", "Aba 2", "Aba 3", "Aba 4"])
+
     with a1:
         # layout: filtros à esquerda, mapa à direita (toda a área)
         left, map_col = st.columns([1, 5], gap="small")
@@ -668,13 +685,12 @@ def main() -> None:
                 if setores is None:
                     st.info("Arquivo 'SetoresCensitarios2023.parquet' não encontrado.")
                 else:
-                    # Mapear nomes pedidos -> colunas esperadas
                     mapping = {
                         "População (Pessoa/ha)": "populacao",
                         "Densidade demográfica (hab/ha)": "densidade_demografica",
                         "Variação de elevação média": "diferenca_elevacao",
                         "Elevação média": "elevacao",
-                        "Cluster (perfil urbano)": None,  # tratado em separado
+                        "Cluster (perfil urbano)": None,
                     }
                     if var == "Cluster (perfil urbano)":
                         cl = find_col(setores.columns, "cluster", "cluster_label", "label", "classe")
@@ -694,7 +710,6 @@ def main() -> None:
 
             st_folium(fmap, use_container_width=True, height=850)
 
-    # Demais abas ficam vazias por enquanto
     with a2:
         st.info("Conteúdo a definir.")
     with a3:
