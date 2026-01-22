@@ -36,7 +36,7 @@ PLACEHOLDER_LIM = "— selecione o limite —"
 LOGO_HEIGHT = 120
 MAP_HEIGHT  = 900
 SIMPLIFY_M_SETORES   = 25   # ~25 m
-SIMPLIFY_M_ISOCRONAS = 80   # ~80 m (mais forte p/ manter payload baixo)
+SIMPLIFY_M_ISOCRONAS = 80   # ~80 m
 
 def inject_css() -> None:
     st.markdown(
@@ -136,14 +136,23 @@ def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str]]:
 def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
     if not METRICS_FILE.exists(): return None
     cols = pq.ParquetFile(str(METRICS_FILE)).schema.names
-    # >>> Removidos: "Elevação média" e "Variação de elevação média"
-    mapping = {
-        "População (Pessoa/ha)": "populacao",
-        "Densidade demográfica (hab/ha)": "densidade_demografica",
-        "Cluster (perfil urbano)": "cluster",
+
+    # candidatos por variável (aceita vários possíveis nomes no parquet)
+    mapping: Dict[str, List[str] | str] = {
+        "População (Pessoa/ha)": ["populacao", "pop", "pessoa_ha"],
+        "Densidade demográfica (hab/ha)": ["densidade_demografica", "densidade", "hab_ha"],
+        "Elevação média": ["elevacao_media", "elevacao", "elev_med", "altitude_media"],
+        "Cluster (perfil urbano)": ["cluster", "classe", "label"],
     }
-    wanted = find_col(cols, mapping.get(var_label, var_label))
-    if not wanted or "fid" not in cols: return None
+
+    cand = mapping.get(var_label, var_label)
+    if isinstance(cand, (list, tuple)):
+        wanted = find_col(cols, *cand)
+    else:
+        wanted = find_col(cols, cand)
+    if not wanted or "fid" not in cols:
+        return None
+
     table = pq.read_table(str(METRICS_FILE), columns=["fid", wanted])
     df = table.to_pandas()
     df.rename(columns={wanted: "__value__"}, inplace=True)
@@ -200,8 +209,8 @@ def _quantile_edges(vals: np.ndarray, k: int = 6) -> List[float]:
 
 def classify_auto6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[int,int]], List[str]]:
     """
-    Adapta: tenta equal-interval; se desequilibrado, usa quantis.
-    Usa série NUMÉRICA no pd.cut (evita erro do pandas).
+    Adapta: tenta intervalos iguais; se desequilibrado, cai para quantis.
+    Sempre usa série numérica no pd.cut (evita TypeError).
     """
     series_num = pd.to_numeric(series, errors="coerce")
     v = series_num.dropna()
@@ -241,6 +250,7 @@ def left_controls() -> Dict[str, Any]:
             PLACEHOLDER_VAR,
             "População (Pessoa/ha)",
             "Densidade demográfica (hab/ha)",
+            "Elevação média",
             "Cluster (perfil urbano)",
             "Área de influência de bairro",
         ],
@@ -390,7 +400,6 @@ def main() -> None:
 
         # ====== VARIÁVEIS ======
         if var == "Área de influência de bairro":
-            # LUT oficial (cores e labels)
             lut_color = {
                 0:"#542788", 1:"#f7f7f7", 2:"#d8daeb", 3:"#b35806", 4:"#b2abd2",
                 5:"#8073ac", 6:"#fdb863", 7:"#7f3b08", 8:"#e08214", 9:"#fee0b6",
@@ -419,7 +428,6 @@ def main() -> None:
                     g = g[~k.isna()].copy()
                     g["__k__"] = k
 
-                    # simplificar + EXPLODE (sem dissolve) para hover por polígono
                     try:
                         gm = g.to_crs(3857)
                         gm["geometry"] = gm.buffer(0).geometry.simplify(SIMPLIFY_M_ISOCRONAS, preserve_topology=True)
@@ -476,6 +484,7 @@ def main() -> None:
                         classes, breaks_int, palette = classify_auto6(joined["__value__"])
                         color_map = {i: _hex_to_rgba(palette[i], 200) for i in range(6)}
                         joined["__rgba__"] = classes.map(lambda k: color_map.get(int(k) if pd.notna(k) else -1, _hex_to_rgba("#c8c8c8",200)))
+                        # tooltip/label como inteiro (m)
                         joined["__label__"] = pd.to_numeric(joined["__value__"], errors="coerce").round(0).astype("Int64").astype(str)
                         gdf_layer = joined[["geometry","__rgba__","__label__"]]
                         render_pydeck(center, gdf_layer, limite_gdf,
