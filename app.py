@@ -83,7 +83,7 @@ def inject_css() -> None:
                 width: 100%;
                 box-sizing: border-box;
             }}
-            .pb-logo {{ height: 52px; width:auto; display:block; }}
+            .pb-logo {{ height: 140px; width:auto; display:block; }}
             .pb-title {{ font-size: 1.9rem; font-weight: 700; letter-spacing: .2px; }}
             .pb-subtitle {{ opacity:.95; margin-top:2px; font-size: .95rem; }}
 
@@ -583,4 +583,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
