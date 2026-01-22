@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from unicodedata import normalize as _ud_norm
 import base64, math, re, json
-from decimal import Decimal
 
 import numpy as np
 import pandas as pd
@@ -36,8 +35,8 @@ PLACEHOLDER_LIM = "— selecione o limite —"
 
 LOGO_HEIGHT = 120
 MAP_HEIGHT  = 900
-SIMPLIFY_M_SETORES  = 25   # ~25 m
-SIMPLIFY_M_ISOCRONAS = 60  # ~60 m (mais forte para reduzir payload)
+SIMPLIFY_M_SETORES   = 25   # ~25 m
+SIMPLIFY_M_ISOCRONAS = 80   # ~80 m (mais forte p/ manter payload baixo)
 
 def inject_css() -> None:
     st.markdown(
@@ -137,11 +136,10 @@ def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str]]:
 def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
     if not METRICS_FILE.exists(): return None
     cols = pq.ParquetFile(str(METRICS_FILE)).schema.names
+    # >>> Removidos: "Elevação média" e "Variação de elevação média"
     mapping = {
         "População (Pessoa/ha)": "populacao",
         "Densidade demográfica (hab/ha)": "densidade_demografica",
-        "Variação de elevação média": "diferenca_elevacao",
-        "Elevação média": "elevacao",
         "Cluster (perfil urbano)": "cluster",
     }
     wanted = find_col(cols, mapping.get(var_label, var_label))
@@ -153,7 +151,6 @@ def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_isocronas_raw() -> Optional["gpd.GeoDataFrame"]:
-    # tenta nomes comuns
     for name in ("isocronas.parquet", "isócronas.parquet", "Isocronas.parquet"):
         p = DATA_DIR / name
         if p.exists():
@@ -202,23 +199,28 @@ def _quantile_edges(vals: np.ndarray, k: int = 6) -> List[float]:
     return edges
 
 def classify_auto6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[int,int]], List[str]]:
-    v = pd.to_numeric(series, errors="coerce").dropna()
+    """
+    Adapta: tenta equal-interval; se desequilibrado, usa quantis.
+    Usa série NUMÉRICA no pd.cut (evita erro do pandas).
+    """
+    series_num = pd.to_numeric(series, errors="coerce")
+    v = series_num.dropna()
     if v.empty:
         return pd.Series([-1]*len(series), index=series.index), [], []
     vmin, vmax = float(v.min()), float(v.max())
     if vmin == vmax:
-        idx = pd.cut(series, bins=[vmin-1e-9, vmax+1e-9], labels=False, include_lowest=True)
+        idx = pd.cut(series_num, bins=[vmin-1e-9, vmax+1e-9], labels=False, include_lowest=True)
         palette = _sample_gradient(ORANGE_RED_GRAD, 6)
         return idx.fillna(-1).astype("Int64"), [(int(round(vmin)), int(round(vmax)))], palette
     edges_eq = _equal_edges(vmin, vmax, 6)
-    idx_eq = pd.cut(series, bins=[edges_eq[0]-1e-9] + edges_eq[1:], labels=False, include_lowest=True)
+    idx_eq = pd.cut(series_num, bins=[edges_eq[0]-1e-9] + edges_eq[1:], labels=False, include_lowest=True)
     counts = idx_eq.value_counts(dropna=True)
     non_empty = (counts > 0).sum()
     max_share = (counts.max() / counts.sum()) if counts.sum() > 0 else 1.0
     use_quantile = (max_share > 0.35) or (non_empty < 4)
     if use_quantile:
         edges = _quantile_edges(v.to_numpy(), 6)
-        idx = pd.cut(series, bins=[edges[0]-1e-9] + edges[1:], labels=False, include_lowest=True)
+        idx = pd.cut(series_num, bins=[edges[0]-1e-9] + edges[1:], labels=False, include_lowest=True)
     else:
         edges = edges_eq; idx = idx_eq
     breaks_int: List[Tuple[int,int]] = []
@@ -235,8 +237,13 @@ def left_controls() -> Dict[str, Any]:
     st.markdown("### Variáveis (Setores Censitários e Isócronas)")
     var = st.selectbox(
         "Selecione a variável",
-        [PLACEHOLDER_VAR,"População (Pessoa/ha)","Densidade demográfica (hab/ha)",
-         "Variação de elevação média","Elevação média","Cluster (perfil urbano)","Área de influência de bairro"],
+        [
+            PLACEHOLDER_VAR,
+            "População (Pessoa/ha)",
+            "Densidade demográfica (hab/ha)",
+            "Cluster (perfil urbano)",
+            "Área de influência de bairro",
+        ],
         index=0, key="pb_var", placeholder="Escolha…",
     )
     st.markdown("### Configurações")
@@ -301,7 +308,6 @@ def render_pydeck(center: Tuple[float, float],
                   draw_setores_outline: bool = False):
     layers = []
 
-    # camada principal
     if gdf_layer is not None and not gdf_layer.empty and "__rgba__" in gdf_layer.columns:
         geojson = json.loads(gdf_layer[["geometry","__rgba__"] + ([tooltip_field] if tooltip_field else [])].to_json())
         lyr = pdk.Layer(
@@ -312,7 +318,6 @@ def render_pydeck(center: Tuple[float, float],
         )
         layers.append(lyr)
 
-    # contorno administrativo
     if limite_gdf is not None and not limite_gdf.empty:
         gj_lim = json.loads(limite_gdf[["geometry"]].to_json())
         outline = pdk.Layer(
@@ -321,7 +326,6 @@ def render_pydeck(center: Tuple[float, float],
         )
         layers.append(outline)
 
-    # opção: traço de setores
     if draw_setores_outline:
         try:
             geoms_only, _ = load_setores_geom()
@@ -343,7 +347,6 @@ def render_pydeck(center: Tuple[float, float],
     )
     _show_deck(deck)
 
-    # legenda
     if categorical_legend is not None:
         show_categorical_legend("Área de influência de bairro", categorical_legend)
     elif numeric_legend is not None:
@@ -409,7 +412,6 @@ def main() -> None:
             gdf_layer = None
             legend_items = None
             if iso_raw is not None and not iso_raw.empty:
-                # coluna da classe (aceita 'Isocrona', 'nova_class', 'classe', etc.)
                 cls = find_col(iso_raw.columns, "Isocrona","isocrona","nova_class","classe","class","cat","category")
                 if cls:
                     g = iso_raw[[cls,"geometry"]].copy()
@@ -417,29 +419,19 @@ def main() -> None:
                     g = g[~k.isna()].copy()
                     g["__k__"] = k
 
-                    # Dissolve por classe e simplifica (muito menos features → evita MessageSizeError)
+                    # simplificar + EXPLODE (sem dissolve) para hover por polígono
                     try:
                         gm = g.to_crs(3857)
-                        gm["geometry"] = gm.buffer(0).geometry  # corrige geometrias inválidas
-                        gm = gm.dissolve(by="__k__", as_index=False)
-                        gm["geometry"] = gm.geometry.simplify(SIMPLIFY_M_ISOCRONAS, preserve_topology=True)
-                        g = gm.to_crs(4326)
+                        gm["geometry"] = gm.buffer(0).geometry.simplify(SIMPLIFY_M_ISOCRONAS, preserve_topology=True)
+                        g = gm.to_crs(4326).explode(index_parts=False, ignore_index=True)
                     except Exception:
-                        # fallback: só simplifica sem dissolver
-                        try:
-                            gm = g.to_crs(3857)
-                            gm["geometry"] = gm.geometry.simplify(SIMPLIFY_M_ISOCRONAS, preserve_topology=True)
-                            g = gm.to_crs(4326)
-                        except Exception:
-                            pass
+                        pass
 
-                    # aplica cor e rótulo
                     g["__rgba__"]  = g["__k__"].map(lambda v: _hex_to_rgba(lut_color.get(int(v), "#c8c8c8"), 200))
                     g["__label__"] = g["__k__"].map(lambda v: f"{int(v)} – {lut_label.get(int(v),'Outros')}")
                     gdf_layer = g[["geometry","__rgba__","__label__"]]
                     center = center_from_bounds(g)
 
-                    # legenda com classes presentes
                     present = sorted({int(v) for v in g["__k__"].dropna().unique().tolist()})
                     legend_items = [(f"{k} – {lut_label[k]}", lut_color[k]) for k in present]
 
@@ -462,7 +454,6 @@ def main() -> None:
                     joined = geoms.merge(metric, on="fid", how="left")
                     center = center_from_bounds(joined)
 
-                    # cluster vs numérica
                     if var == "Cluster (perfil urbano)":
                         cmap = {0:"#bf7db2",1:"#f7bd6a",2:"#cf651f",3:"#ede4e6",4:"#793393"}
                         labels = {
