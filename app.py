@@ -30,7 +30,6 @@ st.set_page_config(page_title="PlanBairros", page_icon="🏙️", layout="wide",
 
 PB_NAVY = "#14407D"
 ORANGE_RED_GRAD = ["#fff7ec","#fee8c8","#fdd49e","#fdbb84","#fc8d59","#e34a33","#b30000"]
-
 PLACEHOLDER_VAR = "— selecione uma variável —"
 PLACEHOLDER_LIM = "— selecione o limite —"
 
@@ -44,20 +43,27 @@ def inject_css() -> None:
             font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
         }}
 
-        /* tira o “respiro” visual entre logo e filtros */
-        .main .block-container {{ padding-top: 0.2rem !important; padding-bottom: .8rem !important; }}
+        /* remove espaço entre o logo e os filtros */
+        .main .block-container {{
+            padding-top: 0.2rem !important;
+            padding-bottom: .8rem !important;
+        }}
 
         /* header: logo à esquerda, barra azul só na direita */
         .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
-        .pb-logo {{ height: 84px; width:auto; display:block; }}
+        .pb-logo {{ height: 88px; width:auto; display:block; }}
         .pb-header {{
             background:{PB_NAVY}; color:#fff; border-radius:14px;
             padding: 18px 20px; width:100%;
         }}
         .pb-title   {{ font-size: 3.8rem; font-weight: 900; line-height:1.05; letter-spacing:.2px }}
         .pb-subtitle{{ font-size: 1.9rem; opacity:.95; margin-top:6px }}
-        .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04);
-                   border-radius:14px; padding:12px; }}
+
+        .pb-card {{
+            background:#fff; border:1px solid rgba(20,64,125,.10);
+            box-shadow:0 1px 2px rgba(0,0,0,.04);
+            border-radius:14px; padding:12px;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -76,7 +82,7 @@ def _logo_data_uri() -> str:
     if LOGO_PATH.exists():
         b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
         return f"data:image/{LOGO_PATH.suffix.lstrip('.').lower()};base64,{b64}"
-    # fallback seguro
+    # fallback
     return "https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/logomark/streamlit-mark-color.png"
 
 def _slug(s: str) -> str:
@@ -112,15 +118,13 @@ def center_from_bounds(gdf) -> tuple[float, float]:
 
 # ===================  Leitor GeoParquet robusto (evita crash)  ==============
 def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Optional["gpd.GeoDataFrame"]:
-    """Tenta ler como GeoParquet. Se perder o metadado (caso comum com columns=...),
-    reconstrói a geometria via WKB/WKT."""
+    """Tenta ler como GeoParquet. Se columns=... remover metadado, reconstrói via WKB/WKT."""
     if not path:
         return None
     try:
         gdf = gpd.read_parquet(path, columns=columns)
-        # Em alguns arquivos, ao selecionar colunas vira DataFrame comum:
         if not isinstance(gdf, gpd.GeoDataFrame) or "geometry" not in gdf.columns:
-            raise ValueError("Perdeu metadado geoespacial; forçando fallback WKB/WKT.")
+            raise ValueError("Sem metadado geoespacial; usando fallback.")
         if gdf.crs is None:
             gdf = gdf.set_crs(4326)
         return gdf.to_crs(4326)
@@ -168,7 +172,6 @@ def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str], Op
     cols = _parquet_columns(p)
     id_col = find_col(cols, "id","cd_setor","geocodigo","codigo","geocod","id_setor")
     keep = [c for c in [id_col, "geometry"] if c]
-    # usa o leitor robusto (evita ValueError do set_crs)
     gdf = _read_gdf_robusto(p, keep)
     return gdf, id_col, p
 
@@ -210,7 +213,6 @@ def ramp_color(v: float, vmin: float, vmax: float, colors: list[str]) -> str:
 
 # ===============================  UI  =======================================
 def left_controls() -> Dict[str, Any]:
-    # “nudge” negativo remove qualquer espaço visual residual
     st.markdown("<div style='margin-top:-6px'></div>", unsafe_allow_html=True)
 
     st.markdown("### Variáveis (Setores Censitários e Isócronas)")
@@ -231,7 +233,6 @@ def left_controls() -> Dict[str, Any]:
     if st.button("🧹 Limpar cache de dados", type="secondary"):
         st.cache_data.clear(); st.success("Cache limpo. Selecione novamente a camada/variável.")
 
-    # limpa cache automaticamente ao mudar seleção
     sel_now = {"var": var, "lim": limite}
     sel_prev = st.session_state.get("_pb_prev_sel")
     if sel_prev and (sel_prev["var"] != sel_now["var"] or sel_prev["lim"] != sel_now["lim"]):
@@ -241,22 +242,31 @@ def left_controls() -> Dict[str, Any]:
     return {"variavel": var, "limite": limite, "labels_on": labels_on}
 
 # =============================  Render (pydeck)  ============================
+# Função JS sem arrow functions (evita "Unexpected =")
+_TILE_RENDER_FN = """
+function renderSubLayers(props) {
+  const bbox = props.tile.bbox;
+  const west = bbox.west, south = bbox.south, east = bbox.east, north = bbox.north;
+  return new deck.BitmapLayer(props, {
+    data: null,
+    image: props.data,
+    bounds: [west, south, east, north]
+  });
+}
+"""
+
 def render_pydeck(center: Tuple[float, float],
                   setores_joined: Optional["gpd.GeoDataFrame"],
                   limite_gdf: Optional["gpd.GeoDataFrame"],
                   var_label: Optional[str]):
     layers = []
 
-    # Base ESRI (sem token)
+    # Base ESRI (sem token) — usa função JS clássica (sem arrow)
     esri = pdk.Layer(
         "TileLayer",
         data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         min_zoom=0, max_zoom=19, tile_size=256,
-        render_sub_layers="""
-        (props) => new deck.BitmapLayer(props, {
-            data: null, image: props.data, bounds: props.tile.bbox
-        })
-        """,
+        render_sub_layers=_TILE_RENDER_FN,
     )
     layers.append(esri)
 
@@ -298,14 +308,13 @@ def render_pydeck(center: Tuple[float, float],
         map_style=None,
         tooltip={"text": f"{var_label}: {{__value__}}"} if var_label and var_label != "Cluster (perfil urbano)" else None,
     )
-    # versões mais antigas do Streamlit não aceitam height=...
-    st.pydeck_chart(deck, use_container_width=True)
+    st.pydeck_chart(deck, use_container_width=True)  # sem height (compat total)
 
 # ================================  App  =====================================
 def main() -> None:
     inject_css()
 
-    # Header: logo (fixo em assets/logo_todos.jpg) + barra azul do lado direito
+    # Header: logo (assets/logo_todos.jpg) + barra azul à direita
     st.markdown(
         f"""
         <div class="pb-row">
@@ -351,24 +360,16 @@ def main() -> None:
                     g = iso.copy()
                     g["__value__"] = pd.to_numeric(g[cls], errors="coerce")
                     g["__rgba__"] = g["__value__"].map(lambda v: _hex_to_rgba(lut.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
-                    center = center_from_bounds(g)
                     geojson = json.loads(g[["geometry","__rgba__","__value__"]].to_json(drop_id=True))
+                    # camada base + isócronas
                     deck = pdk.Deck(
                         layers=[
-                            pdk.Layer(
-                                "TileLayer",
-                                data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                                min_zoom=0, max_zoom=19, tile_size=256,
-                                render_sub_layers="""
-                                (props) => new deck.BitmapLayer(props, {
-                                    data: null, image: props.data, bounds: props.tile.bbox
-                                })
-                                """,
-                            ),
-                            pdk.Layer(
-                                "GeoJsonLayer", data=geojson, filled=True, stroked=False, pickable=False,
-                                get_fill_color="properties.__rgba__", get_line_width=0
-                            ),
+                            pdk.Layer("TileLayer",
+                                      data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                                      min_zoom=0, max_zoom=19, tile_size=256,
+                                      render_sub_layers=_TILE_RENDER_FN),
+                            pdk.Layer("GeoJsonLayer", data=geojson, filled=True, stroked=False,
+                                      get_fill_color="properties.__rgba__", get_line_width=0)
                         ],
                         initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11),
                         map_style=None,
@@ -377,7 +378,7 @@ def main() -> None:
                 else:
                     st.info("A coluna 'nova_class' não foi encontrada nas isócronas.")
                     render_pydeck(center, None, limite_gdf, None)
-            return  # finaliza após render
+            return  # encerra, já renderizado
 
         # Setores (variáveis numéricas / cluster)
         setores_joined = None
