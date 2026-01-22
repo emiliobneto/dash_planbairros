@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from unicodedata import normalize as _ud_norm
+import base64
 import math
 import re
 from decimal import Decimal
@@ -29,7 +30,7 @@ def _import_geostack():
         )
         st.stop()
 
-gpd, folium, Element, st_folium = _import_geostack()  # garante que estão presentes
+gpd, folium, Element, st_folium = _import_geostack()
 
 # ============================================================================
 # Config da página e paleta
@@ -49,10 +50,8 @@ PB_COLORS = {
     "teal": "#6FA097",
     "navy": "#14407D",
 }
-
 ORANGE_RED_GRAD = ["#fff7ec", "#fee8c8", "#fdd49e", "#fdbb84", "#fc8d59", "#e34a33", "#b30000"]
-SIMPLIFY_TOL = 0.0005  # ~55 m
-
+SIMPLIFY_TOL = 0.0005
 PLACEHOLDER_VAR = "— selecione uma variável —"
 PLACEHOLDER_LIM = "— selecione o limite —"
 
@@ -73,18 +72,41 @@ def inject_css() -> None:
                 --pb-navy:    {PB_COLORS['navy']};
             }}
             html, body, .stApp {{ font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif !important; }}
-            .pb-header {{ background: var(--pb-navy); color:#fff; border-radius: 14px; padding: 16px 20px; display:flex; align-items:center; gap:16px; }}
+
+            /* Header fixo e limpo */
+            .pb-header {{
+                background: var(--pb-navy);
+                color:#fff;
+                border-radius: 14px;
+                padding: 14px 18px;
+                display:flex; align-items:center; gap:16px;
+                width: 100%;
+                box-sizing: border-box;
+            }}
+            .pb-logo {{ height: 52px; width:auto; display:block; }}
             .pb-title {{ font-size: 1.9rem; font-weight: 700; letter-spacing: .2px; }}
             .pb-subtitle {{ opacity:.95; margin-top:2px; font-size: .95rem; }}
-            .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
+
+            .pb-card {{
+                background:#fff; border:1px solid rgba(20,64,125,.10);
+                box-shadow:0 1px 2px rgba(0,0,0,.04);
+                border-radius:14px; padding:12px;
+            }}
             .pb-card h4 {{ margin: 0 0 .6rem 0; }}
             .main .block-container {{ padding-top:.6rem; padding-bottom:.8rem; }}
-            .leaflet-tooltip.pb-big-tooltip, .leaflet-tooltip.pb-big-tooltip * {{
-                font-size: 28px !important; font-weight: 800 !important; color: #111 !important; line-height: 1 !important;
+
+            /* Tooltips do mapa */
+            .leaflet-tooltip.pb-big-tooltip,
+            .leaflet-tooltip.pb-big-tooltip * {{
+                font-size: 28px !important;
+                font-weight: 800 !important;
+                color: #111 !important;
+                line-height: 1 !important;
             }}
             .leaflet-tooltip.pb-big-tooltip {{
                 background:#fff !important; border: 2px solid #222 !important; border-radius: 10px !important;
-                padding: 10px 14px !important; white-space: nowrap !important; pointer-events: none !important; box-shadow: 0 2px 6px rgba(0,0,0,.2) !important; z-index: 200000 !important;
+                padding: 10px 14px !important; white-space: nowrap !important; pointer-events: none !important;
+                box-shadow: 0 2px 6px rgba(0,0,0,.2) !important; z-index: 200000 !important;
             }}
         </style>
         """,
@@ -137,7 +159,26 @@ def to_float_series(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").astype("Float64")
 
 # ============================================================================
-# Leitura on-demand (cache)
+# Logo: lê de assets e retorna data URI (funciona local/deploy)
+# ============================================================================
+def get_logo_data_uri() -> str:
+    names = [
+        "logo.png", "logo.svg", "logo.jpg", "logo.jpeg", "logo.webp",
+        "planbairros.png", "planbairros.svg", "plan_bairros.png", "brand.png"
+    ]
+    assets = REPO_ROOT / "assets"
+    if assets.exists():
+        for n in names:
+            p = assets / n
+            if p.exists():
+                mime = "image/" + p.suffix.lower().lstrip(".")
+                b64 = base64.b64encode(p.read_bytes()).decode()
+                return f"data:{mime};base64,{b64}"
+    # fallback seguro
+    return "https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/logomark/streamlit-mark-color.png"
+
+# ============================================================================
+# Cache de leitura
 # ============================================================================
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
 def read_gdf(path: Path) -> Optional["gpd.GeoDataFrame"]:
@@ -154,7 +195,7 @@ def read_gdf(path: Path) -> Optional["gpd.GeoDataFrame"]:
             geom_col = next((c for c in pdf.columns if c.lower() in ("geometry", "geom", "wkb", "wkt")), None)
             if geom_col is None:
                 return None
-            from shapely import wkb, wkt  # shapely já vem com geopandas
+            from shapely import wkb, wkt
             vals = pdf[geom_col]
             if vals.dropna().astype(str).str.startswith("POLY").any():
                 geo = vals.dropna().apply(wkt.loads)
@@ -183,30 +224,14 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
     return read_gdf(p) if p else None
 
 # ============================================================================
-# Logo
-# ============================================================================
-def get_logo_src() -> str:
-    candidates = [
-        REPO_ROOT / "assets" / "logo.png",
-        REPO_ROOT / "static" / "logo.png",
-        REPO_ROOT / "logo.png",
-    ]
-    for p in candidates:
-        if p.exists():
-            return str(p)
-    return "https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/logomark/streamlit-mark-color.png"
-
-# ============================================================================
 # Folium helpers
 # ============================================================================
 def make_satellite_map(center=(-23.55, -46.63), zoom=11, tiles_opacity=0.6):
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True)
-    # Fallback OSM
     folium.TileLayer(
         tiles="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
         attr="© OpenStreetMap", name="OSM", overlay=False, control=False,
     ).add_to(m)
-    # ESRI
     try:
         folium.TileLayer(
             tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -321,7 +346,7 @@ def add_categorical_legend(m, title: str, items: list[tuple[str, str]], topright
     m.get_root().html.add_child(Element(html))
 
 # ============================================================================
-# Pintura (Setores, Clusters, Isócronas)
+# Pintura
 # ============================================================================
 def ramp_color(v: float, vmin: float, vmax: float, colors: list[str]) -> str:
     if v is None or (isinstance(v, float) and math.isnan(v)):
@@ -416,7 +441,7 @@ def paint_isocronas_area(m, iso: "gpd.GeoDataFrame"):
     add_categorical_legend(m, "Área de influência de bairro (nova_class)", items)
 
 # ============================================================================
-# UI – filtros (esquerda)
+# UI – filtros
 # ============================================================================
 def left_controls() -> Dict[str, Any]:
     st.markdown("### Variáveis (Setores Censitários e Isócronas)")
@@ -451,7 +476,7 @@ def left_controls() -> Dict[str, Any]:
         st.cache_data.clear()
         st.success("Cache limpo. Selecione novamente a camada/variável.")
 
-    # Limpeza automática quando a seleção muda
+    # limpa cache quando seleção muda
     sel_now = {"var": var, "lim": limite}
     sel_prev = st.session_state.get("_pb_prev_sel")
     if sel_prev and (sel_prev["var"] != sel_now["var"] or sel_prev["lim"] != sel_now["lim"]):
@@ -466,22 +491,20 @@ def left_controls() -> Dict[str, Any]:
 def main() -> None:
     inject_css()
 
-    # Cabeçalho
-    with st.container():
-        c1, c2 = st.columns([1, 8])
-        with c1:
-            st.image(get_logo_src(), width=64)
-        with c2:
-            st.markdown(
-                """
-                <div class="pb-header">
-                    <div style="display:flex;flex-direction:column">
-                        <div class="pb-title">PlanBairros</div>
-                        <div class="pb-subtitle">Plataforma de visualização e planejamento em escala de bairro</div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True,
-            )
+    # ---------- Cabeçalho (logo em assets) ----------
+    logo_uri = get_logo_data_uri()
+    st.markdown(
+        f"""
+        <div class="pb-header">
+            <img class="pb-logo" src="{logo_uri}" alt="PlanBairros logo"/>
+            <div>
+                <div class="pb-title">PlanBairros</div>
+                <div class="pb-subtitle">Plataforma de visualização e planejamento em escala de bairro</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # Layout
     left, map_col = st.columns([1, 4], gap="large")
@@ -554,7 +577,6 @@ def main() -> None:
                 }
                 col = find_col(setores.columns, mapping.get(var))
                 if col:
-                    from typing import List as _List  # apenas p/ type-checkers
                     paint_setores_numeric(fmap, setores, col, var, ORANGE_RED_GRAD)
                 else:
                     st.info(f"A coluna para '{var}' não foi encontrada nos setores.")
