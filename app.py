@@ -162,10 +162,7 @@ def to_float_series(s: pd.Series) -> pd.Series:
 # Logo: lê de assets e retorna data URI (funciona local/deploy)
 # ============================================================================
 def get_logo_data_uri() -> str:
-    names = [
-        "logo.png", "logo.svg", "logo.jpg", "logo.jpeg", "logo.webp",
-        "planbairros.png", "planbairros.svg", "plan_bairros.png", "brand.png"
-    ]
+    names = ["logo_todos.jpg"]
     assets = REPO_ROOT / "assets"
     if assets.exists():
         for n in names:
@@ -586,3 +583,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
