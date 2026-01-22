@@ -7,6 +7,7 @@ from unicodedata import normalize as _ud_norm
 import base64, math, re, json
 from decimal import Decimal
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -35,7 +36,8 @@ PLACEHOLDER_LIM = "— selecione o limite —"
 
 LOGO_HEIGHT = 120
 MAP_HEIGHT  = 900
-SIMPLIFY_M  = 25  # ~25m
+SIMPLIFY_M_SETORES  = 25   # ~25 m
+SIMPLIFY_M_ISOCRONAS = 60  # ~60 m (mais forte para reduzir payload)
 
 def inject_css() -> None:
     st.markdown(
@@ -125,7 +127,7 @@ def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str]]:
     if gdf is None: return None, None
     try:
         gdfm = gdf.to_crs(3857)
-        gdfm["geometry"] = gdfm.geometry.simplify(SIMPLIFY_M, preserve_topology=True)
+        gdfm["geometry"] = gdfm.geometry.simplify(SIMPLIFY_M_SETORES, preserve_topology=True)
         gdf = gdfm.to_crs(4326)
     except Exception:
         pass
@@ -150,11 +152,12 @@ def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
     return df
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def load_isocronas() -> Optional["gpd.GeoDataFrame"]:
-    for name in ("isocronas.parquet", "isócronas.parquet"):
+def load_isocronas_raw() -> Optional["gpd.GeoDataFrame"]:
+    # tenta nomes comuns
+    for name in ("isocronas.parquet", "isócronas.parquet", "Isocronas.parquet"):
         p = DATA_DIR / name
         if p.exists():
-            return _read_gdf_robusto(p, ["geometry","nova_class"])
+            return _read_gdf_robusto(p, None)
     return None
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -165,7 +168,7 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
     if not p.exists(): return None
     return _read_gdf_robusto(p, ["geometry"])
 
-# ====================== cores / classes (6) ======================
+# ====================== cores / classes ======================
 def _hex_to_rgba(h: str, a: int = 190) -> list[int]:
     h = h.lstrip("#"); return [int(h[i:i+2],16) for i in (0,2,4)] + [a]
 
@@ -184,21 +187,47 @@ def _sample_gradient(colors: List[str], n: int) -> List[str]:
         out.append(r2h(mix))
     return out
 
-def classify_soft6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[float,float]]]:
-    v = pd.to_numeric(series, errors="coerce")
-    if v.dropna().empty:
-        return pd.Series([-1]*len(v), index=v.index), []
+def _equal_edges(vmin: float, vmax: float, k: int = 6) -> List[float]:
+    step = (vmax - vmin) / k
+    edges = [vmin + i*step for i in range(k+1)]
+    edges[-1] = vmax
+    return edges
+
+def _quantile_edges(vals: np.ndarray, k: int = 6) -> List[float]:
+    qs = np.linspace(0, 1, k+1)
+    edges = list(np.quantile(vals, qs))
+    for i in range(1, len(edges)):
+        if edges[i] <= edges[i-1]:
+            edges[i] = edges[i-1] + 1e-9
+    return edges
+
+def classify_auto6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[int,int]], List[str]]:
+    v = pd.to_numeric(series, errors="coerce").dropna()
+    if v.empty:
+        return pd.Series([-1]*len(series), index=series.index), [], []
     vmin, vmax = float(v.min()), float(v.max())
     if vmin == vmax:
-        bins = [vmin-1e-9, vmax+1e-9]
-        idx = pd.cut(v, bins=bins, labels=False, include_lowest=True)
-        return idx.fillna(-1).astype("Int64"), [(vmin, vmax)]
-    step = (vmax - vmin) / 6.0
-    edges = [vmin + i*step for i in range(7)]
-    edges[-1] = vmax + 1e-9
-    idx = pd.cut(v, bins=edges, labels=False, include_lowest=True)
-    breaks = [(edges[i], edges[i+1]) for i in range(6)]
-    return idx.fillna(-1).astype("Int64"), breaks
+        idx = pd.cut(series, bins=[vmin-1e-9, vmax+1e-9], labels=False, include_lowest=True)
+        palette = _sample_gradient(ORANGE_RED_GRAD, 6)
+        return idx.fillna(-1).astype("Int64"), [(int(round(vmin)), int(round(vmax)))], palette
+    edges_eq = _equal_edges(vmin, vmax, 6)
+    idx_eq = pd.cut(series, bins=[edges_eq[0]-1e-9] + edges_eq[1:], labels=False, include_lowest=True)
+    counts = idx_eq.value_counts(dropna=True)
+    non_empty = (counts > 0).sum()
+    max_share = (counts.max() / counts.sum()) if counts.sum() > 0 else 1.0
+    use_quantile = (max_share > 0.35) or (non_empty < 4)
+    if use_quantile:
+        edges = _quantile_edges(v.to_numpy(), 6)
+        idx = pd.cut(series, bins=[edges[0]-1e-9] + edges[1:], labels=False, include_lowest=True)
+    else:
+        edges = edges_eq; idx = idx_eq
+    breaks_int: List[Tuple[int,int]] = []
+    for i in range(6):
+        a = int(round(edges[i])); b = int(round(edges[i+1]))
+        if b < a: b = a
+        breaks_int.append((a, b))
+    palette = _sample_gradient(ORANGE_RED_GRAD, 6)
+    return idx.fillna(-1).astype("Int64"), breaks_int, palette
 
 # ====================== UI (filtros) ======================
 def left_controls() -> Dict[str, Any]:
@@ -217,15 +246,13 @@ def left_controls() -> Dict[str, Any]:
         index=0, key="pb_limite", placeholder="Escolha…",
     )
     st.checkbox("Rótulos permanentes (dinâmicos por zoom)", value=False, key="pb_labels_on")
+
     st.caption("Use o botão abaixo para limpar os caches de dados em memória.")
     if st.button("🧹 Limpar cache de dados", type="secondary"):
         st.cache_data.clear(); st.success("Cache limpo. Selecione novamente a camada/variável.")
 
-    # espaço reservado para a legenda (preenche depois)
-    legend_ph = st.empty()
-    st.session_state["_legend_ph"] = legend_ph
+    legend_ph = st.empty(); st.session_state["_legend_ph"] = legend_ph
 
-    # limpa cache automaticamente ao mudar seleção
     sel_now = {"var": var, "lim": limite}
     sel_prev = st.session_state.get("_pb_prev_sel")
     if sel_prev and (sel_prev["var"] != sel_now["var"] or sel_prev["lim"] != sel_now["lim"]):
@@ -234,14 +261,13 @@ def left_controls() -> Dict[str, Any]:
     return {"variavel": var, "limite": limite}
 
 # ====================== Legendas (HTML) ======================
-def show_numeric_legend(title: str, breaks: List[Tuple[float,float]], palette: List[str]):
+def show_numeric_legend(title: str, breaks: List[Tuple[int,int]], palette: List[str]):
     ph = st.session_state.get("_legend_ph")
     if not ph: return
-    if not breaks:
-        ph.empty(); return
+    if not breaks: ph.empty(); return
     rows = []
     for (a,b), col in zip(breaks, palette):
-        label = f"{a:,.0f} – {b:,.0f}"
+        label = f"{a:,} – {b:,}".replace(",", ".")
         rows.append(f"<div class='legend-row'><span class='legend-swatch' style='background:{col}'></span><span>{label}</span></div>")
     html = f"<div class='legend-card'><div class='legend-title'>{title}</div>{''.join(rows)}</div>"
     ph.markdown(html, unsafe_allow_html=True)
@@ -266,45 +292,25 @@ def _show_deck(deck: "pdk.Deck"):
         st.pydeck_chart(deck, use_container_width=True)
 
 def render_pydeck(center: Tuple[float, float],
-                  setores_joined: Optional["gpd.GeoDataFrame"],
+                  gdf_layer: Optional["gpd.GeoDataFrame"],
                   limite_gdf: Optional["gpd.GeoDataFrame"],
-                  var_label: Optional[str],
+                  *,
+                  tooltip_field: Optional[str],
+                  categorical_legend: Optional[List[Tuple[str, str]]] = None,
+                  numeric_legend: Optional[Tuple[str, List[Tuple[int,int]], List[str]]] = None,
                   draw_setores_outline: bool = False):
     layers = []
 
-    # camada cloroplética
-    legend_done = False
-    if setores_joined is not None and not setores_joined.empty and "__value__" in setores_joined.columns:
-        gdf = setores_joined.copy()
-
-        if var_label == "Cluster (perfil urbano)":
-            cmap = {0:"#bf7db2",1:"#f7bd6a",2:"#cf651f",3:"#ede4e6",4:"#793393"}
-            labels = {
-                0:"1 - Periférico com predominância residencial de alta densidade construtiva",
-                1:"2 - Uso misto de média densidade construtiva",
-                2:"3 - Periférico com predominância residencial de média densidade construtiva",
-                3:"4 - Verticalizado de uso-misto",
-                4:"5 - Predominância de uso comercial e serviços",
-            }
-            s = pd.to_numeric(gdf["__value__"], errors="coerce")
-            gdf["__rgba__"] = s.map(lambda v: _hex_to_rgba(cmap.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
-            items = [(labels[k], cmap[k]) for k in sorted(cmap)]
-            show_categorical_legend("Cluster (perfil urbano)", items); legend_done = True
-        else:
-            classes, breaks = classify_soft6(gdf["__value__"])  # <<< quebras suaves com a coluna selecionada
-            palette = _sample_gradient(ORANGE_RED_GRAD, 6)
-            color_map = {i: _hex_to_rgba(palette[i], 200) for i in range(6)}
-            gdf["__rgba__"] = classes.map(lambda k: color_map.get(int(k) if pd.notna(k) else -1, _hex_to_rgba("#c8c8c8", 200)))
-            show_numeric_legend(var_label, breaks, palette); legend_done = True
-
-        geojson = json.loads(gdf[["geometry","__rgba__","__value__"]].to_json())
-        setores_layer = pdk.Layer(
+    # camada principal
+    if gdf_layer is not None and not gdf_layer.empty and "__rgba__" in gdf_layer.columns:
+        geojson = json.loads(gdf_layer[["geometry","__rgba__"] + ([tooltip_field] if tooltip_field else [])].to_json())
+        lyr = pdk.Layer(
             "GeoJsonLayer",
             data=geojson,
-            filled=True, stroked=False, pickable=True, auto_highlight=True,
+            filled=True, stroked=False, pickable=bool(tooltip_field), auto_highlight=True,
             get_fill_color="properties.__rgba__", get_line_width=0,
         )
-        layers.append(setores_layer)
+        layers.append(lyr)
 
     # contorno administrativo
     if limite_gdf is not None and not limite_gdf.empty:
@@ -315,14 +321,13 @@ def render_pydeck(center: Tuple[float, float],
         )
         layers.append(outline)
 
-    # setores censitários como linhas (quando pedido)
+    # opção: traço de setores
     if draw_setores_outline:
-        # usa as mesmas geometrias dos setores (sem fill, só stroke)
-        gj = json.loads(setores_joined[["geometry"]].to_json()) if (setores_joined is not None) else None
-        if gj is None:
+        try:
             geoms_only, _ = load_setores_geom()
-            if geoms_only is not None:
-                gj = json.loads(geoms_only[["geometry"]].to_json())
+        except Exception:
+            geoms_only = None
+        gj = json.loads(geoms_only[["geometry"]].to_json()) if geoms_only is not None else None
         if gj is not None:
             sectors_outline = pdk.Layer(
                 "GeoJsonLayer", data=gj, filled=False, stroked=True,
@@ -334,17 +339,22 @@ def render_pydeck(center: Tuple[float, float],
         layers=layers,
         initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-        tooltip={"text": f"{var_label}: {{__value__}}"} if var_label and var_label != "Cluster (perfil urbano)" else None,
+        tooltip={"text": f"{{{tooltip_field}}}"} if tooltip_field else None,
     )
     _show_deck(deck)
 
-    if not legend_done:
+    # legenda
+    if categorical_legend is not None:
+        show_categorical_legend("Área de influência de bairro", categorical_legend)
+    elif numeric_legend is not None:
+        title, breaks, palette = numeric_legend
+        show_numeric_legend(title, breaks, palette)
+    else:
         clear_legend()
 
 # ====================== App ======================
 def main() -> None:
     inject_css()
-
     st.markdown(
         f"""
         <div class="pb-row">
@@ -367,46 +377,124 @@ def main() -> None:
         center = (-23.55, -46.63)
         var = ui["variavel"]
 
-        # limites (inclui opção "Setores Censitários (linhas)")
+        # limites
         limite_gdf = None
-        draw_setores_outline = False
-        if ui["limite"] != PLACEHOLDER_LIM:
-            if ui["limite"] == "Setores Censitários (linhas)":
-                draw_setores_outline = True
-            else:
-                limite_gdf = load_admin_layer(ui["limite"])
-                if limite_gdf is not None and len(limite_gdf) > 0:
-                    center = center_from_bounds(limite_gdf)
+        draw_setores_outline = (ui["limite"] == "Setores Censitários (linhas)")
+        if ui["limite"] not in (PLACEHOLDER_LIM, "Setores Censitários (linhas)"):
+            limite_gdf = load_admin_layer(ui["limite"])
+            if limite_gdf is not None and len(limite_gdf) > 0:
+                center = center_from_bounds(limite_gdf)
 
-        # variável
-        setores_joined = None
+        # ====== VARIÁVEIS ======
         if var == "Área de influência de bairro":
-            iso = load_isocronas()
-            if iso is not None and len(iso) > 0:
-                lut = {0:"#542788",1:"#f7f7f7",2:"#d8daeb",3:"#b35806",4:"#b2abd2",
-                       5:"#8073ac",6:"#fdb863",7:"#7f3b08",8:"#e08214",9:"#fee0b6"}
-                cls = find_col(iso.columns, "nova_class")
-                if cls:
-                    g = iso.copy()
-                    g["__value__"] = pd.to_numeric(g[cls], errors="coerce")
-                    g["__rgba__"] = g["__value__"].map(lambda v: _hex_to_rgba(lut.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
-                    setores_joined = g[["geometry","__value__","__rgba__"]]
-                    center = center_from_bounds(g)
-                    items = [(f"{k}", lut[k]) for k in sorted(lut)]
-                    show_categorical_legend("Área de influência de bairro (nova_class)", items)
+            # LUT oficial (cores e labels)
+            lut_color = {
+                0:"#542788", 1:"#f7f7f7", 2:"#d8daeb", 3:"#b35806", 4:"#b2abd2",
+                5:"#8073ac", 6:"#fdb863", 7:"#7f3b08", 8:"#e08214", 9:"#fee0b6",
+            }
+            lut_label = {
+                0:"Predominância uso misto",
+                1:"Zona de transição local",
+                2:"Periférico residencial de média densidade",
+                3:"Transição central verticalizada",
+                4:"Periférico adensado em transição",
+                5:"Centralidade comercial e de serviços",
+                6:"Predominância residencial média densidade",
+                7:"Áreas íngremes e de encosta",
+                8:"Alta densidade residencial",
+                9:"Central verticalizado",
+            }
 
-        elif var != PLACEHOLDER_VAR:
+            iso_raw = load_isocronas_raw()
+            gdf_layer = None
+            legend_items = None
+            if iso_raw is not None and not iso_raw.empty:
+                # coluna da classe (aceita 'Isocrona', 'nova_class', 'classe', etc.)
+                cls = find_col(iso_raw.columns, "Isocrona","isocrona","nova_class","classe","class","cat","category")
+                if cls:
+                    g = iso_raw[[cls,"geometry"]].copy()
+                    k = pd.to_numeric(g[cls], errors="coerce").astype("Int64")
+                    g = g[~k.isna()].copy()
+                    g["__k__"] = k
+
+                    # Dissolve por classe e simplifica (muito menos features → evita MessageSizeError)
+                    try:
+                        gm = g.to_crs(3857)
+                        gm["geometry"] = gm.buffer(0).geometry  # corrige geometrias inválidas
+                        gm = gm.dissolve(by="__k__", as_index=False)
+                        gm["geometry"] = gm.geometry.simplify(SIMPLIFY_M_ISOCRONAS, preserve_topology=True)
+                        g = gm.to_crs(4326)
+                    except Exception:
+                        # fallback: só simplifica sem dissolver
+                        try:
+                            gm = g.to_crs(3857)
+                            gm["geometry"] = gm.geometry.simplify(SIMPLIFY_M_ISOCRONAS, preserve_topology=True)
+                            g = gm.to_crs(4326)
+                        except Exception:
+                            pass
+
+                    # aplica cor e rótulo
+                    g["__rgba__"]  = g["__k__"].map(lambda v: _hex_to_rgba(lut_color.get(int(v), "#c8c8c8"), 200))
+                    g["__label__"] = g["__k__"].map(lambda v: f"{int(v)} – {lut_label.get(int(v),'Outros')}")
+                    gdf_layer = g[["geometry","__rgba__","__label__"]]
+                    center = center_from_bounds(g)
+
+                    # legenda com classes presentes
+                    present = sorted({int(v) for v in g["__k__"].dropna().unique().tolist()})
+                    legend_items = [(f"{k} – {lut_label[k]}", lut_color[k]) for k in present]
+
+            render_pydeck(
+                center, gdf_layer, limite_gdf,
+                tooltip_field="__label__",
+                categorical_legend=legend_items,
+                numeric_legend=None,
+                draw_setores_outline=draw_setores_outline
+            )
+            return
+
+        # Demais variáveis (setores)
+        gdf_layer = None
+        if var != PLACEHOLDER_VAR:
             geoms, id_col = load_setores_geom()
             if geoms is not None and id_col == "fid":
                 metric = load_metric_column(var)
                 if metric is not None:
-                    setores_joined = geoms.merge(metric, on="fid", how="left")
-                    center = center_from_bounds(setores_joined)
+                    joined = geoms.merge(metric, on="fid", how="left")
+                    center = center_from_bounds(joined)
 
-        render_pydeck(center=center,
-                      setores_joined=setores_joined,
-                      limite_gdf=limite_gdf,
-                      var_label=None if var in (PLACEHOLDER_VAR, "Área de influência de bairro") else var,
+                    # cluster vs numérica
+                    if var == "Cluster (perfil urbano)":
+                        cmap = {0:"#bf7db2",1:"#f7bd6a",2:"#cf651f",3:"#ede4e6",4:"#793393"}
+                        labels = {
+                            0:"1 - Periférico com predominância residencial de alta densidade construtiva",
+                            1:"2 - Uso misto de média densidade construtiva",
+                            2:"3 - Periférico com predominância residencial de média densidade construtiva",
+                            3:"4 - Verticalizado de uso-misto",
+                            4:"5 - Predominância de uso comercial e serviços",
+                        }
+                        s = pd.to_numeric(joined["__value__"], errors="coerce")
+                        joined["__rgba__"] = s.map(lambda v: _hex_to_rgba(cmap.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
+                        joined["__label__"] = s.map(lambda v: labels.get(int(v), "Outros") if pd.notna(v) else "Sem dado")
+                        gdf_layer = joined[["geometry","__rgba__","__label__"]]
+                        legend_items = [(labels[k], cmap[k]) for k in sorted(cmap)]
+                        render_pydeck(center, gdf_layer, limite_gdf,
+                                      tooltip_field="__label__", categorical_legend=legend_items,
+                                      draw_setores_outline=draw_setores_outline)
+                        return
+                    else:
+                        classes, breaks_int, palette = classify_auto6(joined["__value__"])
+                        color_map = {i: _hex_to_rgba(palette[i], 200) for i in range(6)}
+                        joined["__rgba__"] = classes.map(lambda k: color_map.get(int(k) if pd.notna(k) else -1, _hex_to_rgba("#c8c8c8",200)))
+                        joined["__label__"] = pd.to_numeric(joined["__value__"], errors="coerce").round(0).astype("Int64").astype(str)
+                        gdf_layer = joined[["geometry","__rgba__","__label__"]]
+                        render_pydeck(center, gdf_layer, limite_gdf,
+                                      tooltip_field="__label__",
+                                      numeric_legend=(var, breaks_int, palette),
+                                      draw_setores_outline=draw_setores_outline)
+                        return
+
+        # sem variável: limpa mapa/legenda
+        render_pydeck(center, None, limite_gdf, tooltip_field=None, categorical_legend=None, numeric_legend=None,
                       draw_setores_outline=draw_setores_outline)
 
 if __name__ == "__main__":
