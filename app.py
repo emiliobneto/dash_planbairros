@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from unicodedata import normalize as _ud_norm
 import base64, math, re, json
-
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -39,10 +38,12 @@ SIMPLIFY_M_SETORES   = 25   # ~25 m
 SIMPLIFY_M_ISOCRONAS = 80   # ~80 m
 SIMPLIFY_M_OVERLAY   = 20   # ~20 m (rios/linhas/verde)
 
-# Cores de referência (overlays permanentes)
+# Overlays permanentes (cores e espessuras)
 REF_GREEN    = "#2E7D32"  # áreas verdes
 REF_BLUE     = "#1E88E5"  # rios
-REF_DARKGRAY = "#444444"  # trem/metro
+REF_DARKGRAY = "#333333"  # trilhos (trem/metro)
+RIVER_WIDTH_PX = 2.2
+RAIL_WIDTH_PX  = 3.2
 
 def inject_css() -> None:
     st.markdown(
@@ -73,8 +74,8 @@ except NameError:
     REPO_ROOT = Path.cwd()
 
 DATA_DIR = (REPO_ROOT / "limites_administrativos") if (REPO_ROOT / "limites_administrativos").exists() else REPO_ROOT
-GEOM_FILE    = DATA_DIR / "IDCenso2023.parquet"               # fid + geometry
-METRICS_FILE = DATA_DIR / "SetoresCensitarios2023.parquet"    # fid + métricas
+GEOM_FILE    = DATA_DIR / "IDCenso2023.parquet"
+METRICS_FILE = DATA_DIR / "SetoresCensitarios2023.parquet"
 LOGO_PATH    = REPO_ROOT / "assets" / "logo_todos.jpg"
 
 def _logo_data_uri() -> str:
@@ -97,8 +98,9 @@ def center_from_bounds(gdf) -> tuple[float, float]:
     minx, miny, maxx, maxy = gdf.total_bounds
     return ((miny + maxy) / 2, (minx + maxx) / 2)
 
-def _hex_to_rgba(h: str, a: int = 190) -> list[int]:
-    h = h.lstrip("#"); return [int(h[i:i+2],16) for i in (0,2,4)] + [a]
+def _hex_to_rgba(h: str, a: int = 255) -> list[int]:
+    h = h.lstrip("#")
+    return [int(h[i:i+2], 16) for i in (0,2,4)] + [a]
 
 # ====================== leitores ======================
 def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Optional["gpd.GeoDataFrame"]:
@@ -141,7 +143,6 @@ def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str]]:
 def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
     if not METRICS_FILE.exists(): return None
     cols = pq.ParquetFile(str(METRICS_FILE)).schema.names
-
     mapping: Dict[str, List[str] | str] = {
         "População (Pessoa/ha)": ["populacao", "pop", "pessoa_ha"],
         "Densidade demográfica (hab/ha)": ["densidade_demografica", "densidade", "hab_ha"],
@@ -151,10 +152,8 @@ def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
     cand = mapping.get(var_label, var_label)
     wanted = find_col(cols, *(cand if isinstance(cand, (list, tuple)) else [cand]))
     if not wanted or "fid" not in cols: return None
-
     table = pq.read_table(str(METRICS_FILE), columns=["fid", wanted])
-    df = table.to_pandas()
-    df.rename(columns={wanted: "__value__"}, inplace=True)
+    df = table.to_pandas().rename(columns={wanted: "__value__"})
     return df
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -173,7 +172,7 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
     if not p.exists(): return None
     return _read_gdf_robusto(p, ["geometry"])
 
-# ---------- Overlays permanentes (áreas verdes, rios, trem, metrô) ----------
+# ---------- Overlays permanentes ----------
 def _read_geojson_any(*names: str) -> Optional["gpd.GeoDataFrame"]:
     for nm in names:
         p = DATA_DIR / nm
@@ -182,7 +181,6 @@ def _read_geojson_any(*names: str) -> Optional["gpd.GeoDataFrame"]:
                 g = gpd.read_file(p)
                 if g.crs is None: g = g.set_crs(4326)
                 g = g.to_crs(4326)
-                # simplificação leve
                 try:
                     gm = g.to_crs(3857)
                     gm["geometry"] = gm.geometry.buffer(0).simplify(SIMPLIFY_M_OVERLAY, preserve_topology=True)
@@ -210,7 +208,7 @@ def load_metro_lines() -> Optional["gpd.GeoDataFrame"]:
 def load_train_lines() -> Optional["gpd.GeoDataFrame"]:
     return _read_geojson_any("linhas trem.geojson", "linhas_trem.geojson")
 
-# ====================== cores / classes (numéricas) ======================
+# ====================== helpers de classes numéricas ======================
 def _sample_gradient(colors: List[str], n: int) -> List[str]:
     if n <= 1: return [colors[-1]]
     out = []
@@ -241,24 +239,24 @@ def _quantile_edges(vals: np.ndarray, k: int = 6) -> List[float]:
     return edges
 
 def classify_auto6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[int,int]], List[str]]:
-    series_num = pd.to_numeric(series, errors="coerce")
-    v = series_num.dropna()
+    s = pd.to_numeric(series, errors="coerce")
+    v = s.dropna()
     if v.empty:
         return pd.Series([-1]*len(series), index=series.index), [], []
     vmin, vmax = float(v.min()), float(v.max())
     if vmin == vmax:
-        idx = pd.cut(series_num, bins=[vmin-1e-9, vmax+1e-9], labels=False, include_lowest=True)
+        idx = pd.cut(s, bins=[vmin-1e-9, vmax+1e-9], labels=False, include_lowest=True)
         palette = _sample_gradient(ORANGE_RED_GRAD, 6)
         return idx.fillna(-1).astype("Int64"), [(int(round(vmin)), int(round(vmax)))], palette
     edges_eq = _equal_edges(vmin, vmax, 6)
-    idx_eq = pd.cut(series_num, bins=[edges_eq[0]-1e-9] + edges_eq[1:], labels=False, include_lowest=True)
+    idx_eq = pd.cut(s, bins=[edges_eq[0]-1e-9] + edges_eq[1:], labels=False, include_lowest=True)
     counts = idx_eq.value_counts(dropna=True)
     non_empty = (counts > 0).sum()
     max_share = (counts.max() / counts.sum()) if counts.sum() > 0 else 1.0
     use_quantile = (max_share > 0.35) or (non_empty < 4)
     if use_quantile:
         edges = _quantile_edges(v.to_numpy(), 6)
-        idx = pd.cut(series_num, bins=[edges[0]-1e-9] + edges[1:], labels=False, include_lowest=True)
+        idx = pd.cut(s, bins=[edges[0]-1e-9] + edges[1:], labels=False, include_lowest=True)
     else:
         edges = edges_eq; idx = idx_eq
     breaks_int: List[Tuple[int,int]] = []
@@ -326,10 +324,14 @@ def show_categorical_legend(title: str, items: List[Tuple[str,str]]):
     html = f"<div class='legend-card'><div class='legend-title'>{title}</div>{''.join(rows)}</div>"
     ph.markdown(html, unsafe_allow_html=True)
 
-def show_reference_legend(items: List[Tuple[str,str]]):
-    """Legenda fixa das camadas de referência (aparece em todos os mapas)."""
-    ph = st.session_state.get("_legend_ph")
-    if not ph or not items: return
+def show_reference_legend():
+    """Legenda fixa (sempre mostrada)."""
+    items = [
+        ("Áreas verdes", REF_GREEN),
+        ("Rios", REF_BLUE),
+        ("Linhas de trem", REF_DARKGRAY),
+        ("Linhas de metrô", REF_DARKGRAY),
+    ]
     rows = [f"<div class='legend-row'><span class='legend-swatch' style='background:{c}'></span><span>{l}</span></div>"
             for l,c in items]
     html = f"<div class='legend-card'><div class='legend-title'>Camadas de referência</div>{''.join(rows)}</div>"
@@ -346,56 +348,51 @@ def _show_deck(deck: "pdk.Deck"):
     except TypeError:
         st.pydeck_chart(deck, use_container_width=True)
 
-def collect_reference_overlays() -> Tuple[List["pdk.Layer"], List[Tuple[str,str]]]:
-    """Cria layers permanentes + itens de legenda."""
+def collect_reference_overlays() -> List["pdk.Layer"]:
+    """Cria layers permanentes; agora no TOPO e com opacidade 100%."""
     layers: List[pdk.Layer] = []
-    items: List[Tuple[str,str]] = []
 
-    # Áreas verdes (polígonos)
     g = load_green_areas()
     if g is not None and not g.empty:
         gj = json.loads(g[["geometry"]].to_json())
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=True, stroked=False, pickable=False,
-            get_fill_color=_hex_to_rgba(REF_GREEN, 90), get_line_width=0
+            get_fill_color=_hex_to_rgba(REF_GREEN, 255),  # 100% opaco
+            get_line_width=0
         ))
-        items.append(("Áreas verdes", REF_GREEN))
 
-    # Rios (linhas)
     r = load_rivers()
     if r is not None and not r.empty:
         gj = json.loads(r[["geometry"]].to_json())
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
-            get_line_color=_hex_to_rgba(REF_BLUE, 220), get_line_width=1.4, lineWidthUnits="pixels"
+            get_line_color=_hex_to_rgba(REF_BLUE, 255),   # 100% opaco
+            get_line_width=RIVER_WIDTH_PX, lineWidthUnits="pixels"
         ))
-        items.append(("Rios", REF_BLUE))
 
-    # Trem
     t = load_train_lines()
     if t is not None and not t.empty:
         gj = json.loads(t[["geometry"]].to_json())
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
-            get_line_color=_hex_to_rgba(REF_DARKGRAY, 220), get_line_width=1.8, lineWidthUnits="pixels"
+            get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
+            get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels"
         ))
-        items.append(("Linhas de trem", REF_DARKGRAY))
 
-    # Metrô
     m = load_metro_lines()
     if m is not None and not m.empty:
         gj = json.loads(m[["geometry"]].to_json())
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
-            get_line_color=_hex_to_rgba(REF_DARKGRAY, 220), get_line_width=1.8, lineWidthUnits="pixels"
+            get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
+            get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels"
         ))
-        items.append(("Linhas de metrô", REF_DARKGRAY))
 
-    return layers, items
+    return layers
 
 def render_pydeck(center: Tuple[float, float],
                   gdf_layer: Optional["gpd.GeoDataFrame"],
@@ -405,45 +402,39 @@ def render_pydeck(center: Tuple[float, float],
                   categorical_legend: Optional[List[Tuple[str, str]]] = None,
                   numeric_legend: Optional[Tuple[str, List[Tuple[int,int]], List[str]]] = None,
                   draw_setores_outline: bool = False):
-    layers = []
+    layers: List[pdk.Layer] = []
 
-    # Camada temática principal
+    # 1) camada temática
     if gdf_layer is not None and not gdf_layer.empty and "__rgba__" in gdf_layer.columns:
         geojson = json.loads(gdf_layer[["geometry","__rgba__"] + ([tooltip_field] if tooltip_field else [])].to_json())
-        lyr = pdk.Layer(
-            "GeoJsonLayer",
-            data=geojson,
+        layers.append(pdk.Layer(
+            "GeoJsonLayer", data=geojson,
             filled=True, stroked=False, pickable=bool(tooltip_field), auto_highlight=True,
             get_fill_color="properties.__rgba__", get_line_width=0,
-        )
-        layers.append(lyr)
+        ))
 
-    # Overlays permanentes (sempre por cima da cloroplética)
-    ref_layers, ref_items = collect_reference_overlays()
-    layers.extend(ref_layers)
-
-    # Limite administrativo (contorno)
+    # 2) contornos e setores (se desejar)
     if limite_gdf is not None and not limite_gdf.empty:
         gj_lim = json.loads(limite_gdf[["geometry"]].to_json())
-        outline = pdk.Layer(
+        layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj_lim, filled=False, stroked=True,
             get_line_color=[20,20,20,180], get_line_width=1, lineWidthUnits="pixels"
-        )
-        layers.append(outline)
+        ))
 
-    # Traço dos setores (opcional)
     if draw_setores_outline:
         try:
             geoms_only, _ = load_setores_geom()
         except Exception:
             geoms_only = None
-        gj = json.loads(geoms_only[["geometry"]].to_json()) if geoms_only is not None else None
-        if gj is not None:
-            sectors_outline = pdk.Layer(
+        if geoms_only is not None:
+            gj = json.loads(geoms_only[["geometry"]].to_json())
+            layers.append(pdk.Layer(
                 "GeoJsonLayer", data=gj, filled=False, stroked=True,
                 get_line_color=[80,80,80,160], get_line_width=0.6, lineWidthUnits="pixels"
-            )
-            layers.append(sectors_outline)
+            ))
+
+    # 3) OVERLAYS PERMANENTES NO TOPO (não misturam com a cloroplética)
+    layers.extend(collect_reference_overlays())
 
     deck = pdk.Deck(
         layers=layers,
@@ -453,7 +444,7 @@ def render_pydeck(center: Tuple[float, float],
     )
     _show_deck(deck)
 
-    # Legendas: temática + referência fixa
+    # legenda temática
     if categorical_legend is not None:
         show_categorical_legend("Área de influência de bairro", categorical_legend)
     elif numeric_legend is not None:
@@ -462,8 +453,8 @@ def render_pydeck(center: Tuple[float, float],
     else:
         clear_legend()
 
-    # Sempre acrescenta a legenda de referência
-    show_reference_legend(ref_items)
+    # legenda fixa das camadas de referência (sempre)
+    show_reference_legend()
 
 # ====================== App ======================
 def main() -> None:
@@ -490,7 +481,7 @@ def main() -> None:
         center = (-23.55, -46.63)
         var = ui["variavel"]
 
-        # limites
+        # Limite administrativo
         limite_gdf = None
         draw_setores_outline = (ui["limite"] == "Setores Censitários (linhas)")
         if ui["limite"] not in (PLACEHOLDER_LIM, "Setores Censitários (linhas)"):
@@ -500,13 +491,10 @@ def main() -> None:
 
         # ====== VARIÁVEIS ======
         if var == "Área de influência de bairro":
-            lut_color = {
-                0:"#542788", 1:"#f7f7f7", 2:"#d8daeb", 3:"#b35806", 4:"#b2abd2",
-                5:"#8073ac", 6:"#fdb863", 7:"#7f3b08", 8:"#e08214", 9:"#fee0b6",
-            }
+            lut_color = {0:"#542788",1:"#f7f7f7",2:"#d8daeb",3:"#b35806",4:"#b2abd2",
+                         5:"#8073ac",6:"#fdb863",7:"#7f3b08",8:"#e08214",9:"#fee0b6"}
             lut_label = {
-                0:"Predominância uso misto",
-                1:"Zona de transição local",
+                0:"Predominância uso misto", 1:"Zona de transição local",
                 2:"Periférico residencial de média densidade",
                 3:"Transição central verticalizada",
                 4:"Periférico adensado em transição",
@@ -516,7 +504,6 @@ def main() -> None:
                 8:"Alta densidade residencial",
                 9:"Central verticalizado",
             }
-
             iso_raw = load_isocronas_raw()
             gdf_layer = None
             legend_items = None
@@ -525,32 +512,23 @@ def main() -> None:
                 if cls:
                     g = iso_raw[[cls,"geometry"]].copy()
                     k = pd.to_numeric(g[cls], errors="coerce").astype("Int64")
-                    g = g[~k.isna()].copy()
-                    g["__k__"] = k
-
-                    # simplificar + explode (hover por polígono)
+                    g = g[~k.isna()].copy(); g["__k__"] = k
                     try:
                         gm = g.to_crs(3857)
                         gm["geometry"] = gm.buffer(0).geometry.simplify(SIMPLIFY_M_ISOCRONAS, preserve_topology=True)
                         g = gm.to_crs(4326).explode(index_parts=False, ignore_index=True)
                     except Exception:
                         pass
-
                     g["__rgba__"]  = g["__k__"].map(lambda v: _hex_to_rgba(lut_color.get(int(v), "#c8c8c8"), 200))
                     g["__label__"] = g["__k__"].map(lambda v: f"{int(v)} – {lut_label.get(int(v),'Outros')}")
                     gdf_layer = g[["geometry","__rgba__","__label__"]]
                     center = center_from_bounds(g)
-
                     present = sorted({int(v) for v in g["__k__"].dropna().unique().tolist()})
                     legend_items = [(f"{k} – {lut_label[k]}", lut_color[k]) for k in present]
 
-            render_pydeck(
-                center, gdf_layer, limite_gdf,
-                tooltip_field="__label__",
-                categorical_legend=legend_items,
-                numeric_legend=None,
-                draw_setores_outline=draw_setores_outline
-            )
+            render_pydeck(center, gdf_layer, limite_gdf,
+                          tooltip_field="__label__", categorical_legend=legend_items,
+                          numeric_legend=None, draw_setores_outline=draw_setores_outline)
             return
 
         # Demais variáveis (setores)
@@ -576,10 +554,9 @@ def main() -> None:
                         joined["__rgba__"] = s.map(lambda v: _hex_to_rgba(cmap.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
                         joined["__label__"] = s.map(lambda v: labels.get(int(v), "Outros") if pd.notna(v) else "Sem dado")
                         gdf_layer = joined[["geometry","__rgba__","__label__"]]
-                        legend_items = [(labels[k], cmap[k]) for k in sorted(cmap)]
                         render_pydeck(center, gdf_layer, limite_gdf,
-                                      tooltip_field="__label__", categorical_legend=legend_items,
-                                      draw_setores_outline=draw_setores_outline)
+                                      tooltip_field="__label__", categorical_legend=[(labels[k], cmap[k]) for k in sorted(cmap)],
+                                      numeric_legend=None, draw_setores_outline=draw_setores_outline)
                         return
                     else:
                         classes, breaks_int, palette = classify_auto6(joined["__value__"])
@@ -588,13 +565,13 @@ def main() -> None:
                         joined["__label__"] = pd.to_numeric(joined["__value__"], errors="coerce").round(0).astype("Int64").astype(str)
                         gdf_layer = joined[["geometry","__rgba__","__label__"]]
                         render_pydeck(center, gdf_layer, limite_gdf,
-                                      tooltip_field="__label__",
-                                      numeric_legend=(var, breaks_int, palette),
-                                      draw_setores_outline=draw_setores_outline)
+                                      tooltip_field="__label__", categorical_legend=None,
+                                      numeric_legend=(var, breaks_int, palette), draw_setores_outline=draw_setores_outline)
                         return
 
-        # sem variável: limpa mapa/legenda
-        render_pydeck(center, None, limite_gdf, tooltip_field=None, categorical_legend=None, numeric_legend=None,
+        # sem variável: mapa base + overlays + legenda
+        render_pydeck(center, None, limite_gdf, tooltip_field=None,
+                      categorical_legend=None, numeric_legend=None,
                       draw_setores_outline=draw_setores_outline)
 
 if __name__ == "__main__":
