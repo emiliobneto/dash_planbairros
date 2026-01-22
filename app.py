@@ -15,14 +15,15 @@ def _import_stack():
     try:
         import geopandas as gpd              # geometrias
         import pydeck as pdk                 # render WebGL
+        from shapely import wkb, wkt         # fallback de geometria
         from pyarrow import parquet as pq    # leitura colunar seletiva
-        return gpd, pdk, pq
+        return gpd, pdk, wkb, wkt, pq
     except ImportError as e:
         st.set_page_config(page_title="PlanBairros", page_icon="🏙️", layout="wide")
         st.error(f"Dependência ausente: **{e}**. Instale os pacotes do requirements.txt e reinicie.")
         st.stop()
 
-gpd, pdk, pq = _import_stack()
+gpd, pdk, wkb, wkt, pq = _import_stack()
 
 # ============================  Page / Theme  ================================
 st.set_page_config(page_title="PlanBairros", page_icon="🏙️", layout="wide", initial_sidebar_state="collapsed")
@@ -43,14 +44,11 @@ def inject_css() -> None:
             font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
         }}
 
-        /* remove o "respiro" entre logo e filtros */
-        .main .block-container {{
-            padding-top: 0.2rem !important;
-            padding-bottom: .8rem !important;
-        }}
+        /* tira o “respiro” visual entre logo e filtros */
+        .main .block-container {{ padding-top: 0.2rem !important; padding-bottom: .8rem !important; }}
 
-        /* linha do header: logo à esquerda, barra azul só na direita */
-        .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.35rem; }}
+        /* header: logo à esquerda, barra azul só na direita */
+        .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
         .pb-logo {{ height: 84px; width:auto; display:block; }}
         .pb-header {{
             background:{PB_NAVY}; color:#fff; border-radius:14px;
@@ -58,12 +56,8 @@ def inject_css() -> None:
         }}
         .pb-title   {{ font-size: 3.8rem; font-weight: 900; line-height:1.05; letter-spacing:.2px }}
         .pb-subtitle{{ font-size: 1.9rem; opacity:.95; margin-top:6px }}
-
-        .pb-card {{
-            background:#fff; border:1px solid rgba(20,64,125,.10);
-            box-shadow:0 1px 2px rgba(0,0,0,.04);
-            border-radius:14px; padding:12px;
-        }}
+        .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04);
+                   border-radius:14px; padding:12px; }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -76,13 +70,13 @@ except NameError:
     REPO_ROOT = Path.cwd()
 
 DATA_DIR = (REPO_ROOT / "limites_administrativos") if (REPO_ROOT / "limites_administrativos").exists() else REPO_ROOT
-LOGO_PATH = REPO_ROOT / "assets" / "logo_todos.jpg"   # << pedido do cliente
+LOGO_PATH = REPO_ROOT / "assets" / "logo_todos.jpg"   # caminho solicitado
 
 def _logo_data_uri() -> str:
     if LOGO_PATH.exists():
         b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
         return f"data:image/{LOGO_PATH.suffix.lstrip('.').lower()};base64,{b64}"
-    # fallback
+    # fallback seguro
     return "https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/logomark/streamlit-mark-color.png"
 
 def _slug(s: str) -> str:
@@ -116,6 +110,37 @@ def center_from_bounds(gdf) -> tuple[float, float]:
     minx, miny, maxx, maxy = gdf.total_bounds
     return ((miny + maxy) / 2, (minx + maxx) / 2)
 
+# ===================  Leitor GeoParquet robusto (evita crash)  ==============
+def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Optional["gpd.GeoDataFrame"]:
+    """Tenta ler como GeoParquet. Se perder o metadado (caso comum com columns=...),
+    reconstrói a geometria via WKB/WKT."""
+    if not path:
+        return None
+    try:
+        gdf = gpd.read_parquet(path, columns=columns)
+        # Em alguns arquivos, ao selecionar colunas vira DataFrame comum:
+        if not isinstance(gdf, gpd.GeoDataFrame) or "geometry" not in gdf.columns:
+            raise ValueError("Perdeu metadado geoespacial; forçando fallback WKB/WKT.")
+        if gdf.crs is None:
+            gdf = gdf.set_crs(4326)
+        return gdf.to_crs(4326)
+    except Exception:
+        try:
+            table = pq.read_table(str(path), columns=columns)
+            pdf = table.to_pandas()
+            geom_col = find_col(pdf.columns, "geometry", "geom", "wkb", "wkt")
+            if geom_col is None:
+                return None
+            vals = pdf[geom_col]
+            if vals.dropna().astype(str).str.startswith(("POLY", "MULTI", "LINE", "POINT")).any():
+                geo = vals.dropna().apply(wkt.loads)
+            else:
+                geo = vals.dropna().apply(lambda b: wkb.loads(b, hex=isinstance(b, str)))
+            gdf = gpd.GeoDataFrame(pdf.drop(columns=[geom_col]), geometry=geo, crs=4326)
+            return gdf
+        except Exception:
+            return None
+
 # =====================  I/O eficiente: colunas seletivas  ===================
 @st.cache_data(show_spinner=False, ttl=3600)
 def _parquet_columns(path: Path) -> List[str]:
@@ -127,14 +152,14 @@ def load_isocronas() -> Optional["gpd.GeoDataFrame"]:
     if not p: return None
     cols = _parquet_columns(p)
     keep = [c for c in ["geometry","nova_class"] if c in cols]
-    return gpd.read_parquet(p, columns=keep).set_crs(4326).to_crs(4326)
+    return _read_gdf_robusto(p, keep)
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
     stems = {"Distritos":["Distritos"],"ZonasOD2023":["ZonasOD2023","ZonasOD"],"Subprefeitura":["Subprefeitura","subprefeitura"],"Isócronas":["isocronas","isócronas"]}.get(name,[name])
     p = _first_parquet_by_stems(DATA_DIR, stems)
     if not p: return None
-    return gpd.read_parquet(p, columns=["geometry"]).set_crs(4326).to_crs(4326)
+    return _read_gdf_robusto(p, ["geometry"])
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str], Optional[Path]]:
@@ -142,8 +167,9 @@ def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str], Op
     if not p: return None, None, None
     cols = _parquet_columns(p)
     id_col = find_col(cols, "id","cd_setor","geocodigo","codigo","geocod","id_setor")
-    keep = [c for c in [id_col,"geometry"] if c]
-    gdf = gpd.read_parquet(p, columns=keep).set_crs(4326).to_crs(4326)
+    keep = [c for c in [id_col, "geometry"] if c]
+    # usa o leitor robusto (evita ValueError do set_crs)
+    gdf = _read_gdf_robusto(p, keep)
     return gdf, id_col, p
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
@@ -169,8 +195,7 @@ def load_metric_column(var_label: str, id_col_hint: Optional[str], path_hint: Op
 
 # ======================  Cores util (gradiente → rgba)  =====================
 def _hex_to_rgba(h: str, a: int = 190) -> list[int]:
-    h = h.lstrip("#")
-    return [int(h[i:i+2], 16) for i in (0, 2, 4)] + [a]
+    h = h.lstrip("#"); return [int(h[i:i+2], 16) for i in (0, 2, 4)] + [a]
 
 def ramp_color(v: float, vmin: float, vmax: float, colors: list[str]) -> str:
     if v is None or (isinstance(v, float) and math.isnan(v)): return "#c8c8c8"
@@ -185,6 +210,9 @@ def ramp_color(v: float, vmin: float, vmax: float, colors: list[str]) -> str:
 
 # ===============================  UI  =======================================
 def left_controls() -> Dict[str, Any]:
+    # “nudge” negativo remove qualquer espaço visual residual
+    st.markdown("<div style='margin-top:-6px'></div>", unsafe_allow_html=True)
+
     st.markdown("### Variáveis (Setores Censitários e Isócronas)")
     var = st.selectbox(
         "Selecione a variável",
@@ -216,8 +244,7 @@ def left_controls() -> Dict[str, Any]:
 def render_pydeck(center: Tuple[float, float],
                   setores_joined: Optional["gpd.GeoDataFrame"],
                   limite_gdf: Optional["gpd.GeoDataFrame"],
-                  var_label: Optional[str],
-                  labels_on: bool):
+                  var_label: Optional[str]):
     layers = []
 
     # Base ESRI (sem token)
@@ -238,10 +265,12 @@ def render_pydeck(center: Tuple[float, float],
         s = pd.to_numeric(setores_joined["__value__"], errors="coerce")
         vmin, vmax = float(s.min()), float(s.max())
         gdf = setores_joined.copy()
+
         if var_label == "Cluster (perfil urbano)":
-            # paleta categórica simples
             cmap = {0:"#bf7db2",1:"#f7bd6a",2:"#cf651f",3:"#ede4e6",4:"#793393"}
-            gdf["__rgba__"] = pd.to_numeric(gdf["__value__"], errors="coerce").map(lambda v: _hex_to_rgba(cmap.get(int(v), "#c8c8c8"), 200))
+            gdf["__rgba__"] = pd.to_numeric(gdf["__value__"], errors="coerce").map(
+                lambda v: _hex_to_rgba(cmap.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200)
+            )
         else:
             gdf["__rgba__"] = s.map(lambda v: _hex_to_rgba(ramp_color(v, vmin, vmax, ORANGE_RED_GRAD), 200))
 
@@ -269,7 +298,8 @@ def render_pydeck(center: Tuple[float, float],
         map_style=None,
         tooltip={"text": f"{var_label}: {{__value__}}"} if var_label and var_label != "Cluster (perfil urbano)" else None,
     )
-    st.pydeck_chart(deck, use_container_width=True, height=780)
+    # versões mais antigas do Streamlit não aceitam height=...
+    st.pydeck_chart(deck, use_container_width=True)
 
 # ================================  App  =====================================
 def main() -> None:
@@ -305,32 +335,24 @@ def main() -> None:
             if limite_gdf is not None and len(limite_gdf) > 0:
                 center = center_from_bounds(limite_gdf)
 
-        setores_joined = None
         var = ui["variavel"]
+
+        # Isócronas (categorias)
         if var == "Área de influência de bairro":
             iso = load_isocronas()
             if iso is None or len(iso) == 0:
                 st.info("Isócronas não encontradas.")
+                render_pydeck(center, None, limite_gdf, None)
             else:
-                # pinta categorias como setores_joined para reaproveitar render
-                lut = {
-                    0: ("Predominância uso misto", "#542788"), 1: ("Zona de transição local", "#f7f7f7"),
-                    2: ("Periférico residencial média densidade", "#d8daeb"),
-                    3: ("Transição central verticalizada", "#b35806"),
-                    4: ("Periférico adensado em transição", "#b2abd2"),
-                    5: ("Centralidade comercial e de serviços", "#8073ac"),
-                    6: ("Predominância residencial média densidade", "#fdb863"),
-                    7: ("Áreas íngremes e de encosta", "#7f3b08"),
-                    8: ("Alta densidade residencial", "#e08214"),
-                    9: ("Central verticalizado", "#fee0b6"),
-                }
+                lut = {0:"#542788",1:"#f7f7f7",2:"#d8daeb",3:"#b35806",4:"#b2abd2",
+                       5:"#8073ac",6:"#fdb863",7:"#7f3b08",8:"#e08214",9:"#fee0b6"}
                 cls = find_col(iso.columns, "nova_class")
                 if cls:
                     g = iso.copy()
                     g["__value__"] = pd.to_numeric(g[cls], errors="coerce")
-                    g["__rgba__"] = g["__value__"].map(lambda v: _hex_to_rgba(lut.get(int(v), ("Outros","#c8c8c8"))[1], 200))
-                    geojson = json.loads(g[["geometry","__rgba__","__value__"]].to_json(drop_id=True))
+                    g["__rgba__"] = g["__value__"].map(lambda v: _hex_to_rgba(lut.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
                     center = center_from_bounds(g)
+                    geojson = json.loads(g[["geometry","__rgba__","__value__"]].to_json(drop_id=True))
                     deck = pdk.Deck(
                         layers=[
                             pdk.Layer(
@@ -351,12 +373,14 @@ def main() -> None:
                         initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11),
                         map_style=None,
                     )
-                    st.pydeck_chart(deck, use_container_width=True, height=780)
+                    st.pydeck_chart(deck, use_container_width=True)
                 else:
                     st.info("A coluna 'nova_class' não foi encontrada nas isócronas.")
-            return  # já renderizado
+                    render_pydeck(center, None, limite_gdf, None)
+            return  # finaliza após render
 
-        # Demais variáveis / cluster (setores)
+        # Setores (variáveis numéricas / cluster)
+        setores_joined = None
         if var != PLACEHOLDER_VAR:
             geoms, id_col, setores_path = load_setores_geom()
             if geoms is None or id_col is None:
@@ -372,8 +396,7 @@ def main() -> None:
         render_pydeck(center=center,
                       setores_joined=setores_joined,
                       limite_gdf=limite_gdf,
-                      var_label=None if var in (PLACEHOLDER_VAR, "Área de influência de bairro") else var,
-                      labels_on=ui["labels_on"])
+                      var_label=None if var in (PLACEHOLDER_VAR, "Área de influência de bairro") else var)
 
 if __name__ == "__main__":
     main()
