@@ -33,6 +33,10 @@ ORANGE_RED_GRAD = ["#fff7ec","#fee8c8","#fdd49e","#fdbb84","#fc8d59","#e34a33","
 PLACEHOLDER_VAR = "— selecione uma variável —"
 PLACEHOLDER_LIM = "— selecione o limite —"
 
+# ---- tamanhos solicitados
+LOGO_HEIGHT = 120           # px (antes: 88)
+MAP_HEIGHT  = 900           # px (antes: ~780)
+
 # ================================  CSS  =====================================
 def inject_css() -> None:
     st.markdown(
@@ -51,7 +55,7 @@ def inject_css() -> None:
 
         /* header: logo à esquerda, barra azul só à direita */
         .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
-        .pb-logo {{ height: 88px; width:auto; display:block; }}
+        .pb-logo {{ height: {LOGO_HEIGHT}px; width:auto; display:block; }}
         .pb-header {{
             background:{PB_NAVY}; color:#fff; border-radius:14px;
             padding: 18px 20px; width:100%;
@@ -242,13 +246,20 @@ def left_controls() -> Dict[str, Any]:
     return {"variavel": var, "limite": limite, "labels_on": labels_on}
 
 # =============================  Render (pydeck)  ============================
+def _show_deck(deck: "pdk.Deck"):
+    """Tenta usar altura customizada; em versões antigas faz fallback sem height."""
+    try:
+        st.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT)
+    except TypeError:
+        st.pydeck_chart(deck, use_container_width=True)
+
 def render_pydeck(center: Tuple[float, float],
                   setores_joined: Optional["gpd.GeoDataFrame"],
                   limite_gdf: Optional["gpd.GeoDataFrame"],
                   var_label: Optional[str]):
     layers = []
 
-    # Camada de setores (variáveis numéricas e cluster)
+    # Setores (variáveis numéricas e cluster)
     if setores_joined is not None and not setores_joined.empty and "__value__" in setores_joined.columns:
         s = pd.to_numeric(setores_joined["__value__"], errors="coerce")
         vmin, vmax = float(s.min()), float(s.max())
@@ -283,10 +294,10 @@ def render_pydeck(center: Tuple[float, float],
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
-        map_style=None,  # intencional: evita qualquer código JS embutido
+        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",  # estável, sem JS inline
         tooltip={"text": f"{var_label}: {{__value__}}"} if var_label and var_label != "Cluster (perfil urbano)" else None,
     )
-    st.pydeck_chart(deck, use_container_width=True)  # sem height (compat total)
+    _show_deck(deck)
 
 # ================================  App  =====================================
 def main() -> None:
@@ -324,10 +335,10 @@ def main() -> None:
 
         var = ui["variavel"]
 
-        # Isócronas (categorias)
+        # Isócronas (categorias) -> reutiliza pipeline de setores
+        setores_joined = None
         if var == "Área de influência de bairro":
             iso = load_isocronas()
-            setores_joined = None
             if iso is not None and len(iso) > 0:
                 lut = {0:"#542788",1:"#f7f7f7",2:"#d8daeb",3:"#b35806",4:"#b2abd2",
                        5:"#8073ac",6:"#fdb863",7:"#7f3b08",8:"#e08214",9:"#fee0b6"}
@@ -342,7 +353,6 @@ def main() -> None:
             return
 
         # Setores (variáveis numéricas / cluster)
-        setores_joined = None
         if var != PLACEHOLDER_VAR:
             geoms, id_col, setores_path = load_setores_geom()
             if geoms is not None and id_col is not None:
