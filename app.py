@@ -37,6 +37,12 @@ LOGO_HEIGHT = 120
 MAP_HEIGHT  = 900
 SIMPLIFY_M_SETORES   = 25   # ~25 m
 SIMPLIFY_M_ISOCRONAS = 80   # ~80 m
+SIMPLIFY_M_OVERLAY   = 20   # ~20 m (rios/linhas/verde)
+
+# Cores de referência (overlays permanentes)
+REF_GREEN    = "#2E7D32"  # áreas verdes
+REF_BLUE     = "#1E88E5"  # rios
+REF_DARKGRAY = "#444444"  # trem/metro
 
 def inject_css() -> None:
     st.markdown(
@@ -77,10 +83,6 @@ def _logo_data_uri() -> str:
         return f"data:image/{LOGO_PATH.suffix.lstrip('.').lower()};base64,{b64}"
     return "https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/logomark/streamlit-mark-color.png"
 
-def _slug(s: str) -> str:
-    s2 = _ud_norm("NFKD", str(s)).encode("ASCII", "ignore").decode("ASCII")
-    return re.sub(r"[^a-z0-9]+", "", s2.strip().lower())
-
 def find_col(df_cols, *cands) -> Optional[str]:
     low = {c.lower(): c for c in df_cols}
     norm = {re.sub(r"[^a-z0-9]", "", k.lower()): v for k, v in low.items()}
@@ -94,6 +96,9 @@ def find_col(df_cols, *cands) -> Optional[str]:
 def center_from_bounds(gdf) -> tuple[float, float]:
     minx, miny, maxx, maxy = gdf.total_bounds
     return ((miny + maxy) / 2, (minx + maxx) / 2)
+
+def _hex_to_rgba(h: str, a: int = 190) -> list[int]:
+    h = h.lstrip("#"); return [int(h[i:i+2],16) for i in (0,2,4)] + [a]
 
 # ====================== leitores ======================
 def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Optional["gpd.GeoDataFrame"]:
@@ -137,21 +142,15 @@ def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
     if not METRICS_FILE.exists(): return None
     cols = pq.ParquetFile(str(METRICS_FILE)).schema.names
 
-    # candidatos por variável (aceita vários possíveis nomes no parquet)
     mapping: Dict[str, List[str] | str] = {
         "População (Pessoa/ha)": ["populacao", "pop", "pessoa_ha"],
         "Densidade demográfica (hab/ha)": ["densidade_demografica", "densidade", "hab_ha"],
         "Elevação média": ["elevacao_media", "elevacao", "elev_med", "altitude_media"],
         "Cluster (perfil urbano)": ["cluster", "classe", "label"],
     }
-
     cand = mapping.get(var_label, var_label)
-    if isinstance(cand, (list, tuple)):
-        wanted = find_col(cols, *cand)
-    else:
-        wanted = find_col(cols, cand)
-    if not wanted or "fid" not in cols:
-        return None
+    wanted = find_col(cols, *(cand if isinstance(cand, (list, tuple)) else [cand]))
+    if not wanted or "fid" not in cols: return None
 
     table = pq.read_table(str(METRICS_FILE), columns=["fid", wanted])
     df = table.to_pandas()
@@ -174,10 +173,44 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
     if not p.exists(): return None
     return _read_gdf_robusto(p, ["geometry"])
 
-# ====================== cores / classes ======================
-def _hex_to_rgba(h: str, a: int = 190) -> list[int]:
-    h = h.lstrip("#"); return [int(h[i:i+2],16) for i in (0,2,4)] + [a]
+# ---------- Overlays permanentes (áreas verdes, rios, trem, metrô) ----------
+def _read_geojson_any(*names: str) -> Optional["gpd.GeoDataFrame"]:
+    for nm in names:
+        p = DATA_DIR / nm
+        if p.exists():
+            try:
+                g = gpd.read_file(p)
+                if g.crs is None: g = g.set_crs(4326)
+                g = g.to_crs(4326)
+                # simplificação leve
+                try:
+                    gm = g.to_crs(3857)
+                    gm["geometry"] = gm.geometry.buffer(0).simplify(SIMPLIFY_M_OVERLAY, preserve_topology=True)
+                    g = gm.to_crs(4326)
+                except Exception:
+                    pass
+                return g
+            except Exception:
+                continue
+    return None
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
+    return _read_geojson_any("area_verde.geojson", "areas_verdes.geojson")
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_rivers() -> Optional["gpd.GeoDataFrame"]:
+    return _read_geojson_any("rios.geojson")
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_metro_lines() -> Optional["gpd.GeoDataFrame"]:
+    return _read_geojson_any("linhas metro.geojson", "linhas_metro.geojson")
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_train_lines() -> Optional["gpd.GeoDataFrame"]:
+    return _read_geojson_any("linhas trem.geojson", "linhas_trem.geojson")
+
+# ====================== cores / classes (numéricas) ======================
 def _sample_gradient(colors: List[str], n: int) -> List[str]:
     if n <= 1: return [colors[-1]]
     out = []
@@ -208,10 +241,6 @@ def _quantile_edges(vals: np.ndarray, k: int = 6) -> List[float]:
     return edges
 
 def classify_auto6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[int,int]], List[str]]:
-    """
-    Adapta: tenta intervalos iguais; se desequilibrado, cai para quantis.
-    Sempre usa série numérica no pd.cut (evita TypeError).
-    """
     series_num = pd.to_numeric(series, errors="coerce")
     v = series_num.dropna()
     if v.empty:
@@ -297,6 +326,15 @@ def show_categorical_legend(title: str, items: List[Tuple[str,str]]):
     html = f"<div class='legend-card'><div class='legend-title'>{title}</div>{''.join(rows)}</div>"
     ph.markdown(html, unsafe_allow_html=True)
 
+def show_reference_legend(items: List[Tuple[str,str]]):
+    """Legenda fixa das camadas de referência (aparece em todos os mapas)."""
+    ph = st.session_state.get("_legend_ph")
+    if not ph or not items: return
+    rows = [f"<div class='legend-row'><span class='legend-swatch' style='background:{c}'></span><span>{l}</span></div>"
+            for l,c in items]
+    html = f"<div class='legend-card'><div class='legend-title'>Camadas de referência</div>{''.join(rows)}</div>"
+    st.markdown(html, unsafe_allow_html=True)
+
 def clear_legend():
     ph = st.session_state.get("_legend_ph")
     if ph: ph.empty()
@@ -308,6 +346,57 @@ def _show_deck(deck: "pdk.Deck"):
     except TypeError:
         st.pydeck_chart(deck, use_container_width=True)
 
+def collect_reference_overlays() -> Tuple[List["pdk.Layer"], List[Tuple[str,str]]]:
+    """Cria layers permanentes + itens de legenda."""
+    layers: List[pdk.Layer] = []
+    items: List[Tuple[str,str]] = []
+
+    # Áreas verdes (polígonos)
+    g = load_green_areas()
+    if g is not None and not g.empty:
+        gj = json.loads(g[["geometry"]].to_json())
+        layers.append(pdk.Layer(
+            "GeoJsonLayer", data=gj,
+            filled=True, stroked=False, pickable=False,
+            get_fill_color=_hex_to_rgba(REF_GREEN, 90), get_line_width=0
+        ))
+        items.append(("Áreas verdes", REF_GREEN))
+
+    # Rios (linhas)
+    r = load_rivers()
+    if r is not None and not r.empty:
+        gj = json.loads(r[["geometry"]].to_json())
+        layers.append(pdk.Layer(
+            "GeoJsonLayer", data=gj,
+            filled=False, stroked=True, pickable=False,
+            get_line_color=_hex_to_rgba(REF_BLUE, 220), get_line_width=1.4, lineWidthUnits="pixels"
+        ))
+        items.append(("Rios", REF_BLUE))
+
+    # Trem
+    t = load_train_lines()
+    if t is not None and not t.empty:
+        gj = json.loads(t[["geometry"]].to_json())
+        layers.append(pdk.Layer(
+            "GeoJsonLayer", data=gj,
+            filled=False, stroked=True, pickable=False,
+            get_line_color=_hex_to_rgba(REF_DARKGRAY, 220), get_line_width=1.8, lineWidthUnits="pixels"
+        ))
+        items.append(("Linhas de trem", REF_DARKGRAY))
+
+    # Metrô
+    m = load_metro_lines()
+    if m is not None and not m.empty:
+        gj = json.loads(m[["geometry"]].to_json())
+        layers.append(pdk.Layer(
+            "GeoJsonLayer", data=gj,
+            filled=False, stroked=True, pickable=False,
+            get_line_color=_hex_to_rgba(REF_DARKGRAY, 220), get_line_width=1.8, lineWidthUnits="pixels"
+        ))
+        items.append(("Linhas de metrô", REF_DARKGRAY))
+
+    return layers, items
+
 def render_pydeck(center: Tuple[float, float],
                   gdf_layer: Optional["gpd.GeoDataFrame"],
                   limite_gdf: Optional["gpd.GeoDataFrame"],
@@ -318,6 +407,7 @@ def render_pydeck(center: Tuple[float, float],
                   draw_setores_outline: bool = False):
     layers = []
 
+    # Camada temática principal
     if gdf_layer is not None and not gdf_layer.empty and "__rgba__" in gdf_layer.columns:
         geojson = json.loads(gdf_layer[["geometry","__rgba__"] + ([tooltip_field] if tooltip_field else [])].to_json())
         lyr = pdk.Layer(
@@ -328,6 +418,11 @@ def render_pydeck(center: Tuple[float, float],
         )
         layers.append(lyr)
 
+    # Overlays permanentes (sempre por cima da cloroplética)
+    ref_layers, ref_items = collect_reference_overlays()
+    layers.extend(ref_layers)
+
+    # Limite administrativo (contorno)
     if limite_gdf is not None and not limite_gdf.empty:
         gj_lim = json.loads(limite_gdf[["geometry"]].to_json())
         outline = pdk.Layer(
@@ -336,6 +431,7 @@ def render_pydeck(center: Tuple[float, float],
         )
         layers.append(outline)
 
+    # Traço dos setores (opcional)
     if draw_setores_outline:
         try:
             geoms_only, _ = load_setores_geom()
@@ -357,6 +453,7 @@ def render_pydeck(center: Tuple[float, float],
     )
     _show_deck(deck)
 
+    # Legendas: temática + referência fixa
     if categorical_legend is not None:
         show_categorical_legend("Área de influência de bairro", categorical_legend)
     elif numeric_legend is not None:
@@ -364,6 +461,9 @@ def render_pydeck(center: Tuple[float, float],
         show_numeric_legend(title, breaks, palette)
     else:
         clear_legend()
+
+    # Sempre acrescenta a legenda de referência
+    show_reference_legend(ref_items)
 
 # ====================== App ======================
 def main() -> None:
@@ -428,6 +528,7 @@ def main() -> None:
                     g = g[~k.isna()].copy()
                     g["__k__"] = k
 
+                    # simplificar + explode (hover por polígono)
                     try:
                         gm = g.to_crs(3857)
                         gm["geometry"] = gm.buffer(0).geometry.simplify(SIMPLIFY_M_ISOCRONAS, preserve_topology=True)
@@ -484,7 +585,6 @@ def main() -> None:
                         classes, breaks_int, palette = classify_auto6(joined["__value__"])
                         color_map = {i: _hex_to_rgba(palette[i], 200) for i in range(6)}
                         joined["__rgba__"] = classes.map(lambda k: color_map.get(int(k) if pd.notna(k) else -1, _hex_to_rgba("#c8c8c8",200)))
-                        # tooltip/label como inteiro (m)
                         joined["__label__"] = pd.to_numeric(joined["__value__"], errors="coerce").round(0).astype("Int64").astype(str)
                         gdf_layer = joined[["geometry","__rgba__","__label__"]]
                         render_pydeck(center, gdf_layer, limite_gdf,
