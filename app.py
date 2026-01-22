@@ -49,7 +49,7 @@ def inject_css() -> None:
             padding-bottom: .8rem !important;
         }}
 
-        /* header: logo à esquerda, barra azul só na direita */
+        /* header: logo à esquerda, barra azul só à direita */
         .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
         .pb-logo {{ height: 88px; width:auto; display:block; }}
         .pb-header {{
@@ -116,9 +116,9 @@ def center_from_bounds(gdf) -> tuple[float, float]:
     minx, miny, maxx, maxy = gdf.total_bounds
     return ((miny + maxy) / 2, (minx + maxx) / 2)
 
-# ===================  Leitor GeoParquet robusto (evita crash)  ==============
+# ===================  Leitor GeoParquet robusto (sem metadado)  =============
 def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Optional["gpd.GeoDataFrame"]:
-    """Tenta ler como GeoParquet. Se columns=... remover metadado, reconstrói via WKB/WKT."""
+    """Lê como GeoDataFrame; se columns=... remove o metadado, reconstrói via WKB/WKT."""
     if not path:
         return None
     try:
@@ -136,7 +136,7 @@ def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Option
             if geom_col is None:
                 return None
             vals = pdf[geom_col]
-            if vals.dropna().astype(str).str.startswith(("POLY", "MULTI", "LINE", "POINT")).any():
+            if vals.dropna().astype(str).str.startswith(("POLY","MULTI","LINE","POINT")).any():
                 geo = vals.dropna().apply(wkt.loads)
             else:
                 geo = vals.dropna().apply(lambda b: wkb.loads(b, hex=isinstance(b, str)))
@@ -242,35 +242,13 @@ def left_controls() -> Dict[str, Any]:
     return {"variavel": var, "limite": limite, "labels_on": labels_on}
 
 # =============================  Render (pydeck)  ============================
-# Função JS sem arrow functions (evita "Unexpected =")
-_TILE_RENDER_FN = """
-function renderSubLayers(props) {
-  const bbox = props.tile.bbox;
-  const west = bbox.west, south = bbox.south, east = bbox.east, north = bbox.north;
-  return new deck.BitmapLayer(props, {
-    data: null,
-    image: props.data,
-    bounds: [west, south, east, north]
-  });
-}
-"""
-
 def render_pydeck(center: Tuple[float, float],
                   setores_joined: Optional["gpd.GeoDataFrame"],
                   limite_gdf: Optional["gpd.GeoDataFrame"],
                   var_label: Optional[str]):
     layers = []
 
-    # Base ESRI (sem token) — usa função JS clássica (sem arrow)
-    esri = pdk.Layer(
-        "TileLayer",
-        data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        min_zoom=0, max_zoom=19, tile_size=256,
-        render_sub_layers=_TILE_RENDER_FN,
-    )
-    layers.append(esri)
-
-    # Setores (variáveis numéricas e cluster)
+    # Camada de setores (variáveis numéricas e cluster)
     if setores_joined is not None and not setores_joined.empty and "__value__" in setores_joined.columns:
         s = pd.to_numeric(setores_joined["__value__"], errors="coerce")
         vmin, vmax = float(s.min()), float(s.max())
@@ -284,7 +262,7 @@ def render_pydeck(center: Tuple[float, float],
         else:
             gdf["__rgba__"] = s.map(lambda v: _hex_to_rgba(ramp_color(v, vmin, vmax, ORANGE_RED_GRAD), 200))
 
-        geojson = json.loads(gdf[["geometry","__rgba__","__value__"]].to_json(drop_id=True))
+        geojson = json.loads(gdf[["geometry","__rgba__","__value__"]].to_json())
         setores_layer = pdk.Layer(
             "GeoJsonLayer",
             data=geojson,
@@ -293,9 +271,9 @@ def render_pydeck(center: Tuple[float, float],
         )
         layers.append(setores_layer)
 
-    # Contorno administrativo (opcional)
+    # Contorno administrativo
     if limite_gdf is not None and not limite_gdf.empty:
-        gj_lim = json.loads(limite_gdf[["geometry"]].to_json(drop_id=True))
+        gj_lim = json.loads(limite_gdf[["geometry"]].to_json())
         outline = pdk.Layer(
             "GeoJsonLayer", data=gj_lim, filled=False, stroked=True,
             get_line_color=[0,0,0,255], get_line_width=1.2
@@ -305,7 +283,7 @@ def render_pydeck(center: Tuple[float, float],
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
-        map_style=None,
+        map_style=None,  # intencional: evita qualquer código JS embutido
         tooltip={"text": f"{var_label}: {{__value__}}"} if var_label and var_label != "Cluster (perfil urbano)" else None,
     )
     st.pydeck_chart(deck, use_container_width=True)  # sem height (compat total)
@@ -349,10 +327,8 @@ def main() -> None:
         # Isócronas (categorias)
         if var == "Área de influência de bairro":
             iso = load_isocronas()
-            if iso is None or len(iso) == 0:
-                st.info("Isócronas não encontradas.")
-                render_pydeck(center, None, limite_gdf, None)
-            else:
+            setores_joined = None
+            if iso is not None and len(iso) > 0:
                 lut = {0:"#542788",1:"#f7f7f7",2:"#d8daeb",3:"#b35806",4:"#b2abd2",
                        5:"#8073ac",6:"#fdb863",7:"#7f3b08",8:"#e08214",9:"#fee0b6"}
                 cls = find_col(iso.columns, "nova_class")
@@ -360,37 +336,18 @@ def main() -> None:
                     g = iso.copy()
                     g["__value__"] = pd.to_numeric(g[cls], errors="coerce")
                     g["__rgba__"] = g["__value__"].map(lambda v: _hex_to_rgba(lut.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
-                    geojson = json.loads(g[["geometry","__rgba__","__value__"]].to_json(drop_id=True))
-                    # camada base + isócronas
-                    deck = pdk.Deck(
-                        layers=[
-                            pdk.Layer("TileLayer",
-                                      data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                                      min_zoom=0, max_zoom=19, tile_size=256,
-                                      render_sub_layers=_TILE_RENDER_FN),
-                            pdk.Layer("GeoJsonLayer", data=geojson, filled=True, stroked=False,
-                                      get_fill_color="properties.__rgba__", get_line_width=0)
-                        ],
-                        initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11),
-                        map_style=None,
-                    )
-                    st.pydeck_chart(deck, use_container_width=True)
-                else:
-                    st.info("A coluna 'nova_class' não foi encontrada nas isócronas.")
-                    render_pydeck(center, None, limite_gdf, None)
-            return  # encerra, já renderizado
+                    setores_joined = g[["geometry","__value__","__rgba__"]]
+                    center = center_from_bounds(g)
+            render_pydeck(center=center, setores_joined=setores_joined, limite_gdf=limite_gdf, var_label=var if setores_joined is not None else None)
+            return
 
         # Setores (variáveis numéricas / cluster)
         setores_joined = None
         if var != PLACEHOLDER_VAR:
             geoms, id_col, setores_path = load_setores_geom()
-            if geoms is None or id_col is None:
-                st.info("Setores não encontrados.")
-            else:
+            if geoms is not None and id_col is not None:
                 metric = load_metric_column(var, id_col, setores_path)
-                if metric is None:
-                    st.info(f"Coluna para '{var}' não encontrada.")
-                else:
+                if metric is not None:
                     setores_joined = geoms.merge(metric, on=id_col, how="left")
                     center = center_from_bounds(setores_joined)
 
