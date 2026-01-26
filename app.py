@@ -9,12 +9,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ====================== imports obrigatórios ======================
 def _import_stack():
     try:
         import geopandas as gpd
         import pydeck as pdk
-        from pydeck.types import Function as DeckFunction  # <<< para JS no TileLayer
+        from pydeck.types import Function as DeckFunction
         from shapely import wkb, wkt
         from pyarrow import parquet as pq
         return gpd, pdk, DeckFunction, wkb, wkt, pq
@@ -35,18 +34,16 @@ PLACEHOLDER_LIM = "— selecione o limite —"
 
 LOGO_HEIGHT = 120
 MAP_HEIGHT  = 900
-SIMPLIFY_M_SETORES   = 25   # ~25 m
-SIMPLIFY_M_ISOCRONAS = 80   # ~80 m
-SIMPLIFY_M_OVERLAY   = 20   # ~20 m (rios/linhas/verde)
+SIMPLIFY_M_SETORES   = 25
+SIMPLIFY_M_ISOCRONAS = 80
+SIMPLIFY_M_OVERLAY   = 20
 
-# Overlays permanentes (cores e espessuras)
-REF_GREEN    = "#2E7D32"  # áreas verdes
-REF_BLUE     = "#1E88E5"  # rios
-REF_DARKGRAY = "#333333"  # trilhos (trem/metro)
-
-# >>> espessuras reforçadas para garantir destaque
-RIVER_WIDTH_PX = 6.0    # ~2× o anterior
-RAIL_WIDTH_PX  = 8.0    # ~2× o anterior
+# Overlays
+REF_GREEN    = "#2E7D32"   # áreas verdes (polígono, 100% opaco)
+REF_BLUE     = "#1E88E5"   # rios (linha, 100% opaco)
+REF_DARKGRAY = "#333333"   # trilhos
+RIVER_WIDTH_PX = 6.0
+RAIL_WIDTH_PX  = 8.0
 
 def inject_css() -> None:
     st.markdown(
@@ -175,7 +172,33 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
     if not p.exists(): return None
     return _read_gdf_robusto(p, ["geometry"])
 
-# ---------- Overlays permanentes ----------
+# ---------- Overlays (geojson) ----------
+def _simplify_overlay_types(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDataFrame":
+    """Simplifica sem 'buffer(0)' em linhas (aplica buffer só em polígonos)."""
+    try:
+        gm = gdf.to_crs(3857)
+    except Exception:
+        return gdf
+    def _simp(geom):
+        try:
+            gt = geom.geom_type
+        except Exception:
+            return geom
+        try:
+            if gt in ("Polygon", "MultiPolygon"):
+                # valida polígono e simplifica
+                return geom.buffer(0).simplify(tol_m, preserve_topology=True)
+            else:
+                # LineString / MultiLineString / Point
+                return geom.simplify(tol_m, preserve_topology=False)
+        except Exception:
+            return geom
+    try:
+        gm["geometry"] = gm.geometry.apply(_simp)
+        return gm.to_crs(4326)
+    except Exception:
+        return gdf
+
 def _read_geojson_any(*names: str) -> Optional["gpd.GeoDataFrame"]:
     for nm in names:
         p = DATA_DIR / nm
@@ -184,12 +207,7 @@ def _read_geojson_any(*names: str) -> Optional["gpd.GeoDataFrame"]:
                 g = gpd.read_file(p)
                 if g.crs is None: g = g.set_crs(4326)
                 g = g.to_crs(4326)
-                try:
-                    gm = g.to_crs(3857)
-                    gm["geometry"] = gm.geometry.buffer(0).simplify(SIMPLIFY_M_OVERLAY, preserve_topology=True)
-                    g = gm.to_crs(4326)
-                except Exception:
-                    pass
+                g = _simplify_overlay_types(g, SIMPLIFY_M_OVERLAY)
                 return g
             except Exception:
                 continue
@@ -211,7 +229,7 @@ def load_metro_lines() -> Optional["gpd.GeoDataFrame"]:
 def load_train_lines() -> Optional["gpd.GeoDataFrame"]:
     return _read_geojson_any("linhas trem.geojson", "linhas_trem.geojson")
 
-# ====================== helpers de classes numéricas ======================
+# ====================== helpers numéricas ======================
 def _sample_gradient(colors: List[str], n: int) -> List[str]:
     if n <= 1: return [colors[-1]]
     out = []
@@ -270,7 +288,7 @@ def classify_auto6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[int,int]], 
     palette = _sample_gradient(ORANGE_RED_GRAD, 6)
     return idx.fillna(-1).astype("Int64"), breaks_int, palette
 
-# ====================== UI (filtros) ======================
+# ====================== UI ======================
 def left_controls() -> Dict[str, Any]:
     st.markdown("<div style='margin-top:-6px'></div>", unsafe_allow_html=True)
     st.markdown("### Variáveis (Setores Censitários e Isócronas)")
@@ -294,7 +312,6 @@ def left_controls() -> Dict[str, Any]:
         index=0, key="pb_limite", placeholder="Escolha…",
     )
 
-    # Toggle de fundo
     fundo = st.radio(
         "Fundo do mapa",
         ["Claro (CARTO)", "Satélite (ESRI)"],
@@ -316,7 +333,7 @@ def left_controls() -> Dict[str, Any]:
     st.session_state["_pb_prev_sel"] = sel_now
     return {"variavel": var, "limite": limite, "fundo": fundo}
 
-# ====================== Legendas (HTML) ======================
+# ====================== Legendas ======================
 def show_numeric_legend(title: str, breaks: List[Tuple[int,int]], palette: List[str]):
     ph = st.session_state.get("_legend_ph")
     if not ph: return
@@ -359,17 +376,21 @@ def _show_deck(deck: "pdk.Deck"):
     except TypeError:
         st.pydeck_chart(deck, use_container_width=True)
 
-def make_satellite_tilelayer() -> "pdk.Layer":
-    # Esri World Imagery como TileLayer; função JS envolta por pdk.types.Function
+def make_tile_basemap(style: str) -> "pdk.Layer":
+    """Retorna TileLayer base (raster) para o fundo."""
+    if style == "Satélite (ESRI)":
+        url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+    else:
+        # CARTO 'light_all' raster
+        url = "https://tilebasemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
     return pdk.Layer(
         "TileLayer",
-        data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        min_zoom=0, max_zoom=19, tile_size=256,
+        data=url, min_zoom=0, max_zoom=19, tile_size=256,
         render_sub_layers=DeckFunction(
             "function (props) { "
             "  var b = props.tile.bbox; "
             "  return new deck.BitmapLayer({ "
-            "    id: 'esri-satellite', "
+            "    id: 'basemap', "
             "    image: props.data, "
             "    bounds: [b.west, b.south, b.east, b.north] "
             "  }); "
@@ -387,8 +408,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=True, stroked=False, pickable=False,
-            get_fill_color=_hex_to_rgba(REF_GREEN, 255),
-            get_line_width=0
+            get_fill_color=_hex_to_rgba(REF_GREEN, 255), get_line_width=0
         ))
 
     r = load_rivers()
@@ -398,7 +418,8 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
             get_line_color=_hex_to_rgba(REF_BLUE, 255),
-            get_line_width=RIVER_WIDTH_PX, lineWidthUnits="pixels"
+            get_line_width=RIVER_WIDTH_PX, lineWidthUnits="pixels",
+            lineJointRounded=True, lineCapRounded=True,
         ))
 
     t = load_train_lines()
@@ -408,7 +429,8 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
             get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
-            get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels"
+            get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels",
+            lineJointRounded=True, lineCapRounded=True,
         ))
 
     m = load_metro_lines()
@@ -418,7 +440,8 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
             get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
-            get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels"
+            get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels",
+            lineJointRounded=True, lineCapRounded=True,
         ))
 
     return layers
@@ -434,12 +457,9 @@ def render_pydeck(center: Tuple[float, float],
                   basemap: str = "Claro (CARTO)"):
     layers: List[pdk.Layer] = []
 
-    # 0) Base (se Satélite, adiciona primeiro para ficar por baixo)
-    if basemap == "Satélite (ESRI)":
-        layers.append(make_satellite_tilelayer())
-        map_style = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
-    else:
-        map_style = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+    # 0) Fundo (TileLayer raster)
+    layers.append(make_tile_basemap(basemap))
+    map_style = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"  # não interfere, fica atrás
 
     # 1) camada temática
     if gdf_layer is not None and not gdf_layer.empty and "__rgba__" in gdf_layer.columns:
@@ -450,7 +470,7 @@ def render_pydeck(center: Tuple[float, float],
             get_fill_color="properties.__rgba__", get_line_width=0,
         ))
 
-    # 2) contornos e setores (se desejar) — ficam abaixo dos overlays
+    # 2) contornos e setores (abaixo dos overlays)
     if limite_gdf is not None and not limite_gdf.empty:
         gj_lim = json.loads(limite_gdf[["geometry"]].to_json())
         layers.append(pdk.Layer(
@@ -481,7 +501,7 @@ def render_pydeck(center: Tuple[float, float],
     )
     _show_deck(deck)
 
-    # legenda temática
+    # legendas
     if categorical_legend is not None:
         show_categorical_legend("Área de influência de bairro", categorical_legend)
     elif numeric_legend is not None:
@@ -489,8 +509,6 @@ def render_pydeck(center: Tuple[float, float],
         show_numeric_legend(title, breaks, palette)
     else:
         clear_legend()
-
-    # legenda fixa das camadas de referência (sempre)
     show_reference_legend()
 
 # ====================== App ======================
@@ -609,7 +627,6 @@ def main() -> None:
                                       basemap=ui["fundo"])
                         return
 
-        # sem variável: mapa base + overlays + legenda
         render_pydeck(center, None, limite_gdf, tooltip_field=None,
                       categorical_legend=None, numeric_legend=None,
                       draw_setores_outline=draw_setores_outline, basemap=ui["fundo"])
