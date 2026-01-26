@@ -759,8 +759,7 @@ def render_pydeck(
                     ))(load_metro_lines())
                     if (load_metro_lines() is not None and not load_metro_lines().empty)
                     else None
-                ),
-            ]
+                ),]
             if layer is not None
         ]
     )
@@ -1009,3 +1008,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
