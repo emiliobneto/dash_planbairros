@@ -14,15 +14,16 @@ def _import_stack():
     try:
         import geopandas as gpd
         import pydeck as pdk
+        from pydeck.types import Function as DeckFunction  # <<< para JS no TileLayer
         from shapely import wkb, wkt
         from pyarrow import parquet as pq
-        return gpd, pdk, wkb, wkt, pq
+        return gpd, pdk, DeckFunction, wkb, wkt, pq
     except ImportError as e:
         st.set_page_config(page_title="PlanBairros", page_icon="🏙️", layout="wide")
         st.error(f"Dependência ausente: **{e}**.")
         st.stop()
 
-gpd, pdk, wkb, wkt, pq = _import_stack()
+gpd, pdk, DeckFunction, wkb, wkt, pq = _import_stack()
 
 # ====================== config / tema ======================
 st.set_page_config(page_title="PlanBairros", page_icon="🏙️", layout="wide", initial_sidebar_state="collapsed")
@@ -43,9 +44,9 @@ REF_GREEN    = "#2E7D32"  # áreas verdes
 REF_BLUE     = "#1E88E5"  # rios
 REF_DARKGRAY = "#333333"  # trilhos (trem/metro)
 
-# >>> espessuras dobradas:
-RIVER_WIDTH_PX = 4.4   # antes ~2.2
-RAIL_WIDTH_PX  = 6.4   # antes ~3.2
+# >>> espessuras reforçadas para garantir destaque
+RIVER_WIDTH_PX = 6.0    # ~2× o anterior
+RAIL_WIDTH_PX  = 8.0    # ~2× o anterior
 
 def inject_css() -> None:
     st.markdown(
@@ -293,7 +294,7 @@ def left_controls() -> Dict[str, Any]:
         index=0, key="pb_limite", placeholder="Escolha…",
     )
 
-    # >>> Toggle do fundo do mapa
+    # Toggle de fundo
     fundo = st.radio(
         "Fundo do mapa",
         ["Claro (CARTO)", "Satélite (ESRI)"],
@@ -359,20 +360,21 @@ def _show_deck(deck: "pdk.Deck"):
         st.pydeck_chart(deck, use_container_width=True)
 
 def make_satellite_tilelayer() -> "pdk.Layer":
-    # Esri World Imagery sem token; renderizado como Bitmap por tile
+    # Esri World Imagery como TileLayer; função JS envolta por pdk.types.Function
     return pdk.Layer(
         "TileLayer",
         data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         min_zoom=0, max_zoom=19, tile_size=256,
-        render_sub_layers="""
-            function (props) {
-                return new deck.BitmapLayer({
-                    id: 'esri-satellite',
-                    image: props.data,
-                    bounds: props.tile.bbox
-                });
-            }
-        """
+        render_sub_layers=DeckFunction(
+            "function (props) { "
+            "  var b = props.tile.bbox; "
+            "  return new deck.BitmapLayer({ "
+            "    id: 'esri-satellite', "
+            "    image: props.data, "
+            "    bounds: [b.west, b.south, b.east, b.north] "
+            "  }); "
+            "}"
+        ),
     )
 
 def collect_reference_overlays() -> List["pdk.Layer"]:
