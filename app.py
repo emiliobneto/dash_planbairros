@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ====================== imports obrigatórios ======================
 def _import_stack():
     try:
         import geopandas as gpd
@@ -38,9 +37,9 @@ SIMPLIFY_M_SETORES   = 25
 SIMPLIFY_M_ISOCRONAS = 80
 SIMPLIFY_M_OVERLAY   = 20
 
-# Overlays permanentes (cores e espessuras)
-REF_GREEN    = "#2E7D32"   # áreas verdes (polígono, 100% opaco)
-REF_BLUE     = "#1E88E5"   # rios (linha, 100% opaco)
+# Overlays permanentes
+REF_GREEN    = "#2E7D32"   # áreas verdes (polígono opaco)
+REF_BLUE     = "#1E88E5"   # rios (linha opaca)
 REF_DARKGRAY = "#333333"   # trilhos
 RIVER_WIDTH_PX = 6.0
 RAIL_WIDTH_PX  = 8.0
@@ -62,6 +61,21 @@ def inject_css() -> None:
         .legend-title {{ font-weight:800; margin-bottom:6px; }}
         .legend-row {{ display:flex; align-items:center; gap:8px; margin:4px 0; }}
         .legend-swatch {{ width:18px; height:18px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); }}
+
+        /* caixa flutuante no canto inferior-direito do mapa */
+        .pb-floating-legend {{
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            z-index: 9999;
+            background: #fff;
+            border:1px solid rgba(20,64,125,.10);
+            border-radius:12px;
+            box-shadow:0 2px 6px rgba(0,0,0,.15);
+            padding:10px 12px;
+            max-width: 280px;
+            font-size: 13px;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -171,17 +185,15 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
     if not p.exists(): return None
     return _read_gdf_robusto(p, ["geometry"])
 
-# ---------- Overlays (Parquet preferencial) ----------
+# ---------- Overlays ----------
 def _simplify_overlay_types(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDataFrame":
     try:
         gm = gdf.to_crs(3857)
     except Exception:
         return gdf
     def _simp(geom):
-        try:
-            gt = geom.geom_type
-        except Exception:
-            return geom
+        try: gt = geom.geom_type
+        except Exception: return geom
         try:
             if gt in ("Polygon", "MultiPolygon"):
                 return geom.buffer(0).simplify(tol_m, preserve_topology=True)
@@ -196,30 +208,21 @@ def _simplify_overlay_types(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDa
         return gdf
 
 def _read_overlay_any(base: str) -> Optional["gpd.GeoDataFrame"]:
-    candidates = [
-        f"{base}.parquet",
-        f"{base}.geojson",
-        f"{base.replace(' ', '_')}.geojson",
-        f"{base.replace('_', ' ')}.geojson",
-    ]
+    candidates = [f"{base}.parquet", f"{base}.geojson",
+                  f"{base.replace(' ', '_')}.geojson", f"{base.replace('_',' ')}.geojson"]
     for nm in candidates:
         p = DATA_DIR / nm
-        if not p.exists():
-            continue
+        if not p.exists(): continue
         try:
-            if p.suffix.lower() == ".parquet":
-                g = gpd.read_parquet(p)
-            else:
-                g = gpd.read_file(p)
+            g = gpd.read_parquet(p) if p.suffix.lower()==".parquet" else gpd.read_file(p)
             if g.crs is None: g = g.set_crs(4326)
-            g = g.to_crs(4326)
-            g = _simplify_overlay_types(g, SIMPLIFY_M_OVERLAY)
+            g = _simplify_overlay_types(g.to_crs(4326), SIMPLIFY_M_OVERLAY)
             return g
         except Exception:
             continue
     return None
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=3600)  # preferir parquet
 def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
     return _read_overlay_any("area_verde")
 
@@ -235,8 +238,7 @@ def load_metro_lines() -> Optional["gpd.GeoDataFrame"]:
 def load_train_lines() -> Optional["gpd.GeoDataFrame"]:
     return _read_overlay_any("linhas_trem")
 
-# ====================== cache do GeoJSON (corrige Unhashable + acelera) ======================
-# Definimos um hash estável para GeoDataFrame: tamanho, colunas e bounds arredondados.
+# ====================== cache do GeoJSON (hash estável) ======================
 _HASH_FUNCS = {
     gpd.GeoDataFrame: lambda df: (
         len(df),
@@ -247,21 +249,19 @@ _HASH_FUNCS = {
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=256, hash_funcs=_HASH_FUNCS)
 def gdf_to_geojson_str(gdf: "gpd.GeoDataFrame", cols: Tuple[str, ...]) -> str:
-    # 'cols' precisa ser tuple (hashable) para evitar UnhashableParamError
     return gdf[list(cols)].to_json()
 
 def gdf_to_geojson_obj(gdf: "gpd.GeoDataFrame", cols: List[str] | Tuple[str, ...]) -> dict:
-    # Converte cols -> tuple e usa o cache acima (string) + loads (barato)
     return json.loads(gdf_to_geojson_str(gdf, tuple(cols)))
 
-# ====================== helpers numéricas ======================
+# ====================== helpers ======================
 def _sample_gradient(colors: List[str], n: int) -> List[str]:
     if n <= 1: return [colors[-1]]
     out = []
     for i in range(n):
         t = i/(n-1)
         pos = t*(len(colors)-1)
-        j = int(math.floor(pos)); j = min(j, len(colors)-2)
+        j = min(int(math.floor(pos)), len(colors)-2)
         frac = pos - j
         def h2r(x): x=x.lstrip("#"); return [int(x[k:k+2],16) for k in (0,2,4)]
         def r2h(r): return "#{:02x}{:02x}{:02x}".format(*r)
@@ -349,8 +349,7 @@ def left_controls() -> Dict[str, Any]:
     if st.button("🧹 Limpar cache de dados", type="secondary"):
         st.cache_data.clear(); st.success("Cache limpo. Selecione novamente a camada/variável.")
 
-    # → não limpamos cache quando só o fundo muda
-    sel_now = {"var": var, "lim": limite}
+    sel_now = {"var": var, "lim": limite}  # não dependemos do fundo pra invalidar cache
     sel_prev = st.session_state.get("_pb_prev_sel")
     if sel_prev and (sel_prev != sel_now):
         st.cache_data.clear()
@@ -379,16 +378,16 @@ def show_categorical_legend(title: str, items: List[Tuple[str,str]]):
     html = f"<div class='legend-card'><div class='legend-title'>{title}</div>{''.join(rows)}</div>"
     ph.markdown(html, unsafe_allow_html=True)
 
-def show_reference_legend():
-    items = [
-        ("Áreas verdes", REF_GREEN),
-        ("Rios", REF_BLUE),
-        ("Linhas de trem", REF_DARKGRAY),
-        ("Linhas de metrô", REF_DARKGRAY),
-    ]
-    rows = [f"<div class='legend-row'><span class='legend-swatch' style='background:{c}'></span><span>{l}</span></div>"
-            for l,c in items]
-    html = f"<div class='legend-card'><div class='legend-title'>Camadas de referência</div>{''.join(rows)}</div>"
+def render_reference_legend_floating():
+    html = """
+    <div class="pb-floating-legend">
+      <div class="legend-title">Camadas de referência</div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#2E7D32"></span><span>Áreas verdes</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#1E88E5"></span><span>Rios</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#333333"></span><span>Linhas de trem</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#333333"></span><span>Linhas de metrô</span></div>
+    </div>
+    """
     st.markdown(html, unsafe_allow_html=True)
 
 def clear_legend():
@@ -396,26 +395,24 @@ def clear_legend():
     if ph: ph.empty()
 
 # ====================== Render (pydeck) ======================
-def _show_deck(deck: "pdk.Deck"):
-    try:
-        st.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT)
-    except TypeError:
-        st.pydeck_chart(deck, use_container_width=True)
-
 def make_tile_basemap(style: str) -> "pdk.Layer":
-    """Basemap via TileLayer (raster)."""
+    """Basemap via TileLayer (raster) com id único para forçar troca."""
     if style == "Satélite (ESRI)":
         url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        lid = "basemap-esri"
     else:
         url = "https://tilebasemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
+        lid = "basemap-carto"
     return pdk.Layer(
         "TileLayer",
+        id=lid,  # <- força re-render quando trocar
         data=url, min_zoom=0, max_zoom=19, tile_size=256,
         render_sub_layers=DeckFunction(
             "function (props) { "
             "  var b = props.tile.bbox; "
             "  return new deck.BitmapLayer({ "
-            "    id: 'basemap', image: props.data, "
+            "    id: props.layer.id + '-bitmap', "
+            "    image: props.data, "
             "    bounds: [b.west, b.south, b.east, b.north] "
             "  }); "
             "}"
@@ -423,15 +420,14 @@ def make_tile_basemap(style: str) -> "pdk.Layer":
     )
 
 def collect_reference_overlays() -> List["pdk.Layer"]:
-    """Camadas permanentes (no topo)."""
     layers: List[pdk.Layer] = []
 
     g = load_green_areas()
     if g is not None and not g.empty:
         gj = gdf_to_geojson_obj(g, ("geometry",))
         layers.append(pdk.Layer(
-            "GeoJsonLayer", data=gj,
-            filled=True, stroked=False, pickable=False,
+            "GeoJsonLayer", id="areas-verdes",
+            data=gj, filled=True, stroked=False, pickable=False,
             get_fill_color=_hex_to_rgba(REF_GREEN, 255), get_line_width=0
         ))
 
@@ -439,8 +435,8 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
     if r is not None and not r.empty:
         gj = gdf_to_geojson_obj(r, ("geometry",))
         layers.append(pdk.Layer(
-            "GeoJsonLayer", data=gj,
-            filled=False, stroked=True, pickable=False,
+            "GeoJsonLayer", id="rios",
+            data=gj, filled=False, stroked=True, pickable=False,
             get_line_color=_hex_to_rgba(REF_BLUE, 255),
             get_line_width=RIVER_WIDTH_PX, lineWidthUnits="pixels",
             lineJointRounded=True, lineCapRounded=True,
@@ -450,8 +446,8 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
     if t is not None and not t.empty:
         gj = gdf_to_geojson_obj(t, ("geometry",))
         layers.append(pdk.Layer(
-            "GeoJsonLayer", data=gj,
-            filled=False, stroked=True, pickable=False,
+            "GeoJsonLayer", id="linhas-trem",
+            data=gj, filled=False, stroked=True, pickable=False,
             get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
             get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels",
             lineJointRounded=True, lineCapRounded=True,
@@ -461,8 +457,8 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
     if m is not None and not m.empty:
         gj = gdf_to_geojson_obj(m, ("geometry",))
         layers.append(pdk.Layer(
-            "GeoJsonLayer", data=gj,
-            filled=False, stroked=True, pickable=False,
+            "GeoJsonLayer", id="linhas-metro",
+            data=gj, filled=False, stroked=True, pickable=False,
             get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
             get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels",
             lineJointRounded=True, lineCapRounded=True,
@@ -480,7 +476,7 @@ def render_pydeck(center: Tuple[float, float],
                   basemap: str = "Claro (CARTO)"):
     layers: List[pdk.Layer] = []
 
-    # Fundo via TileLayer (sempre) e map_style=None → garante troca CARTO ⇄ ESRI
+    # Fundo via TileLayer (sempre) e map_style=None → troca CARTO/ESRI funciona
     layers.append(make_tile_basemap(basemap))
     map_style = None
 
@@ -489,8 +485,8 @@ def render_pydeck(center: Tuple[float, float],
         cols = ["geometry", "__rgba__"] + ([tooltip_field] if tooltip_field else [])
         gj = gdf_to_geojson_obj(gdf_layer, tuple(cols))
         layers.append(pdk.Layer(
-            "GeoJsonLayer", data=gj,
-            filled=True, stroked=False, pickable=bool(tooltip_field), auto_highlight=True,
+            "GeoJsonLayer", id="tematica",
+            data=gj, filled=True, stroked=False, pickable=bool(tooltip_field), auto_highlight=True,
             get_fill_color="properties.__rgba__", get_line_width=0,
         ))
 
@@ -498,7 +494,8 @@ def render_pydeck(center: Tuple[float, float],
     if limite_gdf is not None and not limite_gdf.empty:
         gj_lim = gdf_to_geojson_obj(limite_gdf, ("geometry",))
         layers.append(pdk.Layer(
-            "GeoJsonLayer", data=gj_lim, filled=False, stroked=True,
+            "GeoJsonLayer", id="limite",
+            data=gj_lim, filled=False, stroked=True,
             get_line_color=[20,20,20,180], get_line_width=1, lineWidthUnits="pixels"
         ))
 
@@ -510,7 +507,8 @@ def render_pydeck(center: Tuple[float, float],
         if geoms_only is not None:
             gj = gdf_to_geojson_obj(geoms_only, ("geometry",))
             layers.append(pdk.Layer(
-                "GeoJsonLayer", data=gj, filled=False, stroked=True,
+                "GeoJsonLayer", id="setores-outline",
+                data=gj, filled=False, stroked=True,
                 get_line_color=[80,80,80,160], get_line_width=0.6, lineWidthUnits="pixels"
             ))
 
@@ -536,7 +534,9 @@ def render_pydeck(center: Tuple[float, float],
         show_numeric_legend(title, breaks, palette)
     else:
         clear_legend()
-    show_reference_legend()
+
+    # legenda flutuante (canto inferior-direito)
+    render_reference_legend_floating()
 
 # ====================== App ======================
 def main() -> None:
