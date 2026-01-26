@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-PlanBairros — versão otimizada (consolidada)
+PlanBairros — versão otimizada (consolidada + fix polígonos & performance)
 
-Melhorias aplicadas:
-- NÃO limpa cache automaticamente ao trocar seleções (apenas no botão).
-- Recorte dos setores pelo limite selecionado (gpd.clip / bbox + sindex fallback rápido).
-- Cache em sessão da serialização GeoJSON por combinação de seleção.
-- Simplificação geométrica APÓS recorte (menos CPU/memória).
-- Redução de precisão das coordenadas antes da serialização (GeoJSON menor).
-- Guarda-chuva de segurança para payload muito grande (amostra, com aviso).
-- Basemap desativado por padrão para evitar requisições externas (pode reativar).
+Principais pontos:
+- Exige limite administrativo antes de carregar variável (evita cidade inteira).
+- Recorte rápido (sindex+bbox) e preciso (clip) com cache do unary_union.
+- Sanitização de geometrias (make_valid, remove vazias) antes de desenhar.
+- Contorno dos limites desenhado como boundary (linhas) para evitar PathLayer bug.
+- Simplificação DINÂMICA após recorte: tolerância escala com nº de features.
+- Redução de precisão antes da serialização (GeoJSON menor) + cache em sessão.
+- Propriedades GeoJSON padronizadas: value / fill_color.
+- Basemap Positron como padrão.
 """
 from __future__ import annotations
 
@@ -23,15 +24,17 @@ import streamlit as st
 
 from shapely.geometry import box
 try:
+    # Shapely 2.x
     from shapely import set_precision as _set_precision
-except Exception:  # pragma: no cover — compat Shapely <2.0
+except Exception:  # compat Shapely <2.0
     from shapely.set_precision import set_precision as _set_precision  # type: ignore
+
 # make_valid com fallback
 try:
     from shapely.validation import make_valid as _make_valid  # Shapely 2.x
 except Exception:
     try:
-        from shapely import make_valid as _make_valid  # Shapely 2 alt
+        from shapely import make_valid as _make_valid  # alternativa
     except Exception:
         _make_valid = lambda g: g
 
@@ -75,8 +78,7 @@ PLACEHOLDER_LIM = "— selecione o limite —"
 
 LOGO_HEIGHT = 120
 MAP_HEIGHT = 900
-SIMPLIFY_M = 60   # tolerância padrão (metros em EPSG:3857)
-MAX_FEATURES = 15000  # guarda-chuva de segurança para payload muito grande
+SIMPLIFY_M = 60   # metros (EPSG:3857) — base
 MAP_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 
 
@@ -186,16 +188,6 @@ def _read_gdf_robusto(
             return None
 
 
-def _reduce_precision(gdf: "gpd.GeoDataFrame", grid: float = 1e-5) -> "gpd.GeoDataFrame":
-    """Reduz a precisão das coordenadas (grade ~1e-5 ≈ ~1 m latitude) para encolher GeoJSON."""
-    try:
-        g2 = gdf.copy()
-        g2["geometry"] = g2.geometry.apply(lambda geom: _set_precision(geom, grid))
-        return g2
-    except Exception:
-        return gdf
-
-
 def _sanitize_gdf(gdf: Optional["gpd.GeoDataFrame"], only_types: Optional[List[str]] = None) -> Optional["gpd.GeoDataFrame"]:
     """Remove geometrias nulas/vazias e corrige inválidas via make_valid. Opcionalmente filtra por tipo."""
     if gdf is None:
@@ -221,11 +213,36 @@ def _sanitize_gdf(gdf: Optional["gpd.GeoDataFrame"], only_types: Optional[List[s
         return gdf
 
 
+def _reduce_precision(gdf: "gpd.GeoDataFrame", grid: float = 1e-5) -> "gpd.GeoDataFrame":
+    try:
+        g2 = gdf.copy()
+        g2["geometry"] = g2.geometry.apply(lambda geom: _set_precision(geom, grid))
+        return g2
+    except Exception:
+        return gdf
+
+
+def _dynamic_simplify(gdf: "gpd.GeoDataFrame", base_tol: int = SIMPLIFY_M) -> "gpd.GeoDataFrame"]:
+    """Simplifica em EPSG:3857 com tolerância que escala com nº de features."""
+    n = len(gdf)
+    mult = 1.0
+    if n > 50000:
+        mult = 2.0
+    elif n > 25000:
+        mult = 1.5
+    tol = int(base_tol * mult)
+    try:
+        jm = gdf.to_crs(3857)
+        jm["geometry"] = jm.geometry.simplify(tol, preserve_topology=True)
+        return jm.to_crs(4326)
+    except Exception:
+        return gdf
+
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str]]:
     if not GEOM_FILE.exists():
         return None, None
-    # Lê geometrias sem simplificar (vamos simplificar depois do recorte)
     gdf = _read_gdf_robusto(GEOM_FILE, ["fid", "geometry"])
     if gdf is None:
         return None, None
@@ -264,11 +281,8 @@ def load_isocronas() -> Optional["gpd.GeoDataFrame"]:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
-    """Carrega camada administrativa por nome, com busca robusta por arquivo.
-    Procura em DATA_DIR por .parquet (e, se necessário, .geojson) com stem compatível.
-    """
+    """Carrega camada administrativa por nome, com busca robusta por arquivo."""
     target = _slug(name)
-    # candidatos diretos
     direct = {
         "distritos": DATA_DIR / "Distritos.parquet",
         "zonasod2023": DATA_DIR / "ZonasOD2023.parquet",
@@ -281,7 +295,6 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
         if p.exists() and (target in k or k in target):
             cand = p
             break
-    # varre diretório se não achou direto
     if cand is None:
         for p in DATA_DIR.rglob("*.parquet"):
             if _slug(p.stem) in (target, f"{target}2023", f"{target}s"):
@@ -295,11 +308,9 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
     if cand is None:
         st.warning(f"Camada '{name}' não encontrada em {DATA_DIR}.")
         return None
-    cols = ["geometry"]
-    # tenta ler robusto
-    gdf = _read_gdf_robusto(cand, cols)
+    gdf = _read_gdf_robusto(cand, ["geometry"])
     if gdf is None or gdf.empty:
-        st.warning(f"Não foi possível ler '{cand.name}'. Verifique esquema/colunas.")
+        st.warning(f"Não foi possível ler '{cand.name}'. Verifique arquivo/colunas.")
         return None
     return gdf
 
@@ -349,15 +360,13 @@ def classify_soft6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[float, floa
     return idx.fillna(-1).astype("Int64"), breaks
 
 
-# ---- cache leve de GeoJSON na sessão (evita recriar a cada rerun) ----
+# ---- cache leve de GeoJSON na sessão ----
 
 def _gj_cache_get(key: str):
     return st.session_state.setdefault("_gj_cache", {}).get(key)
 
-
 def _gj_cache_set(key: str, value):
     st.session_state.setdefault("_gj_cache", {})[key] = value
-
 
 def geojson_from_gdf(gdf: "gpd.GeoDataFrame", props: List[str], cache_key: str):
     gj = _gj_cache_get(cache_key)
@@ -385,13 +394,11 @@ def clip_to_limit(
 ) -> Optional["gpd.GeoDataFrame"]:
     if gdf is None or gdf.empty or limit_gdf is None or limit_gdf.empty:
         return gdf
-    # 1) pré-seleção por bbox (rápido)
     cand = _prefilter_by_bbox(gdf, limit_gdf)
     if cand is None or cand.empty:
         return cand
     if fast:
         return cand
-    # 2) recorte geométrico
     try:
         key = (
             f"_limit_union|{len(limit_gdf)}|"
@@ -406,7 +413,6 @@ def clip_to_limit(
             st.session_state[key] = union
         return gpd.clip(cand, union)
     except Exception:
-        # Fallback por bbox
         minx, miny, maxx, maxy = limit_gdf.total_bounds
         try:
             return cand.cx[minx:maxx, miny:maxy]
@@ -456,16 +462,14 @@ def left_controls() -> Dict[str, Any]:
         st.session_state.pop("_gj_cache", None)
         st.success("Cache limpo. Selecione novamente a camada/variável.")
 
-    # espaço reservado para a legenda (preenche depois)
     legend_ph = st.empty()
     st.session_state["_legend_ph"] = legend_ph
 
-    # apenas registra a seleção atual (não limpa cache automaticamente)
     st.session_state["_pb_prev_sel"] = {"var": var, "lim": limite}
 
-    # dica de UX: exigir limite antes da variável para evitar carga total
+    # gating: exige limite antes de variável
     if var != PLACEHOLDER_VAR and limite == PLACEHOLDER_LIM:
-        st.info("Selecione um **limite administrativo** antes de carregar a variável para melhor desempenho.")
+        st.info("Selecione um **limite administrativo** antes de carregar a variável.")
 
     return {"variavel": var, "limite": limite}
 
@@ -477,8 +481,7 @@ def show_numeric_legend(title: str, breaks: List[Tuple[float, float]], palette: 
     if not ph:
         return
     if not breaks:
-        ph.empty()
-        return
+        ph.empty(); return
     rows = []
     for (a, b), col in zip(breaks, palette):
         label = f"{a:,.0f} – {b:,.0f}"
@@ -544,20 +547,18 @@ def render_pydeck(
                 lambda v: _hex_to_rgba(cmap.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200)
             )
             items = [(labels[k], cmap[k]) for k in sorted(cmap)]
-            show_categorical_legend("Cluster (perfil urbano)", items)
-            legend_done = True
+            show_categorical_legend("Cluster (perfil urbano)", items); legend_done = True
         else:
-            classes, breaks = classify_soft6(gdf["value"])  # quebras suaves
+            classes, breaks = classify_soft6(gdf["value"])  # quebras por valor
             palette = _sample_gradient(ORANGE_RED_GRAD, 6)
             color_map = {i: _hex_to_rgba(palette[i], 200) for i in range(6)}
             gdf["fill_color"] = classes.map(
                 lambda k: color_map.get(int(k) if pd.notna(k) else -1, _hex_to_rgba("#c8c8c8", 200))
             )
-            show_numeric_legend(var_label or "", breaks, palette)
-            legend_done = True
+            show_numeric_legend(var_label or "", breaks, palette); legend_done = True
 
-        cache_key = f"setores|{var_label}|{len(gdf)}|{gdf.total_bounds.tobytes()}"
         gdf_small = _reduce_precision(gdf)
+        cache_key = f"setores|{var_label}|{len(gdf_small)}|{gdf_small.total_bounds.tobytes()}"
         geojson = geojson_from_gdf(
             gdf_small[["geometry", "fill_color", "value"]],
             ["geometry", "fill_color", "value"],
@@ -566,29 +567,32 @@ def render_pydeck(
 
         setores_layer = pdk.Layer(
             "GeoJsonLayer",
+            id="setores-fill",
             data=geojson,
             filled=True,
             stroked=False,
-            pickable=False,  # desligado para performance
+            pickable=False,
             auto_highlight=False,
             get_fill_color="properties.fill_color",
             get_line_width=0,
         )
         layers.append(setores_layer)
 
-    # contorno administrativo
+    # contorno administrativo como boundary
     if limite_gdf is not None and not limite_gdf.empty:
-        lim_clean = _sanitize_gdf(limite_gdf, only_types=["Polygon", "MultiPolygon"]) or limite_gdf
-        # usa o contorno (boundary) para evitar bugs no PathLayer com polígonos inválidos/ocos
+        lim_clean = _sanitize_gdf(limite_gdf, only_types=["Polygon", "MultiPolygon"])
+        if lim_clean is None or lim_clean.empty:
+            lim_clean = limite_gdf
         try:
-            out = lim_clean.copy()
-            out["geometry"] = out.geometry.boundary
+            out = lim_clean.copy(); out["geometry"] = out.geometry.boundary
         except Exception:
             out = lim_clean
-        out = _sanitize_gdf(out, only_types=["LineString", "MultiLineString"]) or out
-        if out is not None and not out.empty:
-            cache_key = f"limite|{len(out)}|{out.total_bounds.tobytes()}"
-            gj_lim = geojson_from_gdf(out[["geometry"]], ["geometry"], cache_key)
+        out2 = _sanitize_gdf(out, only_types=["LineString", "MultiLineString"])
+        if out2 is None or out2.empty:
+            out2 = out
+        if out2 is not None and not out2.empty:
+            cache_key = f"limite|{len(out2)}|{out2.total_bounds.tobytes()}"
+            gj_lim = geojson_from_gdf(out2[["geometry"]], ["geometry"], cache_key)
             outline = pdk.Layer(
                 "GeoJsonLayer",
                 id="admin-outline",
@@ -601,19 +605,24 @@ def render_pydeck(
             )
             layers.append(outline)
 
-
     # setores censitários como linhas (quando pedido)
     if draw_setores_outline:
+        g_outline = None
         if setores_joined is not None and not setores_joined.empty:
             g_outline = setores_joined[["geometry"]]
         else:
-            geoms_only, _ = load_setores_geom()
-            g_outline = clip_to_limit(geoms_only, limite_gdf) if geoms_only is not None else None
+            geoms_only, _ = load_setores_geom(); g_outline = geoms_only
+        g_outline = _sanitize_gdf(g_outline, only_types=["Polygon", "MultiPolygon"]) if g_outline is not None else None
         if g_outline is not None and not g_outline.empty:
+            try:
+                g_outline = g_outline.copy(); g_outline["geometry"] = g_outline.geometry.boundary
+            except Exception:
+                pass
             cache_key = f"outline|{len(g_outline)}|{g_outline.total_bounds.tobytes()}"
-            gj = geojson_from_gdf(g_outline, ["geometry"], cache_key)
+            gj = geojson_from_gdf(g_outline[["geometry"]], ["geometry"], cache_key)
             sectors_outline = pdk.Layer(
                 "GeoJsonLayer",
+                id="setores-outline",
                 data=gj,
                 filled=False,
                 stroked=True,
@@ -623,12 +632,9 @@ def render_pydeck(
             )
             layers.append(sectors_outline)
 
-    # deck.gl — basemap leve: None evita fetch externo; troque por URL do Carto se quiser
     deck = pdk.Deck(
         layers=layers,
-        initial_view_state=pdk.ViewState(
-            latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0
-        ),
+        initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
         map_style=MAP_STYLE,
         tooltip=(
             {"text": f"{var_label}: {{value}}"}
@@ -683,7 +689,7 @@ def main() -> None:
                 else:
                     st.warning(f"Limite '{ui['limite']}' não encontrado/vasio em {DATA_DIR}.")
 
-        # variável — só carrega se houver limite escolhido (evita cidade inteira)
+        # variável — só carrega se houver limite escolhido
         setores_joined: Optional["gpd.GeoDataFrame"] = None
         if var == "Área de influência de bairro" and limite_gdf is not None and not limite_gdf.empty:
             iso = load_isocronas()
@@ -694,8 +700,11 @@ def main() -> None:
                 if cls:
                     g = iso.copy()
                     g["value"] = pd.to_numeric(g[cls], errors="coerce")
+                    g = clip_to_limit(g, limite_gdf, fast=False)
+                    g = _sanitize_gdf(g)
+                    g = _dynamic_simplify(g, base_tol=SIMPLIFY_M)
                     g["fill_color"] = g["value"].map(lambda v: _hex_to_rgba(lut.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
-                    g = clip_to_limit(g[["geometry", "value", "fill_color"]], limite_gdf)
+                    g = _reduce_precision(g)
                     if g is not None and not g.empty:
                         setores_joined = g
                         center = center_from_bounds(g)
@@ -707,22 +716,14 @@ def main() -> None:
                 metric = load_metric_column(var)
                 if metric is not None:
                     joined = geoms.merge(metric, on="fid", how="left")
-                    fast_mode = len(joined) > 30000 or len(limite_gdf) > 200
+                    # recorte + sanitização + simplificação dinâmica (sem amostrar)
+                    fast_mode = len(joined) > 30000 or (limite_gdf is not None and len(limite_gdf) > 200)
                     joined = clip_to_limit(joined, limite_gdf, fast=fast_mode)
+                    joined = _sanitize_gdf(joined)
                     if joined is not None and not joined.empty:
-                        try:
-                            jm = joined.to_crs(3857)
-                            tol = 60 if fast_mode else SIMPLIFY_M
-                            jm["geometry"] = jm.geometry.simplify(tol, preserve_topology=True)
-                            joined = jm.to_crs(4326)
-                        except Exception:
-                            pass
-                        if len(joined) > MAX_FEATURES:
-                            st.warning(
-                                f"Seleção muito grande ({len(joined):,} polígonos). Exibindo amostra de {MAX_FEATURES:,}. Refine o limite para ver tudo."
-                            )
-                            joined = joined.sample(MAX_FEATURES, random_state=0)
-                        setores_joined = _reduce_precision(joined)
+                        joined = _dynamic_simplify(joined, base_tol=SIMPLIFY_M)
+                        joined = _reduce_precision(joined)
+                        setores_joined = joined
                         center = center_from_bounds(joined)
         elif var != PLACEHOLDER_VAR and (limite_gdf is None or limite_gdf.empty):
             st.info("Para ver a variável, selecione um **limite administrativo**.")
