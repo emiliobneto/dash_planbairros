@@ -23,10 +23,17 @@ import streamlit as st
 
 from shapely.geometry import box
 try:
-    # Shapely 2.x
     from shapely import set_precision as _set_precision
 except Exception:  # pragma: no cover — compat Shapely <2.0
     from shapely.set_precision import set_precision as _set_precision  # type: ignore
+# make_valid com fallback
+try:
+    from shapely.validation import make_valid as _make_valid  # Shapely 2.x
+except Exception:
+    try:
+        from shapely import make_valid as _make_valid  # Shapely 2 alt
+    except Exception:
+        _make_valid = lambda g: g
 
 # ====================== imports obrigatórios ======================
 
@@ -185,6 +192,31 @@ def _reduce_precision(gdf: "gpd.GeoDataFrame", grid: float = 1e-5) -> "gpd.GeoDa
         g2 = gdf.copy()
         g2["geometry"] = g2.geometry.apply(lambda geom: _set_precision(geom, grid))
         return g2
+    except Exception:
+        return gdf
+
+
+def _sanitize_gdf(gdf: Optional["gpd.GeoDataFrame"], only_types: Optional[List[str]] = None) -> Optional["gpd.GeoDataFrame"]:
+    """Remove geometrias nulas/vazias e corrige inválidas via make_valid. Opcionalmente filtra por tipo."""
+    if gdf is None:
+        return None
+    try:
+        g = gdf.copy()
+        try:
+            g["geometry"] = g.geometry.apply(_make_valid)
+        except Exception:
+            pass
+        g = g[g.geometry.notnull()]
+        try:
+            g = g[~g.geometry.is_empty]
+        except Exception:
+            pass
+        if only_types is not None:
+            try:
+                g = g[g.geometry.geom_type.isin(only_types)]
+            except Exception:
+                pass
+        return g
     except Exception:
         return gdf
 
@@ -546,19 +578,29 @@ def render_pydeck(
 
     # contorno administrativo
     if limite_gdf is not None and not limite_gdf.empty:
-        cache_key = f"limite|{len(limite_gdf)}|{limite_gdf.total_bounds.tobytes()}"
-        gj_lim = geojson_from_gdf(limite_gdf[["geometry"]], ["geometry"], cache_key)
-        outline = pdk.Layer(
-            "GeoJsonLayer",
-            id="admin-outline",
-            data=gj_lim,
-            filled=False,
-            stroked=True,
-            get_line_color=[20, 20, 20, 220],
-            get_line_width=2,
-            lineWidthUnits="pixels",
-        )
-        layers.append(outline)
+        lim_clean = _sanitize_gdf(limite_gdf, only_types=["Polygon", "MultiPolygon"]) or limite_gdf
+        # usa o contorno (boundary) para evitar bugs no PathLayer com polígonos inválidos/ocos
+        try:
+            out = lim_clean.copy()
+            out["geometry"] = out.geometry.boundary
+        except Exception:
+            out = lim_clean
+        out = _sanitize_gdf(out, only_types=["LineString", "MultiLineString"]) or out
+        if out is not None and not out.empty:
+            cache_key = f"limite|{len(out)}|{out.total_bounds.tobytes()}"
+            gj_lim = geojson_from_gdf(out[["geometry"]], ["geometry"], cache_key)
+            outline = pdk.Layer(
+                "GeoJsonLayer",
+                id="admin-outline",
+                data=gj_lim,
+                filled=False,
+                stroked=True,
+                get_line_color=[20, 20, 20, 220],
+                get_line_width=2,
+                lineWidthUnits="pixels",
+            )
+            layers.append(outline)
+
 
     # setores censitários como linhas (quando pedido)
     if draw_setores_outline:
