@@ -619,6 +619,85 @@ def make_tile_basemap(style: str) -> "pdk.Layer":
     )
 
 
+def collect_reference_overlays() -> List["pdk.Layer"]:
+    layers: List[pdk.Layer] = []
+
+    g = load_green_areas()
+    if g is not None and not g.empty:
+        gj = gdf_to_geojson_obj(g, ("geometry",))
+        layers.append(
+            pdk.Layer(
+                "GeoJsonLayer",
+                id="areas-verdes",
+                data=gj,
+                filled=True,
+                stroked=False,
+                pickable=False,
+                get_fill_color=_hex_to_rgba(REF_GREEN, 255),
+                get_line_width=0,
+            )
+        )
+
+    r = load_rivers()
+    if r is not None and not r.empty:
+        gj = gdf_to_geojson_obj(r, ("geometry",))
+        layers.append(
+            pdk.Layer(
+                "GeoJsonLayer",
+                id="rios",
+                data=gj,
+                filled=False,
+                stroked=True,
+                pickable=False,
+                get_line_color=_hex_to_rgba(REF_BLUE, 255),
+                get_line_width=RIVER_WIDTH_PX,
+                lineWidthUnits="pixels",
+                lineJointRounded=True,
+                lineCapRounded=True,
+            )
+        )
+
+    t = load_train_lines()
+    if t is not None and not t.empty:
+        gj = gdf_to_geojson_obj(t, ("geometry",))
+        layers.append(
+            pdk.Layer(
+                "GeoJsonLayer",
+                id="linhas-trem",
+                data=gj,
+                filled=False,
+                stroked=True,
+                pickable=False,
+                get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
+                get_line_width=RAIL_WIDTH_PX,
+                lineWidthUnits="pixels",
+                lineJointRounded=True,
+                lineCapRounded=True,
+            )
+        )
+
+    m = load_metro_lines()
+    if m is not None and not m.empty:
+        gj = gdf_to_geojson_obj(m, ("geometry",))
+        layers.append(
+            pdk.Layer(
+                "GeoJsonLayer",
+                id="linhas-metro",
+                data=gj,
+                filled=False,
+                stroked=True,
+                pickable=False,
+                get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
+                get_line_width=RAIL_WIDTH_PX,
+                lineWidthUnits="pixels",
+                lineJointRounded=True,
+                lineCapRounded=True,
+            )
+        )
+
+    return layers
+
+
 def render_pydeck(
     center: Tuple[float, float],
     gdf_layer: Optional["gpd.GeoDataFrame"],
@@ -691,78 +770,7 @@ def render_pydeck(
             )
 
     # OVERLAYS no topo
-    layers.extend(
-        [
-            layer
-            for layer in (
-                (
-                    (lambda g: pdk.Layer(
-                        "GeoJsonLayer",
-                        id="areas-verdes",
-                        data=gdf_to_geojson_obj(g, ("geometry",)),
-                        filled=True,
-                        stroked=False,
-                        pickable=False,
-                        get_fill_color=_hex_to_rgba(REF_GREEN, 255),
-                        get_line_width=0,
-                    ))(load_green_areas())
-                    if (load_green_areas() is not None and not load_green_areas().empty)
-                    else None
-                ),
-                (
-                    (lambda r: pdk.Layer(
-                        "GeoJsonLayer",
-                        id="rios",
-                        data=gdf_to_geojson_obj(r, ("geometry",)),
-                        filled=False,
-                        stroked=True,
-                        pickable=False,
-                        get_line_color=_hex_to_rgba(REF_BLUE, 255),
-                        get_line_width=RIVER_WIDTH_PX,
-                        lineWidthUnits="pixels",
-                        lineJointRounded=True,
-                        lineCapRounded=True,
-                    ))(load_rivers())
-                    if (load_rivers() is not None and not load_rivers().empty)
-                    else None
-                ),
-                (
-                    (lambda t: pdk.Layer(
-                        "GeoJsonLayer",
-                        id="linhas-trem",
-                        data=gdf_to_geojson_obj(t, ("geometry",)),
-                        filled=False,
-                        stroked=True,
-                        pickable=False,
-                        get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
-                        get_line_width=RAIL_WIDTH_PX,
-                        lineWidthUnits="pixels",
-                        lineJointRounded=True,
-                        lineCapRounded=True,
-                    ))(load_train_lines())
-                    if (load_train_lines() is not None and not load_train_lines().empty)
-                    else None
-                ),
-                (
-                    (lambda m: pdk.Layer(
-                        "GeoJsonLayer",
-                        id="linhas-metro",
-                        data=gdf_to_geojson_obj(m, ("geometry",)),
-                        filled=False,
-                        stroked=True,
-                        pickable=False,
-                        get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
-                        get_line_width=RAIL_WIDTH_PX,
-                        lineWidthUnits="pixels",
-                        lineJointRounded=True,
-                        lineCapRounded=True,
-                    ))(load_metro_lines())
-                    if (load_metro_lines() is not None and not load_metro_lines().empty)
-                    else None
-                ),]
-            if layer is not None
-        ]
-    )
+    layers.extend(collect_reference_overlays())
 
     deck = pdk.Deck(
         layers=layers,
@@ -1008,4 +1016,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
