@@ -1,61 +1,45 @@
 # -*- coding: utf-8 -*-
 """
-PlanBairros — versão otimizada (consolidada + fix polígonos & performance)
+PlanBairros — Front‑end Streamlit (limites administrativos + densidade/zoneamento)
 
-Principais pontos:
-- Exige limite administrativo antes de carregar variável (evita cidade inteira).
-- Recorte rápido (sindex+bbox) e preciso (clip) com cache do unary_union.
-- Sanitização de geometrias (make_valid, remove vazias) antes de desenhar.
-- Contorno dos limites desenhado como boundary (linhas) para evitar PathLayer bug.
-- Simplificação DINÂMICA após recorte: tolerância escala com nº de features.
-- Redução de precisão antes da serialização (GeoJSON menor) + cache em sessão.
-- Propriedades GeoJSON padronizadas: value / fill_color.
-- Basemap Positron como padrão.
+Regras implementadas:
+• Configurações (limpas):
+  - Limites administrativos (primeiro): Distritos, SetoresCensitarios2023, ZonasOD2023, Subprefeitura
+  - Variáveis: Densidade, Zoneamento
+• Dados carregados de: dash_planbairros/limites_administrativos/*.parquet (GeoParquet)
+• Fundo: Google Satellite (50% opacidade)
+• Limites: exibidos apenas com LINHA (sem preenchimento)
+• Densidade (por Setor Censitário):
+  - Choropleth no mapa
+  - Seleção por CLIQUE de setores para compor o “bairro”
+  - Painel à direita mostra a MÉDIA da densidade dos setores selecionados
+  - Gráfico de barras compara Seleção vs Geral
+• Zoneamento (por Setor Censitário):
+  - Mapa categórico (cores por categoria); sem métrica à direita por enquanto
+
+Observação: mantenho EPSG:4326 (WGS84) para visualização web.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
-from unicodedata import normalize as _ud_norm
-import base64, math, re, json
+from typing import Optional, Tuple
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
-from shapely.geometry import box
-try:
-    # Shapely 2.x
-    from shapely import set_precision as _set_precision
-except Exception:  # compat Shapely <2.0
-    from shapely.set_precision import set_precision as _set_precision  # type: ignore
+# Mapa interativo
+from streamlit_folium import st_folium
+import folium
+from branca.colormap import linear
 
-# make_valid com fallback
-try:
-    from shapely.validation import make_valid as _make_valid  # Shapely 2.x
-except Exception:
-    try:
-        from shapely import make_valid as _make_valid  # alternativa
-    except Exception:
-        _make_valid = lambda g: g
+# Geoespacial
+import geopandas as gpd
+from shapely.geometry import Point
 
-# ====================== imports obrigatórios ======================
-
-def _import_stack():
-    try:
-        import geopandas as gpd
-        import pydeck as pdk
-        from shapely import wkb, wkt
-        from pyarrow import parquet as pq
-        return gpd, pdk, wkb, wkt, pq
-    except ImportError as e:
-        st.set_page_config(page_title="PlanBairros", page_icon="🏙️", layout="wide")
-        st.error(f"Dependência ausente: **{e}**.")
-        st.stop()
-
-
-gpd, pdk, wkb, wkt, pq = _import_stack()
-
-# ====================== config / tema ======================
+# ============================================================
+# Configuração global da página
+# ============================================================
 st.set_page_config(
     page_title="PlanBairros",
     page_icon="🏙️",
@@ -63,680 +47,380 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-PB_NAVY = "#14407D"
-ORANGE_RED_GRAD = [
-    "#fff7ec",
-    "#fee8c8",
-    "#fdd49e",
-    "#fdbb84",
-    "#fc8d59",
-    "#e34a33",
-    "#b30000",
+# ============================================================
+# Paleta da marca
+# ============================================================
+PB_COLORS = {
+    "amarelo": "#F4DD63",
+    "verde": "#B1BF7C",
+    "laranja": "#D58243",
+    "telha": "#C65534",
+    "teal": "#6FA097",
+    "navy": "#14407D",
+}
+
+# ============================================================
+# Fonte de dados
+# ============================================================
+BASE_DIR = Path("dash_planbairros/limites_administrativos")
+ADMIN_OPTIONS = [
+    "Distritos",
+    "SetoresCensitarios2023",
+    "ZonasOD2023",
+    "Subprefeitura",
 ]
-PLACEHOLDER_VAR = "— selecione uma variável —"
-PLACEHOLDER_LIM = "— selecione o limite —"
 
-LOGO_HEIGHT = 120
-MAP_HEIGHT = 900
-SIMPLIFY_M = 60   # metros (EPSG:3857) — base
-MAP_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 
+def load_vector_parquet(name: str) -> Optional[gpd.GeoDataFrame]:
+    """Lê um GeoParquet de BASE_DIR e garante CRS=EPSG:4326."""
+    fp = BASE_DIR / f"{name}.parquet"
+    if not fp.exists():
+        st.warning(f"Arquivo não encontrado: {fp}")
+        return None
+    try:
+        gdf = gpd.read_parquet(fp)
+        if gdf.crs is None:
+            gdf.set_crs(epsg=4326, inplace=True)
+        else:
+            gdf = gdf.to_crs(epsg=4326)
+        return gdf
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Falha ao ler {fp.name}: {exc}")
+        return None
+
+
+def load_densidade_layer() -> Optional[gpd.GeoDataFrame]:
+    """Lê 'densidade.parquet' (por Setor Censitário) em BASE_DIR e garante CRS=4326.
+    Requer uma coluna numérica de densidade e (opcional) uma categórica de zoneamento.
+    """
+    fp = BASE_DIR / "densidade.parquet"
+    if not fp.exists():
+        st.warning(f"Camada de densidade não encontrada: {fp}")
+        return None
+    try:
+        gdf = gpd.read_parquet(fp)
+        if gdf.crs is None:
+            gdf.set_crs(epsg=4326, inplace=True)
+        else:
+            gdf = gdf.to_crs(epsg=4326)
+        # ID único por setor para seleção
+        if "_setor_id" not in gdf.columns:
+            gdf["_setor_id"] = gdf.index.astype(str)
+        return gdf
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Falha ao ler densidade.parquet: {exc}")
+        return None
+
+# ============================================================
+# Helpers de estilo e assets
+# ============================================================
 
 def inject_css() -> None:
+    """Injeta CSS e aplica Roboto como fonte global."""
     st.markdown(
         f"""
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
-        html, body, .stApp {{ font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }}
-        .main .block-container {{ padding-top: .2rem !important; padding-bottom: .8rem !important; }}
-        .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
-        .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; }}
-        .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:18px 20px; width:100%; }}
-        .pb-title {{ font-size:3.8rem; font-weight:900; line-height:1.05; letter-spacing:.2px }}
-        .pb-subtitle {{ font-size:1.9rem; opacity:.95; margin-top:6px }}
-        .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
-        .legend-card {{ margin-top:12px; background:#fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; padding:10px 12px; }}
-        .legend-title {{ font-weight:800; margin-bottom:6px; }}
-        .legend-row {{ display:flex; align-items:center; gap:8px; margin:4px 0; }}
-        .legend-swatch {{ width:18px; height:18px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); }}
+            @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+            :root {{
+                --pb-amarelo: {PB_COLORS['amarelo']};
+                --pb-verde:   {PB_COLORS['verde']};
+                --pb-laranja: {PB_COLORS['laranja']};
+                --pb-telha:   {PB_COLORS['telha']};
+                --pb-teal:    {PB_COLORS['teal']};
+                --pb-navy:    {PB_COLORS['navy']};
+            }}
+            html, body, .stApp {{ font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important; }}
+            .pb-header {{
+                background: var(--pb-navy);
+                color: #fff;
+                border-radius: 18px;
+                padding: 20px 24px;
+                min-height: 110px;
+                display: flex;
+                align-items: center;
+                gap: 16px;
+            }}
+            .pb-title {{ font-size: 2.4rem; line-height: 1.15; font-weight: 700; letter-spacing: .5px; }}
+            .pb-subtitle {{ opacity: .95; margin-top: 4px; font-size: 1.1rem; font-weight: 400; }}
+            .stTabs [data-baseweb="tab-list"] button[role="tab"] {{ background: transparent; border-bottom: 3px solid transparent; color: #2b2b2b; font-weight: 600; }}
+            .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {{ border-bottom: 3px solid var(--pb-teal) !important; color: var(--pb-navy) !important; }}
+            .pb-card {{ background: #ffffff; border: 1px solid rgba(20,64,125,.10); box-shadow: 0 1px 2px rgba(0,0,0,.04); border-radius: 16px; padding: 16px; }}
+            .pb-card h4 {{ margin: 0 0 8px 0; font-size: 1.05rem; color: var(--pb-navy); }}
+            footer {{visibility: hidden;}}
+            #MainMenu {{visibility: hidden;}}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-# ====================== caminhos e util ======================
-try:
-    REPO_ROOT = Path(__file__).resolve().parent
-except NameError:  # streamlit cloud
-    REPO_ROOT = Path.cwd()
-
-DATA_DIR = (
-    REPO_ROOT / "limites_administrativos"
-    if (REPO_ROOT / "limites_administrativos").exists()
-    else REPO_ROOT
-)
-GEOM_FILE = DATA_DIR / "IDCenso2023.parquet"                 # fid + geometry
-METRICS_FILE = DATA_DIR / "SetoresCensitarios2023.parquet"   # fid + métricas
-LOGO_PATH = REPO_ROOT / "assets" / "logo_todos.jpg"
-
-
-def _logo_data_uri() -> str:
-    if LOGO_PATH.exists():
-        b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
-        return f"data:image/{LOGO_PATH.suffix.lstrip('.').lower()};base64,{b64}"
-    return (
-        "https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/logomark/streamlit-mark-color.png"
-    )
-
-
-def _slug(s: str) -> str:
-    s2 = _ud_norm("NFKD", str(s)).encode("ASCII", "ignore").decode("ASCII")
-    return re.sub(r"[^a-z0-9]+", "", s2.strip().lower())
-
-
-def find_col(df_cols, *cands) -> Optional[str]:
-    low = {c.lower(): c for c in df_cols}
-    norm = {re.sub(r"[^a-z0-9]", "", k.lower()): v for k, v in low.items()}
-    for c in cands:
-        if not c:
-            continue
-        if c.lower() in low:
-            return low[c.lower()]
-        key = re.sub(r"[^a-z0-9]", "", c.lower())
-        if key in norm:
-            return norm[key]
-    return None
-
-
-def center_from_bounds(gdf) -> tuple[float, float]:
-    minx, miny, maxx, maxy = gdf.total_bounds
-    return ((miny + maxy) / 2, (minx + maxx) / 2)
-
-
-# ====================== leitores ======================
-
-def _read_gdf_robusto(
-    path: Path, columns: Optional[List[str]] = None
-) -> Optional["gpd.GeoDataFrame"]:
-    if not path.exists():
-        return None
-    try:
-        gdf = gpd.read_parquet(path, columns=columns)
-        if not isinstance(gdf, gpd.GeoDataFrame) or "geometry" not in gdf.columns:
-            raise ValueError
-        if gdf.crs is None:
-            gdf = gdf.set_crs(4326)
-        return gdf.to_crs(4326)
-    except Exception:
-        try:
-            table = pq.read_table(str(path), columns=columns)
-            pdf = table.to_pandas()
-            geom_col = find_col(pdf.columns, "geometry", "geom", "wkb", "wkt")
-            if geom_col is None:
-                return None
-            vals = pdf[geom_col]
-            if (
-                vals.dropna().astype(str).str.startswith(("POLY", "MULTI", "LINE", "POINT")).any()
-            ):
-                geo = vals.dropna().apply(wkt.loads)
-            else:
-                geo = vals.dropna().apply(lambda b: wkb.loads(b, hex=isinstance(b, str)))
-            gdf = gpd.GeoDataFrame(pdf.drop(columns=[geom_col]), geometry=geo, crs=4326)
-            return gdf
-        except Exception:
-            return None
-
-
-def _sanitize_gdf(gdf: Optional["gpd.GeoDataFrame"], only_types: Optional[List[str]] = None) -> Optional["gpd.GeoDataFrame"]:
-    """Remove geometrias nulas/vazias e corrige inválidas via make_valid. Opcionalmente filtra por tipo."""
-    if gdf is None:
-        return None
-    try:
-        g = gdf.copy()
-        try:
-            g["geometry"] = g.geometry.apply(_make_valid)
-        except Exception:
-            pass
-        g = g[g.geometry.notnull()]
-        try:
-            g = g[~g.geometry.is_empty]
-        except Exception:
-            pass
-        if only_types is not None:
-            try:
-                g = g[g.geometry.geom_type.isin(only_types)]
-            except Exception:
-                pass
-        return g
-    except Exception:
-        return gdf
-
-
-def _reduce_precision(gdf: "gpd.GeoDataFrame", grid: float = 1e-5) -> "gpd.GeoDataFrame":
-    try:
-        g2 = gdf.copy()
-        g2["geometry"] = g2.geometry.apply(lambda geom: _set_precision(geom, grid))
-        return g2
-    except Exception:
-        return gdf
-
-
-def _dynamic_simplify(gdf: "gpd.GeoDataFrame", base_tol: int = SIMPLIFY_M) -> "gpd.GeoDataFrame":
-    """Simplifica em EPSG:3857 com tolerância que escala com nº de features."""
-    n = len(gdf)
-    mult = 1.0
-    if n > 50000:
-        mult = 2.0
-    elif n > 25000:
-        mult = 1.5
-    tol = int(base_tol * mult)
-    try:
-        jm = gdf.to_crs(3857)
-        jm["geometry"] = jm.geometry.simplify(tol, preserve_topology=True)
-        return jm.to_crs(4326)
-    except Exception:
-        return gdf
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str]]:
-    if not GEOM_FILE.exists():
-        return None, None
-    gdf = _read_gdf_robusto(GEOM_FILE, ["fid", "geometry"])
-    if gdf is None:
-        return None, None
-    return gdf, "fid"
-
-
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
-def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
-    if not METRICS_FILE.exists():
-        return None
-    cols = pq.ParquetFile(str(METRICS_FILE)).schema.names
-    mapping = {
-        "População (Pessoa/ha)": "populacao",
-        "Densidade demográfica (hab/ha)": "densidade_demografica",
-        "Variação de elevação média": "diferenca_elevacao",
-        "Elevação média": "elevacao",
-        "Cluster (perfil urbano)": "cluster",
-    }
-    wanted = find_col(cols, mapping.get(var_label, var_label))
-    if not wanted or "fid" not in cols:
-        return None
-    table = pq.read_table(str(METRICS_FILE), columns=["fid", wanted])
-    df = table.to_pandas()
-    df.rename(columns={wanted: "value"}, inplace=True)
-    return df
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_isocronas() -> Optional["gpd.GeoDataFrame"]:
-    for name in ("isocronas.parquet", "isócronas.parquet"):
-        p = DATA_DIR / name
-        if p.exists():
-            return _read_gdf_robusto(p, ["geometry", "nova_class"])
-    return None
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
-    """Carrega camada administrativa por nome, com busca robusta por arquivo."""
-    target = _slug(name)
-    direct = {
-        "distritos": DATA_DIR / "Distritos.parquet",
-        "zonasod2023": DATA_DIR / "ZonasOD2023.parquet",
-        "subprefeitura": DATA_DIR / "Subprefeitura.parquet",
-        "isocronas": DATA_DIR / "isocronas.parquet",
-        "isocronas2": DATA_DIR / "isócronas.parquet",
-    }
-    cand = None
-    for k, p in direct.items():
-        if p.exists() and (target in k or k in target):
-            cand = p
-            break
-    if cand is None:
-        for p in DATA_DIR.rglob("*.parquet"):
-            if _slug(p.stem) in (target, f"{target}2023", f"{target}s"):
-                cand = p
-                break
-        if cand is None:
-            for p in DATA_DIR.rglob("*.geojson"):
-                if _slug(p.stem) in (target, f"{target}2023", f"{target}s"):
-                    cand = p
-                    break
-    if cand is None:
-        st.warning(f"Camada '{name}' não encontrada em {DATA_DIR}.")
-        return None
-    gdf = _read_gdf_robusto(cand, ["geometry"])
-    if gdf is None or gdf.empty:
-        st.warning(f"Não foi possível ler '{cand.name}'. Verifique arquivo/colunas.")
-        return None
-    return gdf
-
-
-# ====================== helpers de performance ======================
-
-def _hex_to_rgba(h: str, a: int = 190) -> List[int]:
-    h = h.lstrip("#")
-    return [int(h[i : i + 2], 16) for i in (0, 2, 4)] + [a]
-
-
-def _sample_gradient(colors: List[str], n: int) -> List[str]:
-    if n <= 1:
-        return [colors[-1]]
-    out = []
-    for i in range(n):
-        t = i / (n - 1)
-        pos = t * (len(colors) - 1)
-        j = int(math.floor(pos))
-        j = min(j, len(colors) - 2)
-        frac = pos - j
-        def h2r(x):
-            x = x.lstrip("#")
-            return [int(x[k : k + 2], 16) for k in (0, 2, 4)]
-        def r2h(r):
-            return "#{:02x}{:02x}{:02x}".format(*r)
-        c1, c2 = h2r(colors[j]), h2r(colors[j + 1])
-        mix = [int(c1[k] + frac * (c2[k] - c1[k])) for k in range(3)]
-        out.append(r2h(mix))
-    return out
-
-
-def classify_soft6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[float, float]]]:
-    v = pd.to_numeric(series, errors="coerce")
-    if v.dropna().empty:
-        return pd.Series([-1] * len(v), index=v.index), []
-    vmin, vmax = float(v.min()), float(v.max())
-    if vmin == vmax:
-        bins = [vmin - 1e-9, vmax + 1e-9]
-        idx = pd.cut(v, bins=bins, labels=False, include_lowest=True)
-        return idx.fillna(-1).astype("Int64"), [(vmin, vmax)]
-    step = (vmax - vmin) / 6.0
-    edges = [vmin + i * step for i in range(7)]
-    edges[-1] = vmax + 1e-9
-    idx = pd.cut(v, bins=edges, labels=False, include_lowest=True)
-    breaks = [(edges[i], edges[i + 1]) for i in range(6)]
-    return idx.fillna(-1).astype("Int64"), breaks
-
-
-# ---- cache leve de GeoJSON na sessão ----
-
-def _gj_cache_get(key: str):
-    return st.session_state.setdefault("_gj_cache", {}).get(key)
-
-def _gj_cache_set(key: str, value):
-    st.session_state.setdefault("_gj_cache", {})[key] = value
-
-def geojson_from_gdf(gdf: "gpd.GeoDataFrame", props: List[str], cache_key: str):
-    gj = _gj_cache_get(cache_key)
-    if gj is None:
-        gj = json.loads(gdf[props].to_json())
-        _gj_cache_set(cache_key, gj)
-    return gj
-
-
-def _prefilter_by_bbox(
-    gdf: Optional["gpd.GeoDataFrame"], limit_gdf: Optional["gpd.GeoDataFrame"]
-) -> Optional["gpd.GeoDataFrame"]:
-    if gdf is None or gdf.empty or limit_gdf is None or limit_gdf.empty:
-        return gdf
-    try:
-        b = box(*limit_gdf.total_bounds)
-        idx = gdf.sindex.query(b, predicate="intersects")
-        return gdf.iloc[idx]
-    except Exception:
-        return gdf
-
-
-def clip_to_limit(
-    gdf: Optional["gpd.GeoDataFrame"], limit_gdf: Optional["gpd.GeoDataFrame"], *, fast: bool = False
-) -> Optional["gpd.GeoDataFrame"]:
-    if gdf is None or gdf.empty or limit_gdf is None or limit_gdf.empty:
-        return gdf
-    cand = _prefilter_by_bbox(gdf, limit_gdf)
-    if cand is None or cand.empty:
-        return cand
-    if fast:
-        return cand
-    try:
-        key = (
-            f"_limit_union|{len(limit_gdf)}|"
-            f"{int(limit_gdf.total_bounds[0]*1e6)}-"
-            f"{int(limit_gdf.total_bounds[1]*1e6)}-"
-            f"{int(limit_gdf.total_bounds[2]*1e6)}-"
-            f"{int(limit_gdf.total_bounds[3]*1e6)}"
-        )
-        union = st.session_state.get(key)
-        if union is None:
-            union = limit_gdf.unary_union
-            st.session_state[key] = union
-        return gpd.clip(cand, union)
-    except Exception:
-        minx, miny, maxx, maxy = limit_gdf.total_bounds
-        try:
-            return cand.cx[minx:maxx, miny:maxy]
-        except Exception:
-            return cand
-
-
-# ====================== UI (filtros) ======================
-
-def left_controls() -> Dict[str, Any]:
-    st.markdown("<div style='margin-top:-6px'></div>", unsafe_allow_html=True)
-    st.markdown("### Variáveis (Setores Censitários e Isócronas)")
-    var = st.selectbox(
-        "Selecione a variável",
-        [
-            PLACEHOLDER_VAR,
-            "População (Pessoa/ha)",
-            "Densidade demográfica (hab/ha)",
-            "Variação de elevação média",
-            "Elevação média",
-            "Cluster (perfil urbano)",
-            "Área de influência de bairro",
-        ],
-        index=0,
-        key="pb_var",
-        placeholder="Escolha…",
-    )
-    st.markdown("### Configurações")
-    limite = st.selectbox(
-        "Limites Administrativos",
-        [
-            PLACEHOLDER_LIM,
-            "Distritos",
-            "ZonasOD2023",
-            "Subprefeitura",
-            "Isócronas",
-            "Setores Censitários (linhas)",
-        ],
-        index=0,
-        key="pb_limite",
-        placeholder="Escolha…",
-    )
-    st.checkbox("Rótulos permanentes (dinâmicos por zoom)", value=False, key="pb_labels_on")
-    st.caption("Use o botão abaixo para limpar os caches de dados em memória.")
-    if st.button("🧹 Limpar cache de dados", type="secondary"):
-        st.cache_data.clear()
-        st.session_state.pop("_gj_cache", None)
-        st.success("Cache limpo. Selecione novamente a camada/variável.")
-
-    legend_ph = st.empty()
-    st.session_state["_legend_ph"] = legend_ph
-
-    st.session_state["_pb_prev_sel"] = {"var": var, "lim": limite}
-
-    # gating: exige limite antes de variável
-    if var != PLACEHOLDER_VAR and limite == PLACEHOLDER_LIM:
-        st.info("Selecione um **limite administrativo** antes de carregar a variável.")
-
-    return {"variavel": var, "limite": limite}
-
-
-# ====================== Legendas (HTML) ======================
-
-def show_numeric_legend(title: str, breaks: List[Tuple[float, float]], palette: List[str]):
-    ph = st.session_state.get("_legend_ph")
-    if not ph:
-        return
-    if not breaks:
-        ph.empty(); return
-    rows = []
-    for (a, b), col in zip(breaks, palette):
-        label = f"{a:,.0f} – {b:,.0f}"
-        rows.append(
-            f"<div class='legend-row'><span class='legend-swatch' style='background:{col}'></span><span>{label}</span></div>"
-        )
-    html = f"<div class='legend-card'><div class='legend-title'>{title}</div>{''.join(rows)}</div>"
-    ph.markdown(html, unsafe_allow_html=True)
-
-
-def show_categorical_legend(title: str, items: List[Tuple[str, str]]):
-    ph = st.session_state.get("_legend_ph")
-    if not ph:
-        return
-    rows = [
-        f"<div class='legend-row'><span class='legend-swatch' style='background:{c}'></span><span>{l}</span></div>"
-        for l, c in items
+def get_logo_path() -> Optional[str]:
+    candidates = [
+        "assets/logo_todos.jpg",
+        "assets/logo_paleta.jpg",
+        "logo_todos.jpg",
+        "logo_paleta.jpg",
+        "/mnt/data/logo_todos.jpg",
+        "/mnt/data/logo_paleta.jpg",
     ]
-    html = f"<div class='legend-card'><div class='legend-title'>{title}</div>{''.join(rows)}</div>"
-    ph.markdown(html, unsafe_allow_html=True)
+    for p in candidates:
+        if Path(p).exists():
+            return p
+    return None
+
+# ============================================================
+# Componentes de UI
+# ============================================================
+
+def build_header(logo_path: Optional[str]) -> None:
+    with st.container():
+        col1, col2 = st.columns([1, 7])
+        with col1:
+            if logo_path:
+                st.image(logo_path, width=140)
+            else:
+                st.write("")
+        with col2:
+            st.markdown(
+                """
+                <div class="pb-header">
+                    <div style="display:flex;flex-direction:column">
+                        <div class="pb-title">PlanBairros</div>
+                        <div class="pb-subtitle">Plataforma de visualização e planejamento em nível de bairro</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
-def clear_legend():
-    ph = st.session_state.get("_legend_ph")
-    if ph:
-        ph.empty()
+def build_tabs() -> None:
+    aba1, aba2, aba3, aba4 = st.tabs(["Aba 1", "Aba 2", "Aba 3", "Aba 4"])
+    for i, aba in enumerate([aba1, aba2, aba3, aba4], start=1):
+        with aba:
+            st.markdown(f"**Conteúdo da Aba {i}** — espaço reservado.")
+    st.write("")
 
 
-# ====================== Render (pydeck) ======================
+def build_controls() -> Tuple[str, str]:
+    """Configurações limpas: primeiro Limites, depois Variáveis."""
+    st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
+    st.markdown("<h4>Configurações</h4>", unsafe_allow_html=True)
 
-def _show_deck(deck: "pdk.Deck"):
+    admin_name = st.selectbox(
+        "Limites administrativos",
+        ADMIN_OPTIONS,
+        index=0,
+        help="Escolha a desagregação para sobreposição (linhas sem preenchimento).",
+        key="pb_detalhe",
+    )
+
+    variavel = st.selectbox(
+        "Variáveis",
+        ["Densidade", "Zoneamento"],
+        index=0,
+        help="Variável agregada por Setor Censitário.",
+        key="pb_variavel",
+    )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    return admin_name, variavel
+
+# ============================================================
+# Mapa e lógica de seleção
+# ============================================================
+
+def render_map_with_selection(admin_name: str, variavel: str) -> Tuple[Optional[float], Optional[float], int]:
+    """Renderiza mapa com:
+    - Google Satellite (50% opacidade)
+    - Limites administrativos (linhas)
+    - DENSIDADE: choropleth + seleção por clique de Setores; retorna médias
+    - ZONEAMENTO: coloração categórica (sem métrica por enquanto)
+    """
+    gdf_admin = load_vector_parquet(admin_name)
+    gdf_den = load_densidade_layer()
+
+    # Centro do mapa
+    center_lat, center_lon = -23.55, -46.63
     try:
-        st.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT)
-    except TypeError:
-        st.pydeck_chart(deck, use_container_width=True)
+        base_gdf = gdf_den if gdf_den is not None else gdf_admin
+        if base_gdf is not None and not base_gdf.empty:
+            c = base_gdf.geometry.unary_union.centroid
+            center_lat, center_lon = float(c.y), float(c.x)
+    except Exception:
+        pass
 
+    # Mapa base sem tiles padrão
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=None)
 
-def render_pydeck(
-    center: Tuple[float, float],
-    setores_joined: Optional["gpd.GeoDataFrame"],
-    limite_gdf: Optional["gpd.GeoDataFrame"],
-    var_label: Optional[str],
-    draw_setores_outline: bool = False,
-):
-    layers: List[Any] = []
+    # Google Satellite (50%) — atenção a termos de uso
+    folium.TileLayer(
+        tiles="https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+        attr="Google",
+        name="Google Satellite",
+        subdomains=["mt0", "mt1", "mt2", "mt3"],
+        opacity=0.5,
+        control=False,
+    ).add_to(m)
 
-    # camada cloroplética
-    legend_done = False
-    if setores_joined is not None and not setores_joined.empty and "value" in setores_joined.columns:
-        gdf = setores_joined.copy()
+    # Limites administrativos: LINHAS
+    if gdf_admin is not None and not gdf_admin.empty:
+        folium.GeoJson(
+            data=gdf_admin.__geo_interface__,
+            name=f"Limites — {admin_name}",
+            style_function=lambda f: {"color": PB_COLORS["navy"], "weight": 2, "fill": False, "fillOpacity": 0},
+        ).add_to(m)
 
-        if var_label == "Cluster (perfil urbano)":
-            cmap = {0: "#bf7db2", 1: "#f7bd6a", 2: "#cf651f", 3: "#ede4e6", 4: "#793393"}
-            labels = {
-                0: "1 - Periférico com predominância residencial de alta densidade construtiva",
-                1: "2 - Uso misto de média densidade construtiva",
-                2: "3 - Periférico com predominância residencial de média densidade construtiva",
-                3: "4 - Verticalizado de uso-misto",
-                4: "5 - Predominância de uso comercial e serviços",
-            }
-            s = pd.to_numeric(gdf["value"], errors="coerce")
-            gdf["fill_color"] = s.map(
-                lambda v: _hex_to_rgba(cmap.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200)
-            )
-            items = [(labels[k], cmap[k]) for k in sorted(cmap)]
-            show_categorical_legend("Cluster (perfil urbano)", items); legend_done = True
-        else:
-            classes, breaks = classify_soft6(gdf["value"])  # quebras por valor
-            palette = _sample_gradient(ORANGE_RED_GRAD, 6)
-            color_map = {i: _hex_to_rgba(palette[i], 200) for i in range(6)}
-            gdf["fill_color"] = classes.map(
-                lambda k: color_map.get(int(k) if pd.notna(k) else -1, _hex_to_rgba("#c8c8c8", 200))
-            )
-            show_numeric_legend(var_label or "", breaks, palette); legend_done = True
+    mean_sel, mean_total, n_sel = None, None, 0
 
-        gdf_small = _reduce_precision(gdf)
-        cache_key = f"setores|{var_label}|{len(gdf_small)}|{gdf_small.total_bounds.tobytes()}"
-        geojson = geojson_from_gdf(
-            gdf_small[["geometry", "fill_color", "value"]],
-            ["geometry", "fill_color", "value"],
-            cache_key,
-        )
+    # Colunas candidatas
+    den_col = None
+    zone_col = None
+    if gdf_den is not None and not gdf_den.empty:
+        # densidade: tenta nomes comuns; fallback primeira numérica
+        cand_cols = ["densidade", "DENSIDADE", "dens", "dens_media", "dens_med"]
+        den_col = next((c for c in cand_cols if c in gdf_den.columns), None)
+        if den_col is None:
+            num_cols = [c for c in gdf_den.columns if c != "geometry" and pd.api.types.is_numeric_dtype(gdf_den[c])]
+            den_col = num_cols[0] if num_cols else None
+        # zoneamento: tenta nomes comuns
+        cat_cols = ["zoneamento", "ZONEAMENTO", "zona", "classe", "uso"]
+        zone_col = next((c for c in cat_cols if c in gdf_den.columns), None)
 
-        setores_layer = pdk.Layer(
-            "GeoJsonLayer",
-            id="setores-fill",
-            data=geojson,
-            filled=True,
-            stroked=False,
-            pickable=False,
-            auto_highlight=False,
-            get_fill_color="properties.fill_color",
-            get_line_width=0,
-        )
-        layers.append(setores_layer)
+    if variavel == "Densidade" and gdf_den is not None and not gdf_den.empty and den_col is not None:
+        vmin, vmax = float(gdf_den[den_col].min()), float(gdf_den[den_col].max())
+        cmap = linear.YlOrRd_09.scale(vmin, vmax)
+        cmap.caption = "Densidade"
 
-    # contorno administrativo como boundary
-    if limite_gdf is not None and not limite_gdf.empty:
-        lim_clean = _sanitize_gdf(limite_gdf, only_types=["Polygon", "MultiPolygon"])
-        if lim_clean is None or lim_clean.empty:
-            lim_clean = limite_gdf
-        try:
-            out = lim_clean.copy(); out["geometry"] = out.geometry.boundary
-        except Exception:
-            out = lim_clean
-        out2 = _sanitize_gdf(out, only_types=["LineString", "MultiLineString"])
-        if out2 is None or out2.empty:
-            out2 = out
-        if out2 is not None and not out2.empty:
-            cache_key = f"limite|{len(out2)}|{out2.total_bounds.tobytes()}"
-            gj_lim = geojson_from_gdf(out2[["geometry"]], ["geometry"], cache_key)
-            outline = pdk.Layer(
-                "GeoJsonLayer",
-                id="admin-outline",
-                data=gj_lim,
-                filled=False,
-                stroked=True,
-                get_line_color=[20, 20, 20, 220],
-                get_line_width=2,
-                lineWidthUnits="pixels",
-            )
-            layers.append(outline)
+        def style_fn(feat):
+            v = feat["properties"].get(den_col, 0)
+            return {"color": "#666", "weight": 0.8, "fill": True, "fillOpacity": 0.6, "fillColor": cmap(v)}
 
-    # setores censitários como linhas (quando pedido)
-    if draw_setores_outline:
-        g_outline = None
-        if setores_joined is not None and not setores_joined.empty:
-            g_outline = setores_joined[["geometry"]]
-        else:
-            geoms_only, _ = load_setores_geom(); g_outline = geoms_only
-        g_outline = _sanitize_gdf(g_outline, only_types=["Polygon", "MultiPolygon"]) if g_outline is not None else None
-        if g_outline is not None and not g_outline.empty:
+        tooltip_fields = [c for c in gdf_den.columns if c != "geometry"][:6]
+        tooltip = folium.features.GeoJsonTooltip(fields=tooltip_fields) if tooltip_fields else None
+
+        folium.GeoJson(
+            data=gdf_den.__geo_interface__,
+            name="Densidade (Setores)",
+            style_function=style_fn,
+            tooltip=tooltip,
+        ).add_to(m)
+        cmap.add_to(m)
+
+        # Estado da seleção
+        sel_key = "_setores_sel"
+        if sel_key not in st.session_state:
+            st.session_state[sel_key] = set()
+
+        # 1º render: captura clique
+        st_map = st_folium(m, height=560, use_container_width=True, returned_objects=["last_object_clicked"])    
+        if st_map and st_map.get("last_object_clicked"):
+            lat = st_map["last_object_clicked"]["lat"]
+            lon = st_map["last_object_clicked"]["lng"]
+            pt = Point(lon, lat)
             try:
-                g_outline = g_outline.copy(); g_outline["geometry"] = g_outline.geometry.boundary
+                hit = gdf_den[gdf_den.geometry.contains(pt)]
+                if not hit.empty:
+                    sid = str(hit.iloc[0].get("_setor_id", hit.index[0]))
+                    if sid in st.session_state[sel_key]:
+                        st.session_state[sel_key].remove(sid)
+                    else:
+                        st.session_state[sel_key].add(sid)
             except Exception:
                 pass
-            cache_key = f"outline|{len(g_outline)}|{g_outline.total_bounds.tobytes()}"
-            gj = geojson_from_gdf(g_outline[["geometry"]], ["geometry"], cache_key)
-            sectors_outline = pdk.Layer(
-                "GeoJsonLayer",
-                id="setores-outline",
-                data=gj,
-                filled=False,
-                stroked=True,
-                get_line_color=[80, 80, 80, 160],
-                get_line_width=0.6,
-                lineWidthUnits="pixels",
-            )
-            layers.append(sectors_outline)
 
-    deck = pdk.Deck(
-        layers=layers,
-        initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
-        map_style=MAP_STYLE,
-        tooltip=(
-            {"text": f"{var_label}: {{value}}"}
-            if var_label and var_label != "Cluster (perfil urbano)"
-            else None
-        ),
-    )
-    _show_deck(deck)
+        # Destaca seleção
+        if st.session_state[sel_key]:
+            sel = gdf_den[gdf_den["_setor_id"].astype(str).isin(st.session_state[sel_key])]
+            n_sel = len(sel)
+            folium.GeoJson(
+                data=sel.__geo_interface__,
+                name="Selecionados",
+                style_function=lambda f: {"color": PB_COLORS["teal"], "weight": 3, "fill": False, "fillOpacity": 0},
+            ).add_to(m)
+            mean_sel = float(sel[den_col].mean()) if n_sel else None
+        mean_total = float(gdf_den[den_col].mean())
 
-    if not legend_done:
-        clear_legend()
+        # 2º render: com seleção destacada
+        st_folium(m, height=560, use_container_width=True)
 
+    elif variavel == "Zoneamento" and gdf_den is not None and not gdf_den.empty and zone_col is not None:
+        # Paleta categórica
+        cats = list(pd.Series(gdf_den[zone_col].astype(str)).unique())
+        palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+        color_map = {c: palette[i % len(palette)] for i, c in enumerate(cats)}
 
-# ====================== App ======================
+        def style_fn(feat):
+            k = str(feat["properties"].get(zone_col))
+            return {"color": "#666", "weight": 0.6, "fill": True, "fillOpacity": 0.55, "fillColor": color_map.get(k, "#cccccc")}
+
+        tooltip_fields = [c for c in gdf_den.columns if c != "geometry"][:6]
+        tooltip = folium.features.GeoJsonTooltip(fields=tooltip_fields) if tooltip_fields else None
+
+        folium.GeoJson(
+            data=gdf_den.__geo_interface__,
+            name="Zoneamento (Setores)",
+            style_function=style_fn,
+            tooltip=tooltip,
+        ).add_to(m)
+        st_folium(m, height=560, use_container_width=True)
+
+    else:
+        # Sem dados suficientes: mostra só fundo + limites
+        st_folium(m, height=560, use_container_width=True)
+
+    return mean_sel, mean_total, n_sel
+
+# ============================================================
+# Layout principal
+# ============================================================
 
 def main() -> None:
     inject_css()
+    logo_path = get_logo_path()
 
-    st.markdown(
-        f"""
-        <div class="pb-row">
-            <img class="pb-logo" src="{_logo_data_uri()}" alt="PlanBairros logo"/>
-            <div class="pb-header">
-                <div class="pb-title">PlanBairros</div>
-                <div class="pb-subtitle">Plataforma de visualização e planejamento em escala de bairro</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # Header
+    with st.container():
+        build_header(logo_path)
+    st.write("")
 
-    left, map_col = st.columns([1, 4], gap="large")
+    # Abas de topo (mantidas como placeholder)
+    build_tabs()
+
+    # Grade principal
+    try:
+        left, center, right = st.columns([1, 2, 2], gap="large")
+    except TypeError:
+        left, center, right = st.columns([1, 2, 2])
+
     with left:
-        st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
-        ui = left_controls()
-        st.markdown("</div>", unsafe_allow_html=True)
+        admin_name, variavel = build_controls()
 
-    with map_col:
-        center = (-23.55, -46.63)
-        var = ui["variavel"]
+    with center:
+        mean_sel, mean_total, n_sel = render_map_with_selection(admin_name, variavel)
 
-        # limites (inclui opção "Setores Censitários (linhas)")
-        limite_gdf = None
-        draw_setores_outline = False
-        if ui["limite"] != PLACEHOLDER_LIM:
-            if ui["limite"] == "Setores Censitários (linhas)":
-                draw_setores_outline = True
+    with right:
+        st.subheader("Resumo")
+        if variavel == "Densidade" and mean_total is not None:
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric("Densidade média (seleção)", f"{mean_sel:.2f}" if mean_sel is not None else "—")
+            with c2:
+                st.metric("Densidade média (geral)", f"{mean_total:.2f}")
+
+            if mean_sel is not None:
+                _df = pd.DataFrame({"grupo": ["Selecionado", "Geral"], "densidade": [mean_sel, mean_total]})
+                fig = px.bar(_df, x="grupo", y="densidade", text="densidade", height=460)
+                fig.update_traces(marker_color=[PB_COLORS["teal"], PB_COLORS["laranja"]])
+                fig.update_layout(margin=dict(l=0, r=0, t=10, b=0))
+                st.plotly_chart(fig, use_container_width=True)
             else:
-                limite_gdf = load_admin_layer(ui["limite"])
-                if limite_gdf is not None and len(limite_gdf) > 0:
-                    center = center_from_bounds(limite_gdf)
-                else:
-                    st.warning(f"Limite '{ui['limite']}' não encontrado/vasio em {DATA_DIR}.")
-
-        # variável — só carrega se houver limite escolhido
-        setores_joined: Optional["gpd.GeoDataFrame"] = None
-        if var == "Área de influência de bairro" and limite_gdf is not None and not limite_gdf.empty:
-            iso = load_isocronas()
-            if iso is not None and len(iso) > 0:
-                lut = {0: "#542788", 1: "#f7f7f7", 2: "#d8daeb", 3: "#b35806", 4: "#b2abd2",
-                       5: "#8073ac", 6: "#fdb863", 7: "#7f3b08", 8: "#e08214", 9: "#fee0b6"}
-                cls = find_col(iso.columns, "nova_class")
-                if cls:
-                    g = iso.copy()
-                    g["value"] = pd.to_numeric(g[cls], errors="coerce")
-                    g = clip_to_limit(g, limite_gdf, fast=False)
-                    g = _sanitize_gdf(g)
-                    g = _dynamic_simplify(g, base_tol=SIMPLIFY_M)
-                    g["fill_color"] = g["value"].map(lambda v: _hex_to_rgba(lut.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
-                    g = _reduce_precision(g)
-                    if g is not None and not g.empty:
-                        setores_joined = g
-                        center = center_from_bounds(g)
-                    items = [(f"{k}", lut[k]) for k in sorted(lut)]
-                    show_categorical_legend("Área de influência de bairro (nova_class)", items)
-        elif var != PLACEHOLDER_VAR and limite_gdf is not None and not limite_gdf.empty:
-            geoms, id_col = load_setores_geom()
-            if geoms is not None and id_col == "fid":
-                metric = load_metric_column(var)
-                if metric is not None:
-                    joined = geoms.merge(metric, on="fid", how="left")
-                    # recorte + sanitização + simplificação dinâmica (sem amostrar)
-                    fast_mode = len(joined) > 30000 or (limite_gdf is not None and len(limite_gdf) > 200)
-                    joined = clip_to_limit(joined, limite_gdf, fast=fast_mode)
-                    joined = _sanitize_gdf(joined)
-                    if joined is not None and not joined.empty:
-                        joined = _dynamic_simplify(joined, base_tol=SIMPLIFY_M)
-                        joined = _reduce_precision(joined)
-                        setores_joined = joined
-                        center = center_from_bounds(joined)
-        elif var != PLACEHOLDER_VAR and (limite_gdf is None or limite_gdf.empty):
-            st.info("Para ver a variável, selecione um **limite administrativo**.")
-
-        render_pydeck(
-            center=center,
-            setores_joined=setores_joined,
-            limite_gdf=limite_gdf,
-            var_label=None if var in (PLACEHOLDER_VAR, "Área de influência de bairro") else var,
-            draw_setores_outline=draw_setores_outline,
-        )
+                st.info("Clique nos Setores Censitários no mapa para construir o seu bairro e ver a média.")
+        elif variavel == "Zoneamento":
+            st.write("Selecione *Densidade* para ver métricas. Zoneamento é apenas visual por enquanto.")
+        else:
+            st.write("Carregando dados...")
 
 
 if __name__ == "__main__":
     main()
-
