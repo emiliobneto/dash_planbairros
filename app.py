@@ -32,7 +32,7 @@ ORANGE_RED_GRAD = ["#fff7ec","#fee8c8","#fdd49e","#fdbb84","#fc8d59","#e34a33","
 PLACEHOLDER_VAR = "— selecione uma variável —"
 PLACEHOLDER_LIM = "— selecione o limite —"
 
-LOGO_HEIGHT = 180   # ↑ 50% (antes 120)
+LOGO_HEIGHT = 180   # +50%
 MAP_HEIGHT  = 900
 SIMPLIFY_M_SETORES   = 25
 SIMPLIFY_M_ISOCRONAS = 80
@@ -113,7 +113,6 @@ def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Option
         return gdf.to_crs(4326)
     except Exception:
         try:
-            from pyarrow import parquet as pq
             table = pq.read_table(str(path), columns=columns)
             pdf = table.to_pandas()
             geom_col = find_col(pdf.columns, "geometry", "geom", "wkb", "wkt")
@@ -236,13 +235,24 @@ def load_metro_lines() -> Optional["gpd.GeoDataFrame"]:
 def load_train_lines() -> Optional["gpd.GeoDataFrame"]:
     return _read_overlay_any("linhas_trem")
 
-# ====================== cache do GeoJSON (barateia muito) ======================
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=128)
-def gdf_to_geojson_str(gdf: "gpd.GeoDataFrame", cols: List[str]) -> str:
-    return gdf[cols].to_json()
+# ====================== cache do GeoJSON (corrige Unhashable + acelera) ======================
+# Definimos um hash estável para GeoDataFrame: tamanho, colunas e bounds arredondados.
+_HASH_FUNCS = {
+    gpd.GeoDataFrame: lambda df: (
+        len(df),
+        tuple(df.columns),
+        tuple(np.round(df.total_bounds, 6).tolist())
+    )
+}
 
-def gdf_to_geojson_obj(gdf: "gpd.GeoDataFrame", cols: List[str]) -> dict:
-    return json.loads(gdf_to_geojson_str(gdf, cols))
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256, hash_funcs=_HASH_FUNCS)
+def gdf_to_geojson_str(gdf: "gpd.GeoDataFrame", cols: Tuple[str, ...]) -> str:
+    # 'cols' precisa ser tuple (hashable) para evitar UnhashableParamError
+    return gdf[list(cols)].to_json()
+
+def gdf_to_geojson_obj(gdf: "gpd.GeoDataFrame", cols: List[str] | Tuple[str, ...]) -> dict:
+    # Converte cols -> tuple e usa o cache acima (string) + loads (barato)
+    return json.loads(gdf_to_geojson_str(gdf, tuple(cols)))
 
 # ====================== helpers numéricas ======================
 def _sample_gradient(colors: List[str], n: int) -> List[str]:
@@ -418,7 +428,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
 
     g = load_green_areas()
     if g is not None and not g.empty:
-        gj = gdf_to_geojson_obj(g, ["geometry"])
+        gj = gdf_to_geojson_obj(g, ("geometry",))
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=True, stroked=False, pickable=False,
@@ -427,7 +437,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
 
     r = load_rivers()
     if r is not None and not r.empty:
-        gj = gdf_to_geojson_obj(r, ["geometry"])
+        gj = gdf_to_geojson_obj(r, ("geometry",))
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
@@ -438,7 +448,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
 
     t = load_train_lines()
     if t is not None and not t.empty:
-        gj = gdf_to_geojson_obj(t, ["geometry"])
+        gj = gdf_to_geojson_obj(t, ("geometry",))
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
@@ -449,7 +459,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
 
     m = load_metro_lines()
     if m is not None and not m.empty:
-        gj = gdf_to_geojson_obj(m, ["geometry"])
+        gj = gdf_to_geojson_obj(m, ("geometry",))
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
@@ -476,7 +486,8 @@ def render_pydeck(center: Tuple[float, float],
 
     # camada temática
     if gdf_layer is not None and not gdf_layer.empty and "__rgba__" in gdf_layer.columns:
-        gj = gdf_to_geojson_obj(gdf_layer, ["geometry","__rgba__"] + ([tooltip_field] if tooltip_field else []))
+        cols = ["geometry", "__rgba__"] + ([tooltip_field] if tooltip_field else [])
+        gj = gdf_to_geojson_obj(gdf_layer, tuple(cols))
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=True, stroked=False, pickable=bool(tooltip_field), auto_highlight=True,
@@ -485,7 +496,7 @@ def render_pydeck(center: Tuple[float, float],
 
     # contornos/linhas de setores
     if limite_gdf is not None and not limite_gdf.empty:
-        gj_lim = gdf_to_geojson_obj(limite_gdf, ["geometry"])
+        gj_lim = gdf_to_geojson_obj(limite_gdf, ("geometry",))
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj_lim, filled=False, stroked=True,
             get_line_color=[20,20,20,180], get_line_width=1, lineWidthUnits="pixels"
@@ -497,7 +508,7 @@ def render_pydeck(center: Tuple[float, float],
         except Exception:
             geoms_only = None
         if geoms_only is not None:
-            gj = gdf_to_geojson_obj(geoms_only, ["geometry"])
+            gj = gdf_to_geojson_obj(geoms_only, ("geometry",))
             layers.append(pdk.Layer(
                 "GeoJsonLayer", data=gj, filled=False, stroked=True,
                 get_line_color=[80,80,80,160], get_line_width=0.6, lineWidthUnits="pixels"
@@ -512,7 +523,10 @@ def render_pydeck(center: Tuple[float, float],
         map_style=map_style,
         tooltip={"text": f"{{{tooltip_field}}}"} if tooltip_field else None,
     )
-    _show_deck(deck)
+    try:
+        st.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT)
+    except TypeError:
+        st.pydeck_chart(deck, use_container_width=True)
 
     # legendas
     if categorical_legend is not None:
