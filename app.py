@@ -70,6 +70,7 @@ LOGO_HEIGHT = 120
 MAP_HEIGHT = 900
 SIMPLIFY_M = 60   # tolerância padrão (metros em EPSG:3857)
 MAX_FEATURES = 15000  # guarda-chuva de segurança para payload muito grande
+MAP_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 
 
 def inject_css() -> None:
@@ -473,18 +474,18 @@ def render_pydeck(
                 3: "4 - Verticalizado de uso-misto",
                 4: "5 - Predominância de uso comercial e serviços",
             }
-            s = pd.to_numeric(gdf["__value__"], errors="coerce")
-            gdf["__rgba__"] = s.map(
+            s = pd.to_numeric(gdf["value"], errors="coerce")
+            gdf["fill_color"] = s.map(
                 lambda v: _hex_to_rgba(cmap.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200)
             )
             items = [(labels[k], cmap[k]) for k in sorted(cmap)]
             show_categorical_legend("Cluster (perfil urbano)", items)
             legend_done = True
         else:
-            classes, breaks = classify_soft6(gdf["__value__"])  # quebras suaves
+            classes, breaks = classify_soft6(gdf["value"])  # quebras suaves
             palette = _sample_gradient(ORANGE_RED_GRAD, 6)
             color_map = {i: _hex_to_rgba(palette[i], 200) for i in range(6)}
-            gdf["__rgba__"] = classes.map(
+            gdf["fill_color"] = classes.map(
                 lambda k: color_map.get(int(k) if pd.notna(k) else -1, _hex_to_rgba("#c8c8c8", 200))
             )
             show_numeric_legend(var_label or "", breaks, palette)
@@ -493,8 +494,8 @@ def render_pydeck(
         cache_key = f"setores|{var_label}|{len(gdf)}|{gdf.total_bounds.tobytes()}"
         gdf_small = _reduce_precision(gdf)
         geojson = geojson_from_gdf(
-            gdf_small[["geometry", "__rgba__", "__value__"]],
-            ["geometry", "__rgba__", "__value__"],
+            gdf_small[["geometry", "fill_color", "value"]],
+            ["geometry", "fill_color", "value"],
             cache_key,
         )
 
@@ -505,7 +506,7 @@ def render_pydeck(
             stroked=False,
             pickable=False,  # desligado para performance
             auto_highlight=False,
-            get_fill_color="properties.__rgba__",
+            get_fill_color="properties.fill_color",
             get_line_width=0,
         )
         layers.append(setores_layer)
@@ -552,9 +553,9 @@ def render_pydeck(
         initial_view_state=pdk.ViewState(
             latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0
         ),
-        map_style=None,
+        map_style=MAP_STYLE,
         tooltip=(
-            {"text": f"{var_label}: {{__value__}}"}
+            {"text": f"{var_label}: {{value}}"}
             if var_label and var_label != "Cluster (perfil urbano)"
             else None
         ),
