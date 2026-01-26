@@ -72,7 +72,7 @@ SIMPLIFY_M = 60  # antes 25m — melhor para payload/render
 MAX_FEATURES = 15000  # guarda-chuva de segurança para payload muito grande
 
 
-def inject_css() -> None:() -> None:
+def inject_css() -> None:()
     st.markdown(
         f"""
         <style>
@@ -688,3 +688,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
