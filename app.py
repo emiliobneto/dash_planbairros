@@ -18,12 +18,11 @@ def _import_stack():
     try:
         import geopandas as gpd
         import pydeck as pdk
-        from pydeck.types import Function as DeckFunction  # noqa: F401 (mantido se precisar no futuro)
+        from pydeck.types import Function as DeckFunction  # noqa: F401
         from shapely import wkb, wkt
         from pyarrow import parquet as pq
         return gpd, pdk, DeckFunction, wkb, wkt, pq
     except ImportError as e:
-        # Config mínima para exibir o erro de dependência
         st.set_page_config(page_title="PlanBairros", page_icon="🏙️", layout="wide")
         st.error(f"Dependência ausente: **{e}**.")
         st.stop()
@@ -466,7 +465,7 @@ def left_controls() -> Dict[str, Any]:
         st.cache_data.clear()
         st.success("Cache limpo. Selecione novamente a camada/variável.")
 
-    sel_now = {"var": var, "lim": limite}  # não dependemos do fundo pra invalidar cache
+    sel_now = {"var": var, "lim": limite}
     sel_prev = st.session_state.get("_pb_prev_sel")
     if sel_prev and (sel_prev != sel_now):
         st.cache_data.clear()
@@ -529,7 +528,6 @@ def clear_legend():
 
 # ====================== Render (pydeck) ======================
 
-# placeholder fixo para podermos "limpar" o mapa antes de redesenhar
 _MAP_PLACEHOLDER_KEY = "_pb_map_ph"
 
 
@@ -542,13 +540,7 @@ def _get_map_placeholder():
 
 
 def make_tile_basemap(style: str) -> "pdk.Layer":
-    """Basemap via TileLayer (raster) com URLs estáveis e CORS-friendly.
-
-    * IDs distintos por estilo (evita resíduos ao alternar)
-    * ESRI via services.arcgisonline.com (ordem {z}/{y}/{x}.jpg)
-    * Sem render_sub_layers (usa padrão do deck.gl)
-    * Força crossOrigin=anonymous via loadOptions
-    """
+    """Basemap via TileLayer (raster) com URLs estáveis e CORS-friendly."""
     if style == "Satélite (ESRI)":
         url = (
             "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/"
@@ -565,7 +557,8 @@ def make_tile_basemap(style: str) -> "pdk.Layer":
         min_zoom=0,
         max_zoom=19,
         tile_size=256,
-        loadOptions={"image": {"crossOrigin": "anonymous"}, "fetch": {"referrerPolicy": "no-referrer"}},
+        loadOptions={"image": {"crossOrigin": "anonymous"},
+                     "fetch": {"referrerPolicy": "no-referrer"}},
     )
 
 
@@ -661,7 +654,7 @@ def render_pydeck(
 ) -> None:
     layers: List[pdk.Layer] = []
 
-    # Fundo via TileLayer (sempre) e map_style=None → sem base do Mapbox
+    # Fundo via TileLayer (sempre) e map_style=None
     layers.append(make_tile_basemap(basemap))
     map_style = None
 
@@ -732,12 +725,13 @@ def render_pydeck(
     # Limpa o container antes de redesenhar para garantir que não sobre base antiga
     ph = _get_map_placeholder()
     ph.empty()
-    # key dependente do basemap ajuda a garantir remontagem completa
-    component_key = f"pydeck-map-{basemap}"
+
+    # Render sem 'key' (evita TypeError em alguns ambientes)
     try:
-        ph.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT, key=component_key)
+        ph.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT)
     except TypeError:
-        ph.pydeck_chart(deck, use_container_width=True, key=component_key)
+        # Fallback para ambientes que não aceitam 'height'
+        ph.pydeck_chart(deck, use_container_width=True)
 
     # legendas
     if categorical_legend is not None:
@@ -748,7 +742,7 @@ def render_pydeck(
     else:
         clear_legend()
 
-    # legenda flutuante (canto inferior-direito)
+    # legenda flutuante
     render_reference_legend_floating()
 
 
