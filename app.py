@@ -2,580 +2,635 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
-import json
-import logging
+from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ============================================================
-# LOGGING (vai para os logs do Streamlit Cloud)
-# ============================================================
-logger = logging.getLogger("dash_planbairros")
-if not logger.handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
-
-# ============================================================
-# IMPORTS GIS (falha amigável)
-# ============================================================
-try:
+# =========================
+# Imports geoespaciais (lazy-safe)
+# =========================
+def _import_geo():
     import geopandas as gpd
     import pydeck as pdk
-    from shapely.geometry.base import BaseGeometry
-    from shapely.errors import GEOSException
-    try:
-        # shapely 2.x
-        from shapely import make_valid  # type: ignore
-    except Exception:
-        make_valid = None  # type: ignore
-except Exception as e:
-    st.error("Falha ao importar dependências GIS (geopandas/pydeck/shapely).")
-    st.exception(e)
-    raise
+    from shapely.geometry import mapping  # noqa: F401
+    import shapely
+    return gpd, pdk, shapely
 
-# ============================================================
-# CONFIG
-# ============================================================
-st.set_page_config(page_title="Dash PlanBairros", layout="wide")
+gpd, pdk, shapely = _import_geo()
 
+# =========================
+# Config UI (estética "anterior")
+# =========================
+st.set_page_config(page_title="PlanBairros — Dash", page_icon="🗺️", layout="wide")
+
+st.markdown(
+    """
+    <style>
+      .block-container { padding-top: 1.0rem; padding-bottom: 1.0rem; }
+      section[data-testid="stSidebar"] { width: 340px !important; }
+      .st-emotion-cache-1y4p8pa { padding: 1.0rem; } /* sidebar padding */
+      .pb-note { font-size: 0.90rem; opacity: 0.85; }
+      .pb-badge { display:inline-block; padding:2px 8px; border-radius:999px; background:#1118270d; margin-right:6px;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# =========================
+# Paths (respeitando GitHub)
+# =========================
 ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "limites_administrativos"  # dash_planbairros/limites_administrativos/
 
-PATH_LIMITES = ROOT / "limites_administrativos"
-PATH_VARIAVEIS = ROOT / "variaveis"  # se você usa outro nome, ajuste aqui
-PATH_REFERENCIAS = ROOT / "referencias"  # opcional
-
-MAX_FEATURES_DEFAULT = 15000
-
-# ============================================================
-# HELPERS — Basemaps (MapLibre + Raster)
-# ============================================================
-def _map_style_raster_xyz(tiles_url: str, opacity: float = 1.0, attribution: str = "") -> Dict[str, Any]:
-    # MapLibre style spec básico com fonte raster XYZ
-    return {
-        "version": 8,
-        "sources": {
-            "raster-xyz": {
-                "type": "raster",
-                "tiles": [tiles_url],
-                "tileSize": 256,
-                "attribution": attribution,
-            }
-        },
-        "layers": [
-            {
-                "id": "raster-xyz",
-                "type": "raster",
-                "source": "raster-xyz",
-                "paint": {"raster-opacity": float(opacity)},
-            }
-        ],
-        # glyphs evita warnings em alguns renders
-        "glyphs": "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
-    }
-
-
-BASEMAPS: Dict[str, Any] = {
-    "Carto Positron (leve)": "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-    "Carto DarkMatter": "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-    "ESRI World Imagery (satélite)": _map_style_raster_xyz(
-        "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        opacity=0.50,
-        attribution="Tiles © Esri",
-    ),
-    # Se você insistir em Google, este tile costuma funcionar sem token em alguns ambientes,
-    # mas pode ser bloqueado dependendo de políticas/restrições.
-    "Google Satellite (pode bloquear)": _map_style_raster_xyz(
-        "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-        opacity=0.50,
-        attribution="© Google",
-    ),
+FILES: Dict[str, Path] = {
+    # limites (parquet)
+    "Distritos": DATA_DIR / "Distritos.parquet",
+    "Subprefeitura": DATA_DIR / "subprefeitura.parquet",
+    "Zonas OD 2023": DATA_DIR / "ZonasOD2023.parquet",
+    "Habitação Precária": DATA_DIR / "HabitacaoPrecaria.parquet",
+    "Isócronas": DATA_DIR / "isocronas.parquet",
+    # base p/ vínculo fid
+    "ID Censo 2023": DATA_DIR / "IDCenso2023.parquet",
+    "Setores Censitários 2023": DATA_DIR / "SetoresCensitarios2023.parquet",
+    # overlays (geojson)
+    "Áreas verdes": DATA_DIR / "area_verde.geojson",
+    "Rios": DATA_DIR / "rios.geojson",
+    "Linhas Metrô": DATA_DIR / "linhas_metro.geojson",
+    "Linhas Trem": DATA_DIR / "linhas_trem.geojson",
 }
 
-# ============================================================
-# HELPERS — Arquivos / Geometrias
-# ============================================================
-def _find_parquet(base_dir: Path, candidates: List[str]) -> Optional[Path]:
-    """
-    Encontra um parquet por lista de candidatos (tolerante a variações de nome).
-    Retorna o primeiro existente.
-    """
-    for name in candidates:
-        p = base_dir / name
-        if p.exists():
-            return p
-        # tolerância: tentar variações com/sem .parquet
-        if not name.lower().endswith(".parquet"):
-            p2 = base_dir / f"{name}.parquet"
-            if p2.exists():
-                return p2
-    return None
+# =========================
+# Basemaps
+# =========================
+CARTO_POSITRON_GL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+# (Google pode falhar por CORS/termos; deixo como opção, mas recomendo ESRI se quiser satélite estável)
+GOOGLE_SAT_TILES = "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+ESRI_WORLD_IMAGERY = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 
+# =========================
+# Helpers CRS / geometria
+# =========================
+def _bounds_look_projected(bounds: Tuple[float, float, float, float]) -> bool:
+    minx, miny, maxx, maxy = bounds
+    # Se passar muito de graus, provavelmente está em metros (UTM etc.)
+    return (abs(minx) > 180) or (abs(maxx) > 180) or (abs(miny) > 90) or (abs(maxy) > 90)
 
-def _ensure_crs_wgs84(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
+def _ensure_crs(gdf: "gpd.GeoDataFrame", assume_epsg_if_missing: int = 31983) -> "gpd.GeoDataFrame":
+    """Garante CRS e converte para EPSG:4326 (Carto/MapLibre)."""
+    if gdf is None or gdf.empty:
+        return gdf
+
+    # Se CRS ausente, tenta inferir por bounds
     if gdf.crs is None:
-        # Se seu dado já está em WGS84, ok. Se não estiver, ajuste aqui.
-        # Eu prefiro falhar “suave” sem quebrar, mas logando.
-        logger.warning("GeoDataFrame sem CRS. Assumindo EPSG:4326.")
-        gdf = gdf.set_crs("EPSG:4326", allow_override=True)
-    if str(gdf.crs).upper() != "EPSG:4326":
-        gdf = gdf.to_crs("EPSG:4326")
-    return gdf
-
-
-def _sanitize_geometries(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
-    """
-    Remove geometria nula/vazia e tenta corrigir inválidas (make_valid quando disponível).
-    """
-    if gdf.empty:
-        return gdf
-
-    gdf = gdf[gdf.geometry.notna()].copy()
-    if gdf.empty:
-        return gdf
-
-    # remove empties
-    try:
-        gdf = gdf[~gdf.geometry.is_empty].copy()
-    except Exception:
-        # se algo estranho acontecer, não quebra o app
-        pass
-
-    # tenta corrigir inválidas
-    try:
-        invalid_mask = ~gdf.geometry.is_valid
-        if invalid_mask.any():
-            logger.info("Corrigindo geometrias inválidas: %s", int(invalid_mask.sum()))
-            if make_valid is not None:
-                gdf.loc[invalid_mask, "geometry"] = gdf.loc[invalid_mask, "geometry"].apply(
-                    lambda geom: make_valid(geom) if geom is not None else None
-                )
+        try:
+            b = gdf.total_bounds
+            if _bounds_look_projected(tuple(b)):
+                gdf = gdf.set_crs(epsg=assume_epsg_if_missing, allow_override=True)
             else:
-                # fallback leve: buffer(0) (às vezes resolve)
-                gdf.loc[invalid_mask, "geometry"] = gdf.loc[invalid_mask, "geometry"].buffer(0)
-    except Exception as e:
-        logger.warning("Falha ao validar/corrigir geometrias (seguindo sem quebrar): %s", e)
+                gdf = gdf.set_crs(epsg=4326, allow_override=True)
+        except Exception:
+            # fallback seguro
+            gdf = gdf.set_crs(epsg=assume_epsg_if_missing, allow_override=True)
 
-    # remove novamente nulos/vazios após correção
+    # Converte para 4326
+    try:
+        if str(gdf.crs).lower() not in ("epsg:4326", "wgs84"):
+            gdf = gdf.to_crs(epsg=4326)
+    except Exception:
+        # Se conversão falhar, tenta forçar 4326 (último recurso)
+        gdf = gdf.set_crs(epsg=4326, allow_override=True)
+
+    return gdf
+
+def _clean_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
+    if gdf is None or gdf.empty:
+        return gdf
     gdf = gdf[gdf.geometry.notna()].copy()
+    # make_valid (Shapely 2)
+    try:
+        gdf["geometry"] = shapely.make_valid(gdf.geometry)
+    except Exception:
+        pass
+    # remove geometrias vazias
     try:
         gdf = gdf[~gdf.geometry.is_empty].copy()
     except Exception:
         pass
-
     return gdf
 
-
-def _maybe_simplify(gdf: "gpd.GeoDataFrame", tolerance: float) -> "gpd.GeoDataFrame":
-    if tolerance <= 0 or gdf.empty:
-        return gdf
-    try:
-        gdf = gdf.copy()
-        gdf["geometry"] = gdf.geometry.simplify(tolerance, preserve_topology=True)
-        gdf = _sanitize_geometries(gdf)
-        return gdf
-    except Exception as e:
-        logger.warning("Simplify falhou (seguindo sem quebrar): %s", e)
-        return gdf
-
-
-def _limit_features(gdf: "gpd.GeoDataFrame", max_features: int) -> Tuple["gpd.GeoDataFrame", Optional[str]]:
+def _maybe_simplify(gdf: "gpd.GeoDataFrame", max_features: int = 20000, tol_m: float = 15.0) -> "gpd.GeoDataFrame":
     """
-    Limita número de features para evitar travar o front.
+    Simplificação leve para evitar travar render quando há muitas feições.
+    Faz em EPSG:3857 (metros) e volta para 4326.
     """
-    if gdf.empty:
-        return gdf, None
-    if max_features <= 0:
-        return gdf, None
+    if gdf is None or gdf.empty:
+        return gdf
     if len(gdf) <= max_features:
-        return gdf, None
+        return gdf
 
-    msg = f"Seleção muito grande ({len(gdf):,} polígonos). Exibindo amostra de {max_features:,}."
-    logger.warning(msg)
+    # amostra para não explodir memória
+    gdf = gdf.sample(max_features, random_state=42)
 
-    # amostra estável
-    gdf2 = gdf.sample(n=max_features, random_state=42).copy()
-    return gdf2, msg
+    try:
+        g3857 = gdf.to_crs(epsg=3857)
+        g3857["geometry"] = g3857.geometry.simplify(tol_m, preserve_topology=True)
+        gdf = g3857.to_crs(epsg=4326)
+    except Exception:
+        # se falhar, segue sem simplificar
+        pass
+    return gdf
 
+# =========================
+# Loaders (cache)
+# =========================
+@st.cache_data(show_spinner=False)
+def load_parquet(path_str: str) -> "gpd.GeoDataFrame":
+    path = Path(path_str)
+    if not path.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {path.as_posix()}")
+    gdf = gpd.read_parquet(path)
+    gdf = _clean_geoms(gdf)
+    gdf = _ensure_crs(gdf)
+    return gdf
 
 @st.cache_data(show_spinner=False)
-def load_gdf_parquet(path_str: str, simplify_tol: float, max_features: int) -> Tuple["gpd.GeoDataFrame", Optional[str]]:
+def load_geojson(path_str: str) -> Dict[str, Any]:
     path = Path(path_str)
-    logger.info("Carregando: %s", path)
-    gdf = gpd.read_parquet(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {path.as_posix()}")
+    gdf = gpd.read_file(path)
+    gdf = _clean_geoms(gdf)
+    gdf = _ensure_crs(gdf)
+    return gdf.__geo_interface__
 
-    # CRSs
-    gdf = _ensure_crs_wgs84(gdf)
-
-    # sanity
-    gdf = _sanitize_geometries(gdf)
-
-    # simplificação (para performance)
-    gdf = _maybe_simplify(gdf, simplify_tol)
-
-    # limite features (evitar quebrar o canvas)
-    gdf, warn = _limit_features(gdf, max_features)
-
-    return gdf, warn
-
-
-def gdf_to_geojson_dict(gdf: "gpd.GeoDataFrame") -> Dict[str, Any]:
-    if gdf is None or gdf.empty:
-        return {"type": "FeatureCollection", "features": []}
-    # IMPORTANTE: GeoJsonLayer é bem mais robusto que PathLayer para polígonos
-    return json.loads(gdf.to_json())
-
-
-def _compute_center_zoom(gdf: Optional["gpd.GeoDataFrame"]) -> Tuple[float, float, float]:
-    # fallback centro SP
-    default = (-46.6333, -23.5505, 10.5)  # lon, lat, zoom
-    if gdf is None or gdf.empty:
-        return default
+def load_green_areas() -> Optional[Dict[str, Any]]:
     try:
-        minx, miny, maxx, maxy = gdf.total_bounds
-        lon = float((minx + maxx) / 2.0)
-        lat = float((miny + maxy) / 2.0)
-        # zoom heurístico simples
-        span = max(maxx - minx, maxy - miny)
-        if span <= 0:
-            return (lon, lat, 12.0)
-        zoom = float(np.clip(12.5 - np.log(span + 1e-9) * 2.0, 8.0, 14.5))
-        return (lon, lat, zoom)
+        return load_geojson(str(FILES["Áreas verdes"]))
     except Exception:
-        return default
-
-
-# ============================================================
-# VARIÁVEIS — Choropleth simples (evita JS quebrar)
-# ============================================================
-def _assign_fill_colors(gdf: "gpd.GeoDataFrame", value_col: str) -> "gpd.GeoDataFrame":
-    """
-    Cria uma coluna 'fill_color' (RGBA) para ser lida pelo GeoJsonLayer.
-    """
-    if gdf.empty or value_col not in gdf.columns:
-        return gdf
-
-    s = pd.to_numeric(gdf[value_col], errors="coerce")
-    gdf = gdf.copy()
-
-    # paleta discreta (sem depender de libs)
-    palette = [
-        [254, 237, 222, 120],
-        [253, 208, 162, 120],
-        [253, 174, 107, 120],
-        [253, 141,  60, 120],
-        [241, 105,  19, 120],
-        [217,  72,   1, 120],
-        [166,  54,   3, 120],
-    ]
-
-    finite = s[np.isfinite(s)]
-    if finite.empty:
-        gdf["fill_color"] = [[0, 0, 0, 0] for _ in range(len(gdf))]
-        return gdf
-
-    qs = np.quantile(finite, [0, 0.15, 0.30, 0.45, 0.60, 0.75, 0.90, 1.0])
-    qs = np.unique(qs)  # evita bins repetidos
-    if len(qs) < 3:
-        gdf["fill_color"] = [palette[-1] for _ in range(len(gdf))]
-        return gdf
-
-    # binning
-    def pick_color(v: float) -> List[int]:
-        if not np.isfinite(v):
-            return [0, 0, 0, 0]
-        # encontra intervalo
-        idx = int(np.searchsorted(qs, v, side="right") - 1)
-        idx = int(np.clip(idx, 0, len(palette) - 1))
-        return palette[idx]
-
-    gdf["fill_color"] = [pick_color(v) for v in s.to_numpy()]
-    return gdf
-
-
-# ============================================================
-# REFERÊNCIAS (evita NameError + não quebra se arquivo não existe)
-# ============================================================
-def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
-    """
-    Loader seguro. Se não houver arquivo, retorna None (sem quebrar o app).
-    Ajuste os candidates para o nome real do seu parquet.
-    """
-    try:
-        p = _find_parquet(PATH_REFERENCIAS, ["areas_verdes.parquet", "areas_verdes", "green_areas.parquet"])
-        if p is None:
-            return None
-        gdf, _ = load_gdf_parquet(str(p), simplify_tol=0.00008, max_features=8000)
-        return gdf
-    except Exception as e:
-        logger.exception("Falha ao carregar áreas verdes: %s", e)
         return None
 
-
-def collect_reference_overlays() -> List["pdk.Layer"]:
-    """
-    Sempre retorna uma lista (possivelmente vazia) e NUNCA quebra o app.
-    """
-    layers: List[pdk.Layer] = []
+def load_rivers() -> Optional[Dict[str, Any]]:
     try:
-        g = load_green_areas()
-        if g is not None and not g.empty:
-            gj = gdf_to_geojson_dict(g)
-            layers.append(
-                pdk.Layer(
-                    "GeoJsonLayer",
-                    data=gj,
-                    id="ref-green-areas",
-                    filled=True,
-                    stroked=False,
-                    get_fill_color=[70, 150, 70, 70],  # leve
-                    pickable=False,
-                )
-            )
-    except Exception as e:
-        logger.exception("Erro em overlays de referência (seguindo sem quebrar): %s", e)
+        return load_geojson(str(FILES["Rios"]))
+    except Exception:
+        return None
 
-    return layers
+def load_metro() -> Optional[Dict[str, Any]]:
+    try:
+        return load_geojson(str(FILES["Linhas Metrô"]))
+    except Exception:
+        return None
 
+def load_train() -> Optional[Dict[str, Any]]:
+    try:
+        return load_geojson(str(FILES["Linhas Trem"]))
+    except Exception:
+        return None
 
-# ============================================================
-# CAMADAS — limites/variáveis em GeoJsonLayer (sem PathLayer!)
-# ============================================================
-def build_limites_layer(gdf: "gpd.GeoDataFrame", layer_id: str, line_color=(255, 255, 255, 220)) -> "pdk.Layer":
-    gj = gdf_to_geojson_dict(gdf)
+# =========================
+# Jenks (Natural Breaks) — sem libs extras
+# =========================
+def jenks_breaks(values: np.ndarray, n_classes: int = 6) -> Optional[List[float]]:
+    """
+    Jenks natural breaks (DP). Para performance, use em amostra.
+    Retorna lista de breaks com tamanho n_classes+1.
+    """
+    v = np.asarray(values, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size < n_classes + 1:
+        return None
+
+    v.sort()
+    n_data = v.size
+
+    # Matrizes
+    lower = np.zeros((n_data + 1, n_classes + 1), dtype=int)
+    var = np.full((n_data + 1, n_classes + 1), np.inf, dtype=float)
+
+    for j in range(1, n_classes + 1):
+        lower[0, j] = 1
+        var[0, j] = 0.0
+
+    for i in range(1, n_data + 1):
+        lower[i, 1] = 1
+
+    # DP
+    for l in range(1, n_data + 1):
+        s1 = s2 = w = 0.0
+        for m in range(1, l + 1):
+            i3 = l - m + 1
+            val = v[i3 - 1]
+            s2 += val * val
+            s1 += val
+            w += 1.0
+            vv = s2 - (s1 * s1) / w
+            i4 = i3 - 1
+
+            if i4 != 0:
+                for j in range(2, n_classes + 1):
+                    if var[l, j] >= vv + var[i4, j - 1]:
+                        lower[l, j] = i3
+                        var[l, j] = vv + var[i4, j - 1]
+
+        var[l, 1] = vv
+
+    # Backtrack
+    k = n_data
+    kclass = [0.0] * (n_classes + 1)
+    kclass[n_classes] = float(v[-1])
+    kclass[0] = float(v[0])
+
+    count = n_classes
+    while count >= 2:
+        idx = lower[k, count] - 1
+        kclass[count - 1] = float(v[idx])
+        k = lower[k, count] - 1
+        count -= 1
+
+    # Se breaks degenerarem (valores repetidos), retorna None
+    if any(kclass[i] > kclass[i + 1] for i in range(len(kclass) - 1)):
+        return None
+    if len(set(kclass)) < len(kclass):
+        return None
+
+    return kclass
+
+# =========================
+# Cores
+# =========================
+PALETTE_6 = [
+    [247, 251, 255, 220],
+    [222, 235, 247, 220],
+    [198, 219, 239, 220],
+    [158, 202, 225, 220],
+    [107, 174, 214, 220],
+    [33, 113, 181, 220],
+]
+
+# =========================
+# ViewState helper
+# =========================
+def _zoom_from_bounds(bounds: Tuple[float, float, float, float]) -> float:
+    # aproximação simples
+    minx, miny, maxx, maxy = bounds
+    dx = maxx - minx
+    dy = maxy - miny
+    span = max(dx, dy)
+    if span <= 0:
+        return 11.0
+    # 360 graus ~ zoom 0; cada zoom dobra resolução
+    z = np.log2(360.0 / span)
+    return float(np.clip(z, 9.0, 15.5))
+
+def _viewstate_from_gdf(gdf_any: Optional["gpd.GeoDataFrame"]) -> "pdk.ViewState":
+    # default SP
+    lat, lon, zoom = -23.5505, -46.6333, 10.8
+    if gdf_any is not None and (not gdf_any.empty):
+        try:
+            b = gdf_any.total_bounds
+            lon = float((b[0] + b[2]) / 2.0)
+            lat = float((b[1] + b[3]) / 2.0)
+            zoom = _zoom_from_bounds(tuple(b))
+        except Exception:
+            pass
+    return pdk.ViewState(latitude=lat, longitude=lon, zoom=zoom, pitch=0)
+
+# =========================
+# Construção de camadas (somente GeoJsonLayer p/ evitar erro do PathLayer)
+# =========================
+def layer_admin_outline(gdf: "gpd.GeoDataFrame", layer_id: str) -> "pdk.Layer":
+    gj = gdf.__geo_interface__
     return pdk.Layer(
         "GeoJsonLayer",
         data=gj,
         id=layer_id,
-        filled=False,          # <- contorno apenas
         stroked=True,
-        get_line_color=list(line_color),
+        filled=False,  # limites: só linha
+        get_line_color=[20, 20, 20, 220],
+        lineWidthUnits="pixels",
         get_line_width=1.2,
-        line_width_min_pixels=1,
         pickable=True,
         auto_highlight=True,
     )
 
-
-def build_choropleth_layer(gdf: "gpd.GeoDataFrame", layer_id: str) -> "pdk.Layer":
-    gj = gdf_to_geojson_dict(gdf)
-    # Acessor robusto: lê array RGBA vindo de properties.fill_color
+def layer_variable_fill(gdf: "gpd.GeoDataFrame", layer_id: str) -> "pdk.Layer":
+    # gdf precisa ter colunas: fill_color e line_color
+    gj = gdf.__geo_interface__
     return pdk.Layer(
         "GeoJsonLayer",
         data=gj,
         id=layer_id,
-        filled=True,
         stroked=True,
-        get_fill_color="properties.fill_color",   # <- evita JS undefined
-        get_line_color=[255, 255, 255, 70],
-        get_line_width=0.5,
-        line_width_min_pixels=1,
+        filled=True,
+        get_fill_color="fill_color",
+        get_line_color=[40, 40, 40, 90],
+        lineWidthUnits="pixels",
+        get_line_width=0.6,
         pickable=True,
         auto_highlight=True,
     )
 
-
-# ============================================================
-# RENDER PYDECK (sempre renderiza base + layers válidas)
-# ============================================================
-def render_pydeck(
-    center_lon: float,
-    center_lat: float,
-    zoom: float,
-    basemap_key: str,
-    limite_layer: Optional["pdk.Layer"],
-    var_layer: Optional["pdk.Layer"],
-    show_references: bool,
-) -> None:
-    layers: List["pdk.Layer"] = []
-
-    # Ordem: variável (fill) -> limites (stroke) -> refs (semi-transparent)
-    if var_layer is not None:
-        layers.append(var_layer)
-    if limite_layer is not None:
-        layers.append(limite_layer)
-    if show_references:
-        layers.extend(collect_reference_overlays())
-
-    view_state = pdk.ViewState(
-        longitude=center_lon,
-        latitude=center_lat,
-        zoom=float(zoom),
-        pitch=0,
-        bearing=0,
+def layer_lines_geojson(gj: Dict[str, Any], layer_id: str, rgba: List[int], width: float = 2.0) -> "pdk.Layer":
+    return pdk.Layer(
+        "GeoJsonLayer",
+        data=gj,
+        id=layer_id,
+        stroked=True,
+        filled=False,
+        get_line_color=rgba,
+        lineWidthUnits="pixels",
+        get_line_width=width,
+        pickable=False,
     )
 
-    map_style = BASEMAPS.get(basemap_key, BASEMAPS["Carto Positron (leve)"])
-
-    deck = pdk.Deck(
-        map_style=map_style,   # <- base sempre definido (não “some”)
-        initial_view_state=view_state,
-        layers=layers,
-        tooltip={"text": "{name}"} if True else None,
+def layer_green_areas(gj: Dict[str, Any], layer_id: str) -> "pdk.Layer":
+    # Verde com opacidade 100% (alpha 255), acima de tudo
+    return pdk.Layer(
+        "GeoJsonLayer",
+        data=gj,
+        id=layer_id,
+        stroked=False,
+        filled=True,
+        get_fill_color=[0, 160, 70, 255],
+        pickable=False,
     )
 
-    # key força re-render quando troca basemap/camadas
-    st.pydeck_chart(deck, use_container_width=True, height=760, key=f"map::{basemap_key}::{len(layers)}")
+def layer_tile(tile_url: str, opacity: float, layer_id: str) -> "pdk.Layer":
+    return pdk.Layer(
+        "TileLayer",
+        data=tile_url,
+        id=layer_id,
+        opacity=opacity,
+        tileSize=256,
+        # renderSubLayers interno (deck.gl) — pydeck resolve automaticamente
+    )
 
+# =========================
+# Join fid: IDCenso (geom) + Setores (atributos)
+# =========================
+@st.cache_data(show_spinner=False)
+def load_setores_joined() -> "gpd.GeoDataFrame":
+    g_id = load_parquet(str(FILES["ID Censo 2023"]))
+    g_set = load_parquet(str(FILES["Setores Censitários 2023"]))
 
-# ============================================================
-# UI / MAIN
-# ============================================================
-def main() -> None:
-    st.title("Dash PlanBairros — Mapa")
+    # garante coluna fid (case-insensitive)
+    def _find_fid(cols: List[str]) -> Optional[str]:
+        for c in cols:
+            if c.lower() == "fid":
+                return c
+        return None
 
-    with st.sidebar:
-        st.header("Configurações")
+    fid_id = _find_fid(list(g_id.columns))
+    fid_set = _find_fid(list(g_set.columns))
 
-        basemap_key = st.selectbox("Fundo do mapa", list(BASEMAPS.keys()), index=0)
+    if fid_id is None:
+        # tenta usar índice
+        g_id = g_id.reset_index().rename(columns={"index": "fid"})
+        fid_id = "fid"
+    if fid_set is None:
+        g_set = g_set.reset_index().rename(columns={"index": "fid"})
+        fid_set = "fid"
 
-        st.divider()
-        st.subheader("Limites administrativos")
+    # normaliza tipo
+    g_id[fid_id] = pd.to_numeric(g_id[fid_id], errors="coerce").astype("Int64")
+    g_set[fid_set] = pd.to_numeric(g_set[fid_set], errors="coerce").astype("Int64")
 
-        limites_on = st.toggle("Exibir limites", value=False)
+    # atributos: remove geometry duplicada do Setores (mantém a do IDCenso)
+    attr = g_set.drop(columns=[c for c in g_set.columns if c.lower() == "geometry"], errors="ignore").copy()
 
-        limites_opts = {
-            "Distritos": ["Distritos.parquet", "Distritos"],
-            "SetoresCensitarios2023": ["SetoresCensitarios2023.parquet", "SetoresCensitarios2023", "Setores_2023.parquet"],
-            "ZonasOD2023": ["ZonasOD2023.parquet", "ZonasOD2023", "Zonas_OD_2023.parquet"],
-            "Subprefeitura": ["Subprefeitura.parquet", "Subprefeitura", "Subprefeituras.parquet"],
-        }
+    # dedup
+    attr = attr.drop_duplicates(subset=[fid_set])
+    g_id = g_id.drop_duplicates(subset=[fid_id])
 
-        limite_choice = st.selectbox("Camada", list(limites_opts.keys()), index=0, disabled=not limites_on)
+    merged = g_id.merge(attr, left_on=fid_id, right_on=fid_set, how="left", suffixes=("", "_set"))
 
-        st.divider()
-        st.subheader("Variáveis")
+    merged = _clean_geoms(merged)
+    merged = _ensure_crs(merged)
+    return merged
 
-        var_on = st.toggle("Exibir variável (choropleth)", value=False)
-        var_choice = st.selectbox(
-            "Variável",
-            ["densidade", "zoneamento"],
-            index=0,
-            disabled=not var_on,
-        )
+def numeric_variables(df: "gpd.GeoDataFrame") -> List[str]:
+    banned = {"geometry", "fid", "FID"}
+    cols = []
+    for c in df.columns:
+        if c in banned:
+            continue
+        if pd.api.types.is_numeric_dtype(df[c]):
+            cols.append(c)
+    return cols
 
-        st.divider()
-        st.subheader("Performance")
-        max_features = st.number_input(
-            "Máx. polígonos por camada",
-            min_value=1000,
-            max_value=50000,
-            value=MAX_FEATURES_DEFAULT,
-            step=1000,
-            help="Evita travar o navegador/Deck.gl.",
-        )
-        simplify_tol = st.slider(
-            "Simplificação geométrica (graus)",
-            min_value=0.0,
-            max_value=0.0010,
-            value=0.00008,
-            step=0.00002,
-            help="Aumente se estiver lento (perde detalhe). 0 desliga.",
-        )
+def classify_jenks_6(gdf_in: "gpd.GeoDataFrame", var: str) -> Tuple["gpd.GeoDataFrame", Optional[List[float]]]:
+    gdf = gdf_in.copy()
 
-        st.divider()
-        show_refs = st.toggle("Overlays de referência (opcional)", value=False)
+    s = pd.to_numeric(gdf[var], errors="coerce")
+    vals = s.to_numpy(dtype=float)
 
-    # ----------------------------
-    # Carregamento das camadas
-    # ----------------------------
-    limite_layer = None
-    var_layer = None
+    # amostra p/ Jenks (performance)
+    finite = vals[np.isfinite(vals)]
+    if finite.size == 0:
+        gdf["fill_color"] = [[0, 0, 0, 0]] * len(gdf)
+        return gdf, None
 
-    # Limites
-    limite_gdf = None
-    limite_warn = None
-    if limites_on:
+    sample = finite
+    if sample.size > 20000:
+        rng = np.random.default_rng(42)
+        sample = rng.choice(sample, size=20000, replace=False)
+
+    br = jenks_breaks(sample, 6)
+    if br is None:
+        # fallback quantis (não desejado, mas evita quebrar)
+        q = np.nanquantile(finite, [0, 1/6, 2/6, 3/6, 4/6, 5/6, 1.0])
+        br = [float(x) for x in q]
+
+    # bins: 6 classes
+    bins = np.array(br[1:-1], dtype=float)
+    cls = np.digitize(vals, bins, right=True)  # 0..5
+    cls = np.where(np.isfinite(vals), cls, -1)
+
+    colors = []
+    for c in cls:
+        if c < 0:
+            colors.append([0, 0, 0, 0])
+        else:
+            colors.append(PALETTE_6[int(c)])
+
+    gdf["fill_color"] = colors
+    return gdf, br
+
+# =========================
+# Sidebar controls
+# =========================
+with st.sidebar:
+    st.markdown("## 🗺️ PlanBairros — Mapa")
+    st.markdown('<div class="pb-note">Camadas e variáveis a partir de <b>dash_planbairros/limites_administrativos/</b>.</div>', unsafe_allow_html=True)
+
+    if st.button("🧹 Limpar cache", use_container_width=True):
+        st.cache_data.clear()
+        st.success("Cache limpo. Verifique novamente as camadas.")
+
+    st.markdown("### Fundo do mapa")
+    basemap = st.selectbox(
+        "Selecione o fundo",
+        ["Carto Positron", "ESRI World Imagery (satélite)", "Google Satellite (50% opacidade)"],
+        index=0,
+    )
+
+    st.markdown("### Limites administrativos")
+    draw_admin = st.toggle("Exibir limites", value=True)
+    admin_choice = st.selectbox(
+        "Camada de limite",
+        ["Distritos", "Subprefeitura", "Zonas OD 2023", "Habitação Precária", "Isócronas", "ID Censo 2023", "Setores Censitários 2023"],
+        index=0,
+        disabled=not draw_admin,
+    )
+
+    st.markdown("### Variáveis (Setores Censitários)")
+    draw_var = st.toggle("Exibir variável (choropleth)", value=False)
+
+    var_name = None
+    if draw_var:
         try:
-            p = _find_parquet(PATH_LIMITES, limites_opts[limite_choice])
-            if p is None:
-                st.warning(f"Arquivo de limites não encontrado para: {limite_choice}")
+            setores_join = load_setores_joined()
+            num_vars = numeric_variables(setores_join)
+            if len(num_vars) == 0:
+                st.warning("Nenhuma variável numérica mostrou-se disponível em SetoresCensitarios2023.")
             else:
-                limite_gdf, limite_warn = load_gdf_parquet(str(p), simplify_tol=simplify_tol, max_features=int(max_features))
-                if limite_gdf is not None and not limite_gdf.empty:
-                    limite_layer = build_limites_layer(limite_gdf, layer_id=f"limite::{limite_choice}")
+                var_name = st.selectbox("Variável", num_vars, index=0)
         except Exception as e:
-            logger.exception("Erro ao carregar limites: %s", e)
-            st.error("Erro ao carregar limites (veja logs).")
-            st.exception(e)
+            st.error(f"Falha ao carregar vínculo fid (IDCenso ↔ Setores): {e}")
+            draw_var = False
 
-    # Variáveis
-    var_gdf = None
-    var_warn = None
-    if var_on:
-        try:
-            # candidates tolerantes
-            p = _find_parquet(PATH_VARIAVEIS, [f"{var_choice}.parquet", var_choice])
-            if p is None:
-                # tenta fallback no root (caso sua pasta seja diferente)
-                p = _find_parquet(ROOT, [f"{var_choice}.parquet", var_choice])
-            if p is None:
-                st.warning(f"Arquivo de variável não encontrado: {var_choice}")
-            else:
-                var_gdf, var_warn = load_gdf_parquet(str(p), simplify_tol=simplify_tol, max_features=int(max_features))
+    st.markdown("### Referências (overlays)")
+    show_rios = st.checkbox("Rios (azul)", value=True)
+    show_metro = st.checkbox("Linhas Metrô (preto)", value=True)
+    show_trem = st.checkbox("Linhas Trem (preto)", value=True)
+    show_verde = st.checkbox("Áreas verdes (verde, opacidade 100%)", value=True)
 
-                # define qual coluna usar (tolerante)
-                # ajuste aqui se suas colunas tiverem nomes específicos
-                col_candidates = {
-                    "densidade": ["densidade", "DENSIDADE", "dens_hab_ha", "dens_hab"],
-                    "zoneamento": ["zoneamento", "ZONEAMENTO", "zona", "ZONA"],
-                }
-                value_col = None
-                for c in col_candidates[var_choice]:
-                    if c in var_gdf.columns:
-                        value_col = c
-                        break
+# =========================
+# Preparar camadas
+# =========================
+layers: List["pdk.Layer"] = []
 
-                if value_col is None:
-                    st.warning(f"Não encontrei coluna de valor para '{var_choice}'. Ajuste col_candidates no código.")
-                else:
-                    var_gdf = _assign_fill_colors(var_gdf, value_col=value_col)
-                    var_layer = build_choropleth_layer(var_gdf, layer_id=f"var::{var_choice}")
-        except Exception as e:
-            logger.exception("Erro ao carregar variável: %s", e)
-            st.error("Erro ao carregar variável (veja logs).")
-            st.exception(e)
+# Basemap
+map_style = None
+if basemap == "Carto Positron":
+    map_style = CARTO_POSITRON_GL
+elif basemap == "ESRI World Imagery (satélite)":
+    layers.append(layer_tile(ESRI_WORLD_IMAGERY, opacity=1.0, layer_id="tile-esri"))
+    map_style = None
+else:
+    # Google 50% opacidade
+    layers.append(layer_tile(GOOGLE_SAT_TILES, opacity=0.5, layer_id="tile-google"))
+    map_style = None
 
-    # ----------------------------
-    # Centro/zoom: prioriza variável, depois limites
-    # ----------------------------
-    ref_gdf = var_gdf if (var_gdf is not None and not var_gdf.empty) else limite_gdf
-    lon, lat, zoom = _compute_center_zoom(ref_gdf)
+# Admin outline (só linha)
+admin_gdf_for_view = None
+if draw_admin:
+    try:
+        g_admin = load_parquet(str(FILES[admin_choice]))
+        g_admin = _maybe_simplify(g_admin, max_features=20000, tol_m=15.0)
+        admin_gdf_for_view = g_admin
+        layers.append(layer_admin_outline(g_admin, layer_id="admin-outline"))
+    except Exception as e:
+        st.error(f"Não foi possível carregar '{admin_choice}': {e}")
 
-    # Alertas de performance (sem quebrar)
-    if limite_warn:
-        st.info(limite_warn)
-    if var_warn:
-        st.info(var_warn)
+# Variable (choropleth) — usa IDCenso (geom) + Setores (attrs) via fid e Jenks 6 classes
+var_gdf_for_view = None
+legend_breaks = None
+if draw_var and var_name:
+    try:
+        setores_join = load_setores_joined()
+        setores_join = _maybe_simplify(setores_join, max_features=20000, tol_m=10.0)
+        g_var, legend_breaks = classify_jenks_6(setores_join, var_name)
+        var_gdf_for_view = g_var
+        layers.append(layer_variable_fill(g_var, layer_id="var-fill"))
+    except Exception as e:
+        st.error(f"Erro ao renderizar variável '{var_name}': {e}")
 
-    # ----------------------------
-    # Render
-    # ----------------------------
-    render_pydeck(
-        center_lon=lon,
-        center_lat=lat,
-        zoom=zoom,
-        basemap_key=basemap_key,
-        limite_layer=limite_layer,
-        var_layer=var_layer,
-        show_references=show_refs,
-    )
+# Overlays (linhas)
+if show_rios:
+    gj = load_rivers()
+    if gj:
+        layers.append(layer_lines_geojson(gj, "rios", rgba=[0, 120, 255, 255], width=2.2))
 
-    # Debug opcional (não pesa)
-    with st.expander("Diagnóstico rápido (debug)", expanded=False):
-        st.write("Basemap:", basemap_key)
-        st.write("Limites ON:", limites_on, "| Camada:", limite_choice)
-        st.write("Variável ON:", var_on, "| Variável:", var_choice)
-        st.write("max_features:", int(max_features), "| simplify_tol:", simplify_tol)
-        if limite_gdf is not None:
-            st.write("Limites features:", int(len(limite_gdf)))
-        if var_gdf is not None:
-            st.write("Variável features:", int(len(var_gdf)))
+if show_metro:
+    gj = load_metro()
+    if gj:
+        layers.append(layer_lines_geojson(gj, "metro", rgba=[0, 0, 0, 255], width=2.4))
 
+if show_trem:
+    gj = load_train()
+    if gj:
+        layers.append(layer_lines_geojson(gj, "trem", rgba=[0, 0, 0, 255], width=2.4))
 
-if __name__ == "__main__":
-    main()
+# Áreas verdes por cima de tudo
+if show_verde:
+    gj = load_green_areas()
+    if gj:
+        layers.append(layer_green_areas(gj, "verde"))
+
+# =========================
+# ViewState
+# =========================
+view_ref = var_gdf_for_view if (var_gdf_for_view is not None) else admin_gdf_for_view
+view_state = _viewstate_from_gdf(view_ref)
+
+# Tooltip (mantém simples e estável)
+tooltip = {"text": "{name}"}
+if draw_var and var_name:
+    tooltip = {"text": f"{var_name}: " + "{" + var_name + "}"}
+
+deck = pdk.Deck(
+    layers=layers,
+    initial_view_state=view_state,
+    map_style=map_style,
+    tooltip=tooltip,
+)
+
+# =========================
+# Layout principal
+# =========================
+col_map, col_info = st.columns([0.72, 0.28], gap="large")
+
+with col_map:
+    st.pydeck_chart(deck, use_container_width=True)
+
+with col_info:
+    st.markdown("### Estado das camadas")
+    st.markdown(f'<span class="pb-badge">Fundo</span> {basemap}', unsafe_allow_html=True)
+    st.markdown(f'<span class="pb-badge">Limites</span> {"ON" if draw_admin else "OFF"}', unsafe_allow_html=True)
+    if draw_admin:
+        st.write(f"• Camada: **{admin_choice}**")
+    st.markdown(f'<span class="pb-badge">Variável</span> {"ON" if draw_var else "OFF"}', unsafe_allow_html=True)
+    if draw_var and var_name:
+        st.write(f"• Campo: **{var_name}**")
+        if legend_breaks:
+            st.markdown("**Quebras (Jenks, 6 classes)**")
+            # Exibe intervalos
+            for i in range(6):
+                a = legend_breaks[i]
+                b = legend_breaks[i + 1]
+                st.write(f"• Classe {i+1}: {a:.4g} → {b:.4g}")
+        else:
+            st.info("Quebras indisponíveis (variável vazia ou fallback).")
+
+    st.markdown("### Referências")
+    st.write(f"• Rios: {'ON' if show_rios else 'OFF'}")
+    st.write(f"• Metrô: {'ON' if show_metro else 'OFF'}")
+    st.write(f"• Trem: {'ON' if show_trem else 'OFF'}")
+    st.write(f"• Áreas verdes: {'ON' if show_verde else 'OFF'}")
+
+# =========================
+# Checagem rápida de paths (diagnóstico)
+# =========================
+with st.expander("Diagnóstico de caminhos (GitHub) — limites_administrativos"):
+    st.write(f"ROOT: `{ROOT.as_posix()}`")
+    st.write(f"DATA_DIR: `{DATA_DIR.as_posix()}`")
+    missing = [k for k, p in FILES.items() if not p.exists()]
+    if missing:
+        st.error("Arquivos ausentes:")
+        for k in missing:
+            st.write(f"• {k}: `{FILES[k].as_posix()}`")
+    else:
+        st.success("Todos os arquivos esperados foram encontrados no caminho informado.")
