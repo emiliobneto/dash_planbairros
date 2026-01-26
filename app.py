@@ -42,8 +42,10 @@ SIMPLIFY_M_OVERLAY   = 20   # ~20 m (rios/linhas/verde)
 REF_GREEN    = "#2E7D32"  # áreas verdes
 REF_BLUE     = "#1E88E5"  # rios
 REF_DARKGRAY = "#333333"  # trilhos (trem/metro)
-RIVER_WIDTH_PX = 2.2
-RAIL_WIDTH_PX  = 3.2
+
+# >>> espessuras dobradas:
+RIVER_WIDTH_PX = 4.4   # antes ~2.2
+RAIL_WIDTH_PX  = 6.4   # antes ~3.2
 
 def inject_css() -> None:
     st.markdown(
@@ -283,12 +285,21 @@ def left_controls() -> Dict[str, Any]:
         ],
         index=0, key="pb_var", placeholder="Escolha…",
     )
+
     st.markdown("### Configurações")
     limite = st.selectbox(
         "Limites Administrativos",
         [PLACEHOLDER_LIM,"Distritos","ZonasOD2023","Subprefeitura","Isócronas","Setores Censitários (linhas)"],
         index=0, key="pb_limite", placeholder="Escolha…",
     )
+
+    # >>> Toggle do fundo do mapa
+    fundo = st.radio(
+        "Fundo do mapa",
+        ["Claro (CARTO)", "Satélite (ESRI)"],
+        index=0, horizontal=True, key="pb_basemap"
+    )
+
     st.checkbox("Rótulos permanentes (dinâmicos por zoom)", value=False, key="pb_labels_on")
 
     st.caption("Use o botão abaixo para limpar os caches de dados em memória.")
@@ -297,12 +308,12 @@ def left_controls() -> Dict[str, Any]:
 
     legend_ph = st.empty(); st.session_state["_legend_ph"] = legend_ph
 
-    sel_now = {"var": var, "lim": limite}
+    sel_now = {"var": var, "lim": limite, "fundo": fundo}
     sel_prev = st.session_state.get("_pb_prev_sel")
-    if sel_prev and (sel_prev["var"] != sel_now["var"] or sel_prev["lim"] != sel_now["lim"]):
+    if sel_prev and (sel_prev != sel_now):
         st.cache_data.clear()
     st.session_state["_pb_prev_sel"] = sel_now
-    return {"variavel": var, "limite": limite}
+    return {"variavel": var, "limite": limite, "fundo": fundo}
 
 # ====================== Legendas (HTML) ======================
 def show_numeric_legend(title: str, breaks: List[Tuple[int,int]], palette: List[str]):
@@ -325,7 +336,6 @@ def show_categorical_legend(title: str, items: List[Tuple[str,str]]):
     ph.markdown(html, unsafe_allow_html=True)
 
 def show_reference_legend():
-    """Legenda fixa (sempre mostrada)."""
     items = [
         ("Áreas verdes", REF_GREEN),
         ("Rios", REF_BLUE),
@@ -348,8 +358,25 @@ def _show_deck(deck: "pdk.Deck"):
     except TypeError:
         st.pydeck_chart(deck, use_container_width=True)
 
+def make_satellite_tilelayer() -> "pdk.Layer":
+    # Esri World Imagery sem token; renderizado como Bitmap por tile
+    return pdk.Layer(
+        "TileLayer",
+        data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        min_zoom=0, max_zoom=19, tile_size=256,
+        render_sub_layers="""
+            function (props) {
+                return new deck.BitmapLayer({
+                    id: 'esri-satellite',
+                    image: props.data,
+                    bounds: props.tile.bbox
+                });
+            }
+        """
+    )
+
 def collect_reference_overlays() -> List["pdk.Layer"]:
-    """Cria layers permanentes; agora no TOPO e com opacidade 100%."""
+    """Camadas permanentes (no topo)."""
     layers: List[pdk.Layer] = []
 
     g = load_green_areas()
@@ -358,7 +385,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=True, stroked=False, pickable=False,
-            get_fill_color=_hex_to_rgba(REF_GREEN, 255),  # 100% opaco
+            get_fill_color=_hex_to_rgba(REF_GREEN, 255),
             get_line_width=0
         ))
 
@@ -368,7 +395,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
-            get_line_color=_hex_to_rgba(REF_BLUE, 255),   # 100% opaco
+            get_line_color=_hex_to_rgba(REF_BLUE, 255),
             get_line_width=RIVER_WIDTH_PX, lineWidthUnits="pixels"
         ))
 
@@ -401,8 +428,16 @@ def render_pydeck(center: Tuple[float, float],
                   tooltip_field: Optional[str],
                   categorical_legend: Optional[List[Tuple[str, str]]] = None,
                   numeric_legend: Optional[Tuple[str, List[Tuple[int,int]], List[str]]] = None,
-                  draw_setores_outline: bool = False):
+                  draw_setores_outline: bool = False,
+                  basemap: str = "Claro (CARTO)"):
     layers: List[pdk.Layer] = []
+
+    # 0) Base (se Satélite, adiciona primeiro para ficar por baixo)
+    if basemap == "Satélite (ESRI)":
+        layers.append(make_satellite_tilelayer())
+        map_style = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+    else:
+        map_style = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 
     # 1) camada temática
     if gdf_layer is not None and not gdf_layer.empty and "__rgba__" in gdf_layer.columns:
@@ -413,7 +448,7 @@ def render_pydeck(center: Tuple[float, float],
             get_fill_color="properties.__rgba__", get_line_width=0,
         ))
 
-    # 2) contornos e setores (se desejar)
+    # 2) contornos e setores (se desejar) — ficam abaixo dos overlays
     if limite_gdf is not None and not limite_gdf.empty:
         gj_lim = json.loads(limite_gdf[["geometry"]].to_json())
         layers.append(pdk.Layer(
@@ -433,13 +468,13 @@ def render_pydeck(center: Tuple[float, float],
                 get_line_color=[80,80,80,160], get_line_width=0.6, lineWidthUnits="pixels"
             ))
 
-    # 3) OVERLAYS PERMANENTES NO TOPO (não misturam com a cloroplética)
+    # 3) OVERLAYS NO TOPO
     layers.extend(collect_reference_overlays())
 
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
-        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        map_style=map_style,
         tooltip={"text": f"{{{tooltip_field}}}"} if tooltip_field else None,
     )
     _show_deck(deck)
@@ -528,7 +563,8 @@ def main() -> None:
 
             render_pydeck(center, gdf_layer, limite_gdf,
                           tooltip_field="__label__", categorical_legend=legend_items,
-                          numeric_legend=None, draw_setores_outline=draw_setores_outline)
+                          numeric_legend=None, draw_setores_outline=draw_setores_outline,
+                          basemap=ui["fundo"])
             return
 
         # Demais variáveis (setores)
@@ -556,7 +592,8 @@ def main() -> None:
                         gdf_layer = joined[["geometry","__rgba__","__label__"]]
                         render_pydeck(center, gdf_layer, limite_gdf,
                                       tooltip_field="__label__", categorical_legend=[(labels[k], cmap[k]) for k in sorted(cmap)],
-                                      numeric_legend=None, draw_setores_outline=draw_setores_outline)
+                                      numeric_legend=None, draw_setores_outline=draw_setores_outline,
+                                      basemap=ui["fundo"])
                         return
                     else:
                         classes, breaks_int, palette = classify_auto6(joined["__value__"])
@@ -566,13 +603,14 @@ def main() -> None:
                         gdf_layer = joined[["geometry","__rgba__","__label__"]]
                         render_pydeck(center, gdf_layer, limite_gdf,
                                       tooltip_field="__label__", categorical_legend=None,
-                                      numeric_legend=(var, breaks_int, palette), draw_setores_outline=draw_setores_outline)
+                                      numeric_legend=(var, breaks_int, palette), draw_setores_outline=draw_setores_outline,
+                                      basemap=ui["fundo"])
                         return
 
         # sem variável: mapa base + overlays + legenda
         render_pydeck(center, None, limite_gdf, tooltip_field=None,
                       categorical_legend=None, numeric_legend=None,
-                      draw_setores_outline=draw_setores_outline)
+                      draw_setores_outline=draw_setores_outline, basemap=ui["fundo"])
 
 if __name__ == "__main__":
     main()
