@@ -232,16 +232,44 @@ def load_isocronas() -> Optional["gpd.GeoDataFrame"]:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
-    stems = {
-        "Distritos": "Distritos.parquet",
-        "ZonasOD2023": "ZonasOD2023.parquet",
-        "Subprefeitura": "Subprefeitura.parquet",
-        "Isócronas": "isocronas.parquet",
+    """Carrega camada administrativa por nome, com busca robusta por arquivo.
+    Procura em DATA_DIR por .parquet (e, se necessário, .geojson) com stem compatível.
+    """
+    target = _slug(name)
+    # candidatos diretos
+    direct = {
+        "distritos": DATA_DIR / "Distritos.parquet",
+        "zonasod2023": DATA_DIR / "ZonasOD2023.parquet",
+        "subprefeitura": DATA_DIR / "Subprefeitura.parquet",
+        "isocronas": DATA_DIR / "isocronas.parquet",
+        "isocronas2": DATA_DIR / "isócronas.parquet",
     }
-    p = DATA_DIR / stems.get(name, "")
-    if not p.exists():
+    cand = None
+    for k, p in direct.items():
+        if p.exists() and (target in k or k in target):
+            cand = p
+            break
+    # varre diretório se não achou direto
+    if cand is None:
+        for p in DATA_DIR.rglob("*.parquet"):
+            if _slug(p.stem) in (target, f"{target}2023", f"{target}s"):
+                cand = p
+                break
+        if cand is None:
+            for p in DATA_DIR.rglob("*.geojson"):
+                if _slug(p.stem) in (target, f"{target}2023", f"{target}s"):
+                    cand = p
+                    break
+    if cand is None:
+        st.warning(f"Camada '{name}' não encontrada em {DATA_DIR}.")
         return None
-    return _read_gdf_robusto(p, ["geometry"])
+    cols = ["geometry"]
+    # tenta ler robusto
+    gdf = _read_gdf_robusto(cand, cols)
+    if gdf is None or gdf.empty:
+        st.warning(f"Não foi possível ler '{cand.name}'. Verifique esquema/colunas.")
+        return None
+    return gdf
 
 
 # ====================== helpers de performance ======================
@@ -402,6 +430,11 @@ def left_controls() -> Dict[str, Any]:
 
     # apenas registra a seleção atual (não limpa cache automaticamente)
     st.session_state["_pb_prev_sel"] = {"var": var, "lim": limite}
+
+    # dica de UX: exigir limite antes da variável para evitar carga total
+    if var != PLACEHOLDER_VAR and limite == PLACEHOLDER_LIM:
+        st.info("Selecione um **limite administrativo** antes de carregar a variável para melhor desempenho.")
+
     return {"variavel": var, "limite": limite}
 
 
@@ -517,11 +550,12 @@ def render_pydeck(
         gj_lim = geojson_from_gdf(limite_gdf[["geometry"]], ["geometry"], cache_key)
         outline = pdk.Layer(
             "GeoJsonLayer",
+            id="admin-outline",
             data=gj_lim,
             filled=False,
             stroked=True,
-            get_line_color=[20, 20, 20, 180],
-            get_line_width=1,
+            get_line_color=[20, 20, 20, 220],
+            get_line_width=2,
             lineWidthUnits="pixels",
         )
         layers.append(outline)
@@ -604,49 +638,36 @@ def main() -> None:
                 limite_gdf = load_admin_layer(ui["limite"])
                 if limite_gdf is not None and len(limite_gdf) > 0:
                     center = center_from_bounds(limite_gdf)
+                else:
+                    st.warning(f"Limite '{ui['limite']}' não encontrado/vasio em {DATA_DIR}.")
 
-        # variável
+        # variável — só carrega se houver limite escolhido (evita cidade inteira)
         setores_joined: Optional["gpd.GeoDataFrame"] = None
-        if var == "Área de influência de bairro":
+        if var == "Área de influência de bairro" and limite_gdf is not None and not limite_gdf.empty:
             iso = load_isocronas()
             if iso is not None and len(iso) > 0:
-                lut = {
-                    0: "#542788",
-                    1: "#f7f7f7",
-                    2: "#d8daeb",
-                    3: "#b35806",
-                    4: "#b2abd2",
-                    5: "#8073ac",
-                    6: "#fdb863",
-                    7: "#7f3b08",
-                    8: "#e08214",
-                    9: "#fee0b6",
-                }
+                lut = {0: "#542788", 1: "#f7f7f7", 2: "#d8daeb", 3: "#b35806", 4: "#b2abd2",
+                       5: "#8073ac", 6: "#fdb863", 7: "#7f3b08", 8: "#e08214", 9: "#fee0b6"}
                 cls = find_col(iso.columns, "nova_class")
                 if cls:
                     g = iso.copy()
                     g["value"] = pd.to_numeric(g[cls], errors="coerce")
-                    g["fill_color"] = g["value"].map(
-                        lambda v: _hex_to_rgba(lut.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200)
-                    )
+                    g["fill_color"] = g["value"].map(lambda v: _hex_to_rgba(lut.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
                     g = clip_to_limit(g[["geometry", "value", "fill_color"]], limite_gdf)
                     if g is not None and not g.empty:
                         setores_joined = g
                         center = center_from_bounds(g)
                     items = [(f"{k}", lut[k]) for k in sorted(lut)]
                     show_categorical_legend("Área de influência de bairro (nova_class)", items)
-
-        elif var != PLACEHOLDER_VAR:
+        elif var != PLACEHOLDER_VAR and limite_gdf is not None and not limite_gdf.empty:
             geoms, id_col = load_setores_geom()
             if geoms is not None and id_col == "fid":
                 metric = load_metric_column(var)
                 if metric is not None:
                     joined = geoms.merge(metric, on="fid", how="left")
-                    # modo rápido baseado em tamanho
-                    fast_mode = len(joined) > 30000 or (limite_gdf is not None and len(limite_gdf) > 200)
+                    fast_mode = len(joined) > 30000 or len(limite_gdf) > 200
                     joined = clip_to_limit(joined, limite_gdf, fast=fast_mode)
                     if joined is not None and not joined.empty:
-                        # simplifica APÓS recorte (em metros / 3857)
                         try:
                             jm = joined.to_crs(3857)
                             tol = 60 if fast_mode else SIMPLIFY_M
@@ -654,16 +675,15 @@ def main() -> None:
                             joined = jm.to_crs(4326)
                         except Exception:
                             pass
-                        # guarda-chuva
                         if len(joined) > MAX_FEATURES:
                             st.warning(
-                                f"Seleção muito grande (" f"{len(joined):,} polígonos). "
-                                f"Exibindo amostra de {MAX_FEATURES:,}. Refine o limite para ver tudo."
+                                f"Seleção muito grande ({len(joined):,} polígonos). Exibindo amostra de {MAX_FEATURES:,}. Refine o limite para ver tudo."
                             )
                             joined = joined.sample(MAX_FEATURES, random_state=0)
-                        joined = _reduce_precision(joined)
-                        setores_joined = joined
+                        setores_joined = _reduce_precision(joined)
                         center = center_from_bounds(joined)
+        elif var != PLACEHOLDER_VAR and (limite_gdf is None or limite_gdf.empty):
+            st.info("Para ver a variável, selecione um **limite administrativo**.")
 
         render_pydeck(
             center=center,
