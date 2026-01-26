@@ -718,7 +718,8 @@ def main() -> None:
                       draw_setores_outline=draw_setores_outline, basemap=ui["fundo"])
 
 
-    if __name__ == "__main__":
-    main()
+if __name__ == "__main__":
+main()
+
 
 
