@@ -21,6 +21,9 @@ from decimal import Decimal
 import pandas as pd
 import streamlit as st
 
+from shapely.geometry import box
+from shapely import set_precision
+
 # ====================== imports obrigatórios ======================
 
 def _import_stack():
@@ -62,9 +65,10 @@ PLACEHOLDER_LIM = "— selecione o limite —"
 LOGO_HEIGHT = 120
 MAP_HEIGHT = 900
 SIMPLIFY_M = 60  # antes 25m — melhor para payload/render
+MAX_FEATURES = 15000  # guarda-chuva de segurança para payload muito grande
 
 
-def inject_css() -> None:
+def inject_css() -> None:() -> None:
     st.markdown(
         f"""
         <style>
@@ -164,9 +168,20 @@ def _read_gdf_robusto(
                 geo = vals.dropna().apply(wkt.loads)
             else:
                 geo = vals.dropna().apply(lambda b: wkb.loads(b, hex=isinstance(b, str)))
-            return gpd.GeoDataFrame(pdf.drop(columns=[geom_col]), geometry=geo, crs=4326)
+            gdf = gpd.GeoDataFrame(pdf.drop(columns=[geom_col]), geometry=geo, crs=4326)
+            return gdf
         except Exception:
             return None
+
+
+def _reduce_precision(gdf: "gpd.GeoDataFrame", grid: float = 1e-5) -> "gpd.GeoDataFrame":
+    """Reduz a precisão das coordenadas (grade ~1e-5 ≈ 1m) para encolher GeoJSON."""
+    try:
+        g2 = gdf.copy()
+        g2["geometry"] = g2.geometry.apply(lambda g: set_precision(g, grid))
+        return g2
+    except Exception:
+        return gdf
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -292,21 +307,49 @@ def geojson_from_gdf(gdf: "gpd.GeoDataFrame", props: List[str], cache_key: str):
     return gj
 
 
-def clip_to_limit(
+def _prefilter_by_bbox(
     gdf: Optional["gpd.GeoDataFrame"], limit_gdf: Optional["gpd.GeoDataFrame"]
 ) -> Optional["gpd.GeoDataFrame"]:
     if gdf is None or gdf.empty or limit_gdf is None or limit_gdf.empty:
         return gdf
     try:
-        mask = limit_gdf.unary_union
-        return gpd.clip(gdf, mask)
+        b = box(*limit_gdf.total_bounds)
+        idx = gdf.sindex.query(b, predicate="intersects")
+        return gdf.iloc[idx]
     except Exception:
-        # Fallback rápido usando bbox (menos preciso, mas seguro)
+        return gdf
+
+
+def clip_to_limit(
+    gdf: Optional["gpd.GeoDataFrame"], limit_gdf: Optional["gpd.GeoDataFrame"]
+) -> Optional["gpd.GeoDataFrame"]:
+    if gdf is None or gdf.empty or limit_gdf is None or limit_gdf.empty:
+        return gdf
+    # 1) pré-seleção por bbox (rápido)
+    cand = _prefilter_by_bbox(gdf, limit_gdf)
+    if cand is None or cand.empty:
+        return cand
+    # 2) recorte geométrico
+    try:
+        # cache leve do unary_union por nome + número de features
+        key = (
+            f"_limit_union|{len(limit_gdf)}|"
+            f"{int(limit_gdf.total_bounds[0]*1e6)}-{int(limit_gdf.total_bounds[1]*1e6)}-"
+            f"{int(limit_gdf.total_bounds[2]*1e6)}-{int(limit_gdf.total_bounds[3]*1e6)}"
+        )
+        union = st.session_state.get(key)
+        if union is None:
+            union = limit_gdf.unary_union
+            st.session_state[key] = union
+        out = gpd.clip(cand, union)
+        return out
+    except Exception:
+        # Fallback por bbox se algo der errado
         minx, miny, maxx, maxy = limit_gdf.total_bounds
         try:
-            return gdf.cx[minx:maxx, miny:maxy]
+            return cand.cx[minx:maxx, miny:maxy]
         except Exception:
-            return gdf
+            return cand
 
 
 # ====================== UI (filtros) ======================
@@ -447,7 +490,13 @@ def render_pydeck(
             legend_done = True
 
         cache_key = f"setores|{var_label}|{len(gdf)}|{gdf.total_bounds.tobytes()}"
-        geojson = geojson_from_gdf(gdf[["geometry", "__rgba__", "__value__"]], ["geometry", "__rgba__", "__value__"], cache_key)
+        # antes de serializar, reduz precisão para encolher payload
+        gdf_small = _reduce_precision(gdf)
+        geojson = geojson_from_gdf(
+            gdf_small[["geometry", "__rgba__", "__value__"]],
+            ["geometry", "__rgba__", "__value__"],
+            cache_key,
+        )
 
         setores_layer = pdk.Layer(
             "GeoJsonLayer",
@@ -593,10 +642,24 @@ def main() -> None:
                     joined = geoms.merge(metric, on="fid", how="left")
                     joined = clip_to_limit(joined, limite_gdf)
                     if joined is not None and not joined.empty:
+                        # guarda-chuva: se ainda estiver muito grande, amostra ou simplifica mais
+                        if len(joined) > MAX_FEATURES:
+                            st.warning(
+                                f"Seleção muito grande (" \
+                                f"{len(joined):,} polígonos). Exibindo amostra de {MAX_FEATURES:,}. "
+                                "Refine o limite para ver tudo.")
+                            joined = joined.sample(MAX_FEATURES, random_state=0)
+                        joined = _reduce_precision(joined)
                         setores_joined = joined
                         center = center_from_bounds(joined)
 
         render_pydeck(
+            center=center,
+            setores_joined=setores_joined,
+            limite_gdf=limite_gdf,
+            var_label=None if var in (PLACEHOLDER_VAR, "Área de influência de bairro") else var,
+            draw_setores_outline=draw_setores_outline,
+        )(
             center=center,
             setores_joined=setores_joined,
             limite_gdf=limite_gdf,
