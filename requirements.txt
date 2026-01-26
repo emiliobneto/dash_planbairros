@@ -1,4 +1,4 @@
-streamlit>=1.33,<1.41
+streamlit==1.39.0
 pydeck==0.9.1
 numpy==1.26.4
 pandas==2.1.4
