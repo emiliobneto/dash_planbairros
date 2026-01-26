@@ -217,7 +217,7 @@ def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
         return None
     table = pq.read_table(str(METRICS_FILE), columns=["fid", wanted])
     df = table.to_pandas()
-    df.rename(columns={wanted: "__value__"}, inplace=True)
+    df.rename(columns={wanted: "value"}, inplace=True)
     return df
 
 
@@ -462,7 +462,7 @@ def render_pydeck(
 
     # camada cloroplética
     legend_done = False
-    if setores_joined is not None and not setores_joined.empty and "__value__" in setores_joined.columns:
+    if setores_joined is not None and not setores_joined.empty and "value" in setores_joined.columns:
         gdf = setores_joined.copy()
 
         if var_label == "Cluster (perfil urbano)":
@@ -625,11 +625,11 @@ def main() -> None:
                 cls = find_col(iso.columns, "nova_class")
                 if cls:
                     g = iso.copy()
-                    g["__value__"] = pd.to_numeric(g[cls], errors="coerce")
-                    g["__rgba__"] = g["__value__"].map(
+                    g["value"] = pd.to_numeric(g[cls], errors="coerce")
+                    g["fill_color"] = g["value"].map(
                         lambda v: _hex_to_rgba(lut.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200)
                     )
-                    g = clip_to_limit(g[["geometry", "__value__", "__rgba__"]], limite_gdf)
+                    g = clip_to_limit(g[["geometry", "value", "fill_color"]], limite_gdf)
                     if g is not None and not g.empty:
                         setores_joined = g
                         center = center_from_bounds(g)
