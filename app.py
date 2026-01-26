@@ -74,38 +74,36 @@ def inject_css() -> None:
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
         html, body, .stApp {{ font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }}
-        .main .block-container { padding-top: .15rem !important; padding-bottom: .6rem !important; }}
-        .pb-row { display:flex; align-items:center; gap:9px; margin-bottom:0; }}
+        .main .block-container {{ padding-top: .15rem !important; padding-bottom: .6rem !important; }}
+        .pb-row {{ display:flex; align-items:center; gap:9px; margin-bottom:0; }}
         .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; }}
-        .pb-header { background:#14407D; color:#fff; border-radius:14px; padding:14px 15px; width:100%; }; color:#fff; border-radius:14px; padding:18px 20px; width:100%; }}
-        .pb-title { font-size:2.85rem; font-weight:900; line-height:1.05; letter-spacing:.2px }}
-        .pb-subtitle { font-size:1.425rem; opacity:.95; margin-top:5px }}
-        .pb-card { background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:9px; }}
-        .legend-card { margin-top:9px; background:#fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; padding:8px 9px; }}
-        .legend-title { font-weight:800; margin-bottom:4px; }}
-        .legend-row { display:flex; align-items:center; gap:6px; margin:3px 0; }}
-        .legend-swatch { width:14px; height:14px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); }}
+        .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:14px 15px; width:100%; }}
+        .pb-title {{ font-size:2.85rem; font-weight:900; line-height:1.05; letter-spacing:.2px; }}
+        .pb-subtitle {{ font-size:1.425rem; opacity:.95; margin-top:5px; }}
+        .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:9px; }}
+        .legend-card {{ margin-top:9px; background:#fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; padding:8px 9px; }}
+        .legend-title {{ font-weight:800; margin-bottom:4px; }}
+        .legend-row {{ display:flex; align-items:center; gap:6px; margin:3px 0; }}
+        .legend-swatch {{ width:14px; height:14px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); }}
 
         /* caixa flutuante no canto inferior-direito do mapa */
-        .pb-floating-legend { position: fixed; right: 14px; bottom: 14px; z-index: 9999; background: #fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; box-shadow:0 2px 6px rgba(0,0,0,.15); padding:8px 9px; max-width: 210px; font-size: 10px; }}
+        .pb-floating-legend {{
+            position: fixed;
+            right: 14px;
+            bottom: 14px;
+            z-index: 9999;
+            background: #fff;
+            border:1px solid rgba(20,64,125,.10);
+            border-radius:12px;
+            box-shadow:0 2px 6px rgba(0,0,0,.15);
+            padding:8px 9px;
+            max-width: 210px;
+            font-size: 10px;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
-
-
-# ====================== caminhos e util ======================
-
-try:
-    REPO_ROOT = Path(__file__).resolve().parent
-except NameError:
-    REPO_ROOT = Path.cwd()
-
-DATA_DIR = (
-    REPO_ROOT / "limites_administrativos"
-    if (REPO_ROOT / "limites_administrativos").exists()
-    else REPO_ROOT
-)
 GEOM_FILE = DATA_DIR / "IDCenso2023.parquet"
 METRICS_FILE = DATA_DIR / "SetoresCensitarios2023.parquet"
 LOGO_PATH = REPO_ROOT / "assets" / "logo_todos.jpg"
