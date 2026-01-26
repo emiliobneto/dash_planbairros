@@ -22,7 +22,11 @@ import pandas as pd
 import streamlit as st
 
 from shapely.geometry import box
-from shapely import set_precision
+try:
+    from shapely import set_precision as _set_precision
+except Exception:
+    # compat Shapely <2.0
+    from shapely.set_precision import set_precision as _set_precision
 
 # ====================== imports obrigatórios ======================
 
@@ -68,7 +72,7 @@ SIMPLIFY_M = 60  # antes 25m — melhor para payload/render
 MAX_FEATURES = 15000  # guarda-chuva de segurança para payload muito grande
 
 
-def inject_css() -> None:
+def inject_css() -> None:() -> None:
     st.markdown(
         f"""
         <style>
@@ -175,10 +179,10 @@ def _read_gdf_robusto(
 
 
 def _reduce_precision(gdf: "gpd.GeoDataFrame", grid: float = 1e-5) -> "gpd.GeoDataFrame":
-    """Reduz a precisão das coordenadas (grade ~1e-5 ≈ 1m) para encolher GeoJSON."""
+    """Reduz a precisão das coordenadas (grade ~1e-5 ≈ 1 m) para encolher GeoJSON."""
     try:
         g2 = gdf.copy()
-        g2["geometry"] = g2.geometry.apply(lambda g: set_precision(g, grid))
+        g2["geometry"] = g2.geometry.apply(lambda geom: _set_precision(geom, grid))
         return g2
     except Exception:
         return gdf
@@ -188,15 +192,10 @@ def _reduce_precision(gdf: "gpd.GeoDataFrame", grid: float = 1e-5) -> "gpd.GeoDa
 def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str]]:
     if not GEOM_FILE.exists():
         return None, None
+    # lê geometrias, sem simplificar aqui — só depois do recorte
     gdf = _read_gdf_robusto(GEOM_FILE, ["fid", "geometry"])
     if gdf is None:
         return None, None
-    try:
-        gdfm = gdf.to_crs(3857)
-        gdfm["geometry"] = gdfm.geometry.simplify(SIMPLIFY_M, preserve_topology=True)
-        gdf = gdfm.to_crs(4326)
-    except Exception:
-        pass
     return gdf, "fid"
 
 
@@ -321,7 +320,7 @@ def _prefilter_by_bbox(
 
 
 def clip_to_limit(
-    gdf: Optional["gpd.GeoDataFrame"], limit_gdf: Optional["gpd.GeoDataFrame"]
+    gdf: Optional["gpd.GeoDataFrame"], limit_gdf: Optional["gpd.GeoDataFrame"], *, fast: bool = False
 ) -> Optional["gpd.GeoDataFrame"]:
     if gdf is None or gdf.empty or limit_gdf is None or limit_gdf.empty:
         return gdf
@@ -329,22 +328,24 @@ def clip_to_limit(
     cand = _prefilter_by_bbox(gdf, limit_gdf)
     if cand is None or cand.empty:
         return cand
+    if fast:
+        return cand
     # 2) recorte geométrico
     try:
-        # cache leve do unary_union por nome + número de features
         key = (
             f"_limit_union|{len(limit_gdf)}|"
-            f"{int(limit_gdf.total_bounds[0]*1e6)}-{int(limit_gdf.total_bounds[1]*1e6)}-"
-            f"{int(limit_gdf.total_bounds[2]*1e6)}-{int(limit_gdf.total_bounds[3]*1e6)}"
+            f"{int(limit_gdf.total_bounds[0]*1e6)}-"
+            f"{int(limit_gdf.total_bounds[1]*1e6)}-"
+            f"{int(limit_gdf.total_bounds[2]*1e6)}-"
+            f"{int(limit_gdf.total_bounds[3]*1e6)}"
         )
         union = st.session_state.get(key)
         if union is None:
             union = limit_gdf.unary_union
             st.session_state[key] = union
-        out = gpd.clip(cand, union)
-        return out
+        return gpd.clip(cand, union)
     except Exception:
-        # Fallback por bbox se algo der errado
+        # Fallback por bbox
         minx, miny, maxx, maxy = limit_gdf.total_bounds
         try:
             return cand.cx[minx:maxx, miny:maxy]
@@ -546,12 +547,13 @@ def render_pydeck(
             )
             layers.append(sectors_outline)
 
+    # deck.gl — basemap leve: use None para evitar fetch externo se desejar
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(
             latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0
         ),
-        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        map_style=None,  # CARTO/Mapbox opcional; None evita requests externos
         tooltip=(
             {"text": f"{var_label}: {{__value__}}"}
             if var_label and var_label != "Cluster (perfil urbano)"
@@ -640,9 +642,19 @@ def main() -> None:
                 metric = load_metric_column(var)
                 if metric is not None:
                     joined = geoms.merge(metric, on="fid", how="left")
-                    joined = clip_to_limit(joined, limite_gdf)
+                    # ativa modo rápido se o universo for grande
+                    fast_mode = len(joined) > 30000 or (limite_gdf is not None and len(limite_gdf) > 200)
+                    joined = clip_to_limit(joined, limite_gdf, fast=fast_mode)
                     if joined is not None and not joined.empty:
-                        # guarda-chuva: se ainda estiver muito grande, amostra ou simplifica mais
+                        # simplifica APÓS recorte
+                        try:
+                            jm = joined.to_crs(3857)
+                            tol = 60 if fast_mode else SIMPLIFY_M
+                            jm["geometry"] = jm.geometry.simplify(tol, preserve_topology=True)
+                            joined = jm.to_crs(4326)
+                        except Exception:
+                            pass
+                        # guarda-chuva
                         if len(joined) > MAX_FEATURES:
                             st.warning(
                                 f"Seleção muito grande (" \
@@ -665,9 +677,14 @@ def main() -> None:
             limite_gdf=limite_gdf,
             var_label=None if var in (PLACEHOLDER_VAR, "Área de influência de bairro") else var,
             draw_setores_outline=draw_setores_outline,
+        )(
+            center=center,
+            setores_joined=setores_joined,
+            limite_gdf=limite_gdf,
+            var_label=None if var in (PLACEHOLDER_VAR, "Área de influência de bairro") else var,
+            draw_setores_outline=draw_setores_outline,
         )
 
 
 if __name__ == "__main__":
     main()
-
