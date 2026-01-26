@@ -117,7 +117,7 @@ DATA_DIR = (
 )
 GEOM_FILE    = DATA_DIR / "IDCenso2023.parquet"
 METRICS_FILE = DATA_DIR / "SetoresCensitarios2023.parquet"
-LOGO_PATH    = REPO_ROOT / "assets" / "logo_todos.jpg""
+LOGO_PATH    = REPO_ROOT / "assets" / "logo_todos.jpg"
 
 
 def _logo_data_uri() -> str:
