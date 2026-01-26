@@ -65,15 +65,16 @@ REF_DARKGRAY = "#333333"  # trilhos
 RIVER_WIDTH_PX = 4.5
 RAIL_WIDTH_PX = 6.0
 
-# ===== estilos GL (MapLibre) – sem token =====
+# ===== estilos GL (sem token) =====
 CARTO_POSITRON_GL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+# Estilo raster mínimo para ESRI World Imagery (compatível com Mapbox GL JS)
 ESRI_SATELLITE_STYLE = {
     "version": 8,
     "sources": {
         "esri": {
             "type": "raster",
             "tiles": [
-                "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}.jpg"
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
             ],
             "tileSize": 256,
         }
@@ -614,9 +615,6 @@ def render_pydeck(
 ) -> None:
     layers: List[pdk.Layer] = []
 
-    # NÃO adicionamos mais TileLayer manual (evita CORS em WebGL)
-    # Fundo agora vem do map_style GL (MapLibre)
-
     # camada temática
     if gdf_layer is not None and not gdf_layer.empty and "__rgba__" in gdf_layer.columns:
         cols = ["geometry", "__rgba__"] + ([tooltip_field] if tooltip_field else [])
@@ -674,27 +672,16 @@ def render_pydeck(
     # OVERLAYS no topo
     layers.extend(collect_reference_overlays())
 
-    # Seleciona estilo do fundo
+    # Estilo do fundo (sem map_provider para compatibilidade com pydeck antigo)
     map_style = ESRI_SATELLITE_STYLE if basemap == "Satélite (ESRI)" else CARTO_POSITRON_GL
 
-    # Cria o Deck com MapLibre; se a versão do pydeck não suportar map_provider, faz fallback
-    try:
-        deck = pdk.Deck(
-            layers=layers,
-            initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
-            map_provider="maplibre",
-            map_style=map_style,
-            tooltip={"text": f"{{{tooltip_field}}}"} if tooltip_field else None,
-            # height=MAP_HEIGHT,  # opcional
-        )
-    except TypeError:
-        # Fallback para versões antigas do pydeck/streamlit
-        deck = pdk.Deck(
-            layers=layers,
-            initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
-            map_style=map_style,
-            tooltip={"text": f"{{{tooltip_field}}}"} if tooltip_field else None,
-        )
+    deck = pdk.Deck(
+        layers=layers,
+        initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
+        map_style=map_style,
+        tooltip={"text": f"{{{tooltip_field}}}"} if tooltip_field else None,
+        # height=MAP_HEIGHT,  # opcional
+    )
 
     # Limpa o container antes de redesenhar
     ph = _get_map_placeholder()
