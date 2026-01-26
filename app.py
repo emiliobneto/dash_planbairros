@@ -73,26 +73,26 @@ MAX_FEATURES = 15000  # guarda-chuva de segurança para payload muito grande
 
 
 def inject_css() -> None:()
-    st.markdown(
-        f"""
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
-        html, body, .stApp {{ font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }}
-        .main .block-container {{ padding-top: .2rem !important; padding-bottom: .8rem !important; }}
-        .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
-        .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; }}
-        .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:18px 20px; width:100%; }}
-        .pb-title {{ font-size:3.8rem; font-weight:900; line-height:1.05; letter-spacing:.2px }}
-        .pb-subtitle {{ font-size:1.9rem; opacity:.95; margin-top:6px }}
-        .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
-        .legend-card {{ margin-top:12px; background:#fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; padding:10px 12px; }}
-        .legend-title {{ font-weight:800; margin-bottom:6px; }}
-        .legend-row {{ display:flex; align-items:center; gap:8px; margin:4px 0; }}
-        .legend-swatch {{ width:18px; height:18px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+        st.markdown(
+            f"""
+            <style>
+            @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
+            html, body, .stApp {{ font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }}
+            .main .block-container {{ padding-top: .2rem !important; padding-bottom: .8rem !important; }}
+            .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
+            .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; }}
+            .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:18px 20px; width:100%; }}
+            .pb-title {{ font-size:3.8rem; font-weight:900; line-height:1.05; letter-spacing:.2px }}
+            .pb-subtitle {{ font-size:1.9rem; opacity:.95; margin-top:6px }}
+            .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
+            .legend-card {{ margin-top:12px; background:#fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; padding:10px 12px; }}
+            .legend-title {{ font-weight:800; margin-bottom:6px; }}
+            .legend-row {{ display:flex; align-items:center; gap:8px; margin:4px 0; }}
+            .legend-swatch {{ width:18px; height:18px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 # ====================== caminhos e util ======================
@@ -688,5 +688,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
