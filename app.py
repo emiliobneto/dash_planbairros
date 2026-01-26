@@ -726,17 +726,15 @@ def render_pydeck(
         initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
         map_style=map_style,
         tooltip={"text": f"{{{tooltip_field}}}"} if tooltip_field else None,
+        # height=MAP_HEIGHT,  # se sua versão do pydeck suportar, você pode habilitar
     )
 
     # Limpa o container antes de redesenhar para garantir que não sobre base antiga
     ph = _get_map_placeholder()
     ph.empty()
-    # key dependente do basemap ajuda a garantir remontagem completa
-    component_key = f"pydeck-map-{basemap}"
-    try:
-        ph.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT, key=component_key)
-    except TypeError:
-        ph.pydeck_chart(deck, use_container_width=True, key=component_key)
+
+    # Renderiza sem 'key' e sem 'height' (compatível com versões do Streamlit)
+    ph.pydeck_chart(deck, use_container_width=True)
 
     # legendas
     if categorical_legend is not None:
