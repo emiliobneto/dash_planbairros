@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
-from unicodedata import normalize as _ud_norm
 import base64, math, re, json
 import numpy as np
 import pandas as pd
 import streamlit as st
 
+# ====================== imports obrigatórios ======================
 def _import_stack():
     try:
         import geopandas as gpd
@@ -32,13 +32,13 @@ ORANGE_RED_GRAD = ["#fff7ec","#fee8c8","#fdd49e","#fdbb84","#fc8d59","#e34a33","
 PLACEHOLDER_VAR = "— selecione uma variável —"
 PLACEHOLDER_LIM = "— selecione o limite —"
 
-LOGO_HEIGHT = 120
+LOGO_HEIGHT = 180   # ↑ 50% (antes 120)
 MAP_HEIGHT  = 900
 SIMPLIFY_M_SETORES   = 25
 SIMPLIFY_M_ISOCRONAS = 80
 SIMPLIFY_M_OVERLAY   = 20
 
-# Overlays
+# Overlays permanentes (cores e espessuras)
 REF_GREEN    = "#2E7D32"   # áreas verdes (polígono, 100% opaco)
 REF_BLUE     = "#1E88E5"   # rios (linha, 100% opaco)
 REF_DARKGRAY = "#333333"   # trilhos
@@ -113,6 +113,7 @@ def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Option
         return gdf.to_crs(4326)
     except Exception:
         try:
+            from pyarrow import parquet as pq
             table = pq.read_table(str(path), columns=columns)
             pdf = table.to_pandas()
             geom_col = find_col(pdf.columns, "geometry", "geom", "wkb", "wkt")
@@ -160,8 +161,7 @@ def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
 def load_isocronas_raw() -> Optional["gpd.GeoDataFrame"]:
     for name in ("isocronas.parquet", "isócronas.parquet", "Isocronas.parquet"):
         p = DATA_DIR / name
-        if p.exists():
-            return _read_gdf_robusto(p, None)
+        if p.exists(): return _read_gdf_robusto(p, None)
     return None
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -172,9 +172,8 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
     if not p.exists(): return None
     return _read_gdf_robusto(p, ["geometry"])
 
-# ---------- Overlays (geojson) ----------
+# ---------- Overlays (Parquet preferencial) ----------
 def _simplify_overlay_types(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDataFrame":
-    """Simplifica sem 'buffer(0)' em linhas (aplica buffer só em polígonos)."""
     try:
         gm = gdf.to_crs(3857)
     except Exception:
@@ -186,10 +185,8 @@ def _simplify_overlay_types(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDa
             return geom
         try:
             if gt in ("Polygon", "MultiPolygon"):
-                # valida polígono e simplifica
                 return geom.buffer(0).simplify(tol_m, preserve_topology=True)
             else:
-                # LineString / MultiLineString / Point
                 return geom.simplify(tol_m, preserve_topology=False)
         except Exception:
             return geom
@@ -199,35 +196,53 @@ def _simplify_overlay_types(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDa
     except Exception:
         return gdf
 
-def _read_geojson_any(*names: str) -> Optional["gpd.GeoDataFrame"]:
-    for nm in names:
+def _read_overlay_any(base: str) -> Optional["gpd.GeoDataFrame"]:
+    candidates = [
+        f"{base}.parquet",
+        f"{base}.geojson",
+        f"{base.replace(' ', '_')}.geojson",
+        f"{base.replace('_', ' ')}.geojson",
+    ]
+    for nm in candidates:
         p = DATA_DIR / nm
-        if p.exists():
-            try:
+        if not p.exists():
+            continue
+        try:
+            if p.suffix.lower() == ".parquet":
+                g = gpd.read_parquet(p)
+            else:
                 g = gpd.read_file(p)
-                if g.crs is None: g = g.set_crs(4326)
-                g = g.to_crs(4326)
-                g = _simplify_overlay_types(g, SIMPLIFY_M_OVERLAY)
-                return g
-            except Exception:
-                continue
+            if g.crs is None: g = g.set_crs(4326)
+            g = g.to_crs(4326)
+            g = _simplify_overlay_types(g, SIMPLIFY_M_OVERLAY)
+            return g
+        except Exception:
+            continue
     return None
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
-    return _read_geojson_any("area_verde.geojson", "areas_verdes.geojson")
+    return _read_overlay_any("area_verde")
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_rivers() -> Optional["gpd.GeoDataFrame"]:
-    return _read_geojson_any("rios.geojson")
+    return _read_overlay_any("rios")
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_metro_lines() -> Optional["gpd.GeoDataFrame"]:
-    return _read_geojson_any("linhas metro.geojson", "linhas_metro.geojson")
+    return _read_overlay_any("linhas_metro")
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_train_lines() -> Optional["gpd.GeoDataFrame"]:
-    return _read_geojson_any("linhas trem.geojson", "linhas_trem.geojson")
+    return _read_overlay_any("linhas_trem")
+
+# ====================== cache do GeoJSON (barateia muito) ======================
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=128)
+def gdf_to_geojson_str(gdf: "gpd.GeoDataFrame", cols: List[str]) -> str:
+    return gdf[cols].to_json()
+
+def gdf_to_geojson_obj(gdf: "gpd.GeoDataFrame", cols: List[str]) -> dict:
+    return json.loads(gdf_to_geojson_str(gdf, cols))
 
 # ====================== helpers numéricas ======================
 def _sample_gradient(colors: List[str], n: int) -> List[str]:
@@ -324,13 +339,14 @@ def left_controls() -> Dict[str, Any]:
     if st.button("🧹 Limpar cache de dados", type="secondary"):
         st.cache_data.clear(); st.success("Cache limpo. Selecione novamente a camada/variável.")
 
-    legend_ph = st.empty(); st.session_state["_legend_ph"] = legend_ph
-
-    sel_now = {"var": var, "lim": limite, "fundo": fundo}
+    # → não limpamos cache quando só o fundo muda
+    sel_now = {"var": var, "lim": limite}
     sel_prev = st.session_state.get("_pb_prev_sel")
     if sel_prev and (sel_prev != sel_now):
         st.cache_data.clear()
     st.session_state["_pb_prev_sel"] = sel_now
+
+    legend_ph = st.empty(); st.session_state["_legend_ph"] = legend_ph
     return {"variavel": var, "limite": limite, "fundo": fundo}
 
 # ====================== Legendas ======================
@@ -377,11 +393,10 @@ def _show_deck(deck: "pdk.Deck"):
         st.pydeck_chart(deck, use_container_width=True)
 
 def make_tile_basemap(style: str) -> "pdk.Layer":
-    """Retorna TileLayer base (raster) para o fundo."""
+    """Basemap via TileLayer (raster)."""
     if style == "Satélite (ESRI)":
         url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
     else:
-        # CARTO 'light_all' raster
         url = "https://tilebasemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
     return pdk.Layer(
         "TileLayer",
@@ -390,8 +405,7 @@ def make_tile_basemap(style: str) -> "pdk.Layer":
             "function (props) { "
             "  var b = props.tile.bbox; "
             "  return new deck.BitmapLayer({ "
-            "    id: 'basemap', "
-            "    image: props.data, "
+            "    id: 'basemap', image: props.data, "
             "    bounds: [b.west, b.south, b.east, b.north] "
             "  }); "
             "}"
@@ -404,7 +418,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
 
     g = load_green_areas()
     if g is not None and not g.empty:
-        gj = json.loads(g[["geometry"]].to_json())
+        gj = gdf_to_geojson_obj(g, ["geometry"])
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=True, stroked=False, pickable=False,
@@ -413,7 +427,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
 
     r = load_rivers()
     if r is not None and not r.empty:
-        gj = json.loads(r[["geometry"]].to_json())
+        gj = gdf_to_geojson_obj(r, ["geometry"])
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
@@ -424,7 +438,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
 
     t = load_train_lines()
     if t is not None and not t.empty:
-        gj = json.loads(t[["geometry"]].to_json())
+        gj = gdf_to_geojson_obj(t, ["geometry"])
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
@@ -435,7 +449,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
 
     m = load_metro_lines()
     if m is not None and not m.empty:
-        gj = json.loads(m[["geometry"]].to_json())
+        gj = gdf_to_geojson_obj(m, ["geometry"])
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj,
             filled=False, stroked=True, pickable=False,
@@ -443,7 +457,6 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
             get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels",
             lineJointRounded=True, lineCapRounded=True,
         ))
-
     return layers
 
 def render_pydeck(center: Tuple[float, float],
@@ -457,22 +470,22 @@ def render_pydeck(center: Tuple[float, float],
                   basemap: str = "Claro (CARTO)"):
     layers: List[pdk.Layer] = []
 
-    # 0) Fundo (TileLayer raster)
+    # Fundo via TileLayer (sempre) e map_style=None → garante troca CARTO ⇄ ESRI
     layers.append(make_tile_basemap(basemap))
-    map_style = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"  # não interfere, fica atrás
+    map_style = None
 
-    # 1) camada temática
+    # camada temática
     if gdf_layer is not None and not gdf_layer.empty and "__rgba__" in gdf_layer.columns:
-        geojson = json.loads(gdf_layer[["geometry","__rgba__"] + ([tooltip_field] if tooltip_field else [])].to_json())
+        gj = gdf_to_geojson_obj(gdf_layer, ["geometry","__rgba__"] + ([tooltip_field] if tooltip_field else []))
         layers.append(pdk.Layer(
-            "GeoJsonLayer", data=geojson,
+            "GeoJsonLayer", data=gj,
             filled=True, stroked=False, pickable=bool(tooltip_field), auto_highlight=True,
             get_fill_color="properties.__rgba__", get_line_width=0,
         ))
 
-    # 2) contornos e setores (abaixo dos overlays)
+    # contornos/linhas de setores
     if limite_gdf is not None and not limite_gdf.empty:
-        gj_lim = json.loads(limite_gdf[["geometry"]].to_json())
+        gj_lim = gdf_to_geojson_obj(limite_gdf, ["geometry"])
         layers.append(pdk.Layer(
             "GeoJsonLayer", data=gj_lim, filled=False, stroked=True,
             get_line_color=[20,20,20,180], get_line_width=1, lineWidthUnits="pixels"
@@ -484,13 +497,13 @@ def render_pydeck(center: Tuple[float, float],
         except Exception:
             geoms_only = None
         if geoms_only is not None:
-            gj = json.loads(geoms_only[["geometry"]].to_json())
+            gj = gdf_to_geojson_obj(geoms_only, ["geometry"])
             layers.append(pdk.Layer(
                 "GeoJsonLayer", data=gj, filled=False, stroked=True,
                 get_line_color=[80,80,80,160], get_line_width=0.6, lineWidthUnits="pixels"
             ))
 
-    # 3) OVERLAYS NO TOPO
+    # OVERLAYS no topo
     layers.extend(collect_reference_overlays())
 
     deck = pdk.Deck(
@@ -627,6 +640,7 @@ def main() -> None:
                                       basemap=ui["fundo"])
                         return
 
+        # sem variável: só fundo + overlays
         render_pydeck(center, None, limite_gdf, tooltip_field=None,
                       categorical_legend=None, numeric_legend=None,
                       draw_setores_outline=draw_setores_outline, basemap=ui["fundo"])
