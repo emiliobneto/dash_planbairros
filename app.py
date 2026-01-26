@@ -438,7 +438,7 @@ def make_tile_basemap(style: str) -> "pdk.Layer":
             "}"
         ),
     )
-        url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+    url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
     else:
         url = "https://tilebasemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
     return pdk.Layer(
@@ -707,3 +707,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
