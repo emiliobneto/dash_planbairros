@@ -54,8 +54,8 @@ ORANGE_RED_GRAD = [
 PLACEHOLDER_VAR = "— selecione uma variável —"
 PLACEHOLDER_LIM = "— selecione o limite —"
 
-LOGO_HEIGHT = 180  # +50%
-MAP_HEIGHT = 900
+LOGO_HEIGHT = 135  # reduzido 25% (antes: 180)
+MAP_HEIGHT = 675  # reduzido 25% (antes: 900)
 SIMPLIFY_M_SETORES = 25
 SIMPLIFY_M_ISOCRONAS = 80
 SIMPLIFY_M_OVERLAY = 20
@@ -64,8 +64,8 @@ SIMPLIFY_M_OVERLAY = 20
 REF_GREEN = "#2E7D32"  # áreas verdes (polígono opaco)
 REF_BLUE = "#1E88E5"  # rios (linha opaca)
 REF_DARKGRAY = "#333333"  # trilhos
-RIVER_WIDTH_PX = 6.0
-RAIL_WIDTH_PX = 8.0
+RIVER_WIDTH_PX = 4.5  # reduzido 25% (antes: 6.0)
+RAIL_WIDTH_PX = 6.0  # reduzido 25% (antes: 8.0)
 
 
 def inject_css() -> None:
@@ -74,32 +74,20 @@ def inject_css() -> None:
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
         html, body, .stApp {{ font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }}
-        .main .block-container {{ padding-top: .2rem !important; padding-bottom: .8rem !important; }}
-        .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
+        .main .block-container { padding-top: .15rem !important; padding-bottom: .6rem !important; }}
+        .pb-row { display:flex; align-items:center; gap:9px; margin-bottom:0; }}
         .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; }}
-        .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:18px 20px; width:100%; }}
-        .pb-title {{ font-size:3.8rem; font-weight:900; line-height:1.05; letter-spacing:.2px }}
-        .pb-subtitle {{ font-size:1.9rem; opacity:.95; margin-top:6px }}
-        .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
-        .legend-card {{ margin-top:12px; background:#fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; padding:10px 12px; }}
-        .legend-title {{ font-weight:800; margin-bottom:6px; }}
-        .legend-row {{ display:flex; align-items:center; gap:8px; margin:4px 0; }}
-        .legend-swatch {{ width:18px; height:18px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); }}
+        .pb-header { background:#14407D; color:#fff; border-radius:14px; padding:14px 15px; width:100%; }; color:#fff; border-radius:14px; padding:18px 20px; width:100%; }}
+        .pb-title { font-size:2.85rem; font-weight:900; line-height:1.05; letter-spacing:.2px }}
+        .pb-subtitle { font-size:1.425rem; opacity:.95; margin-top:5px }}
+        .pb-card { background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:9px; }}
+        .legend-card { margin-top:9px; background:#fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; padding:8px 9px; }}
+        .legend-title { font-weight:800; margin-bottom:4px; }}
+        .legend-row { display:flex; align-items:center; gap:6px; margin:3px 0; }}
+        .legend-swatch { width:14px; height:14px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); }}
 
         /* caixa flutuante no canto inferior-direito do mapa */
-        .pb-floating-legend {{
-            position: fixed;
-            right: 18px;
-            bottom: 18px;
-            z-index: 9999;
-            background: #fff;
-            border:1px solid rgba(20,64,125,.10);
-            border-radius:12px;
-            box-shadow:0 2px 6px rgba(0,0,0,.15);
-            padding:10px 12px;
-            max-width: 280px;
-            font-size: 13px;
-        }}
+        .pb-floating-legend { position: fixed; right: 14px; bottom: 14px; z-index: 9999; background: #fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; box-shadow:0 2px 6px rgba(0,0,0,.15); padding:8px 9px; max-width: 210px; font-size: 10px; }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -585,18 +573,20 @@ def _get_map_placeholder():
 
 
 def make_tile_basemap(style: str) -> "pdk.Layer":
-    """Basemap via TileLayer (raster).
+    """Basemap via TileLayer (raster) com URLs estáveis e CORS-friendly.
 
-    FIXES:
-      - Usa ID diferente por estilo (evita "ghost" no diff do deck.gl)
-      - URLs corretas para CARTO/ESRI
+    * Usa ID diferente por estilo (evita resíduos ao alternar)
+    * ESRI via "services.arcgisonline.com" (.jpg), que costuma responder com CORS
     """
     if style == "Satélite (ESRI)":
+        # ESRI World Imagery (256px tiles) — ordem {z}/{y}/{x}
         url = (
-            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+            "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/"
+            "MapServer/tile/{z}/{y}/{x}.jpg"
         )
         lid = "basemap-esri"
     else:
+        # CARTO Positron Light
         url = "https://tilebasemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
         lid = "basemap-carto"
     return pdk.Layer(
