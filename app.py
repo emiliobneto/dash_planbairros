@@ -102,12 +102,13 @@ def inject_css() -> None:
             max-width: 210px;
             font-size: 10px;
         }}
+
         /* aumenta largura dos selectboxes (x2) e do dropdown */
-.pb-card .stSelectbox > div[data-baseweb="select"],
-.pb-card .stSelectbox div[role="combobox"] { min-width: 520px; }
-/* painel do popover (BaseWeb) que abre a lista */
-[data-baseweb="popover"] { width: 520px; max-width: 520px; }
-</style>
+        .pb-card .stSelectbox > div[data-baseweb="select"],
+        .pb-card .stSelectbox div[role="combobox"] {{ min-width: 520px; }}
+        /* painel do popover (BaseWeb) que abre a lista */
+        [data-baseweb="popover"] {{ width: 520px; max-width: 520px; }}
+        </style>
         """,
         unsafe_allow_html=True,
     )
