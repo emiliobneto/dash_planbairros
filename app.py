@@ -17,6 +17,7 @@ def _import_stack():
         from pyarrow import parquet as pq
         return gpd, pdk, wkb, wkt, pq
     except ImportError as e:
+        # Garante set_page_config só uma vez em caso de erro e encerra a execução
         st.set_page_config(page_title="PlanBairros", page_icon="🏙️", layout="wide")
         st.error(f"Dependência ausente: **{e}**.")
         st.stop()
@@ -44,6 +45,12 @@ REF_BLUE     = "#1E88E5"   # rios (linha opaca)
 REF_DARKGRAY = "#333333"   # trilhos / metrô
 RIVER_WIDTH_PX = 9.0       # (dobrado; antes 4.5)
 RAIL_WIDTH_PX  = 12.0      # (dobrado; antes 6.0)
+
+# ====================== utilidades gerais ======================
+
+def _empty_fc() -> dict:
+    return {"type": "FeatureCollection", "features": []}
+
 
 def inject_css() -> None:
     # ATENÇÃO f-string → chaves CSS duplicadas
@@ -99,12 +106,14 @@ GEOM_FILE    = DATA_DIR / "IDCenso2023.parquet"
 METRICS_FILE = DATA_DIR / "SetoresCensitarios2023.parquet"
 LOGO_PATH    = REPO_ROOT / "assets" / "logo_todos.jpg"
 
+
 def _logo_data_uri() -> str:
     if LOGO_PATH.exists():
         b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
         return f"data:image/{LOGO_PATH.suffix.lstrip('.').lower()};base64,{b64}"
     return ("https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/logomark/"
             "streamlit-mark-color.png")
+
 
 def find_col(df_cols, *cands) -> Optional[str]:
     low = {c.lower(): c for c in df_cols}
@@ -116,22 +125,29 @@ def find_col(df_cols, *cands) -> Optional[str]:
         if key in norm: return norm[key]
     return None
 
+
 def center_from_bounds(gdf) -> tuple[float, float]:
     minx, miny, maxx, maxy = gdf.total_bounds
     return ((miny + maxy) / 2, (minx + maxx) / 2)
+
 
 def _hex_to_rgba(h: str, a: int = 255) -> List[int]:
     h = h.lstrip("#")
     return [int(h[i:i+2], 16) for i in (0,2,4)] + [a]
 
 # ====================== leitores ======================
+
 def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Optional["gpd.GeoDataFrame"]:
     if not path.exists(): return None
     try:
         gdf = gpd.read_parquet(path, columns=columns)
-        if not isinstance(gdf, gpd.GeoDataFrame) or "geometry" not in gdf.columns: raise ValueError
+        if not isinstance(gdf, gpd.GeoDataFrame) or "geometry" not in gdf.columns:
+            raise ValueError
         if gdf.crs is None: gdf = gdf.set_crs(4326)
-        return gdf.to_crs(4326)
+        gdf = gdf.to_crs(4326)
+        # Remove vazios/invalidos para evitar erros no GeoJsonLayer
+        gdf = gdf[gdf.geometry.notna() & (~gdf.geometry.is_empty)]
+        return gdf
     except Exception:
         try:
             table = pq.read_table(str(path), columns=columns)
@@ -144,9 +160,11 @@ def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Option
             else:
                 geo = vals.dropna().apply(lambda b: wkb.loads(b, hex=isinstance(b, str)))
             g = gpd.GeoDataFrame(pdf.drop(columns=[geom_col]), geometry=geo, crs=4326)
+            g = g[g.geometry.notna() & (~g.geometry.is_empty)]
             return g
         except Exception:
             return None
+
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str]]:
@@ -159,7 +177,10 @@ def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str]]:
         gdf = gdfm.to_crs(4326)
     except Exception:
         pass
+    # saneamento extra
+    gdf = gdf[gdf.geometry.notna() & (~gdf.geometry.is_empty)]
     return gdf, "fid"
+
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
 def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
@@ -178,6 +199,7 @@ def load_metric_column(var_label: str) -> Optional[pd.DataFrame]:
     df = table.to_pandas().rename(columns={wanted: "__value__"})
     return df
 
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_isocronas_raw() -> Optional["gpd.GeoDataFrame"]:
     for name in ("isocronas.parquet", "isócronas.parquet", "Isocronas.parquet"):
@@ -185,20 +207,24 @@ def load_isocronas_raw() -> Optional["gpd.GeoDataFrame"]:
         if p.exists(): return _read_gdf_robusto(p, None)
     return None
 
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
     stems = {"Distritos":"Distritos.parquet","ZonasOD2023":"ZonasOD2023.parquet",
              "Subprefeitura":"Subprefeitura.parquet","Isócronas":"isocronas.parquet"}
     p = DATA_DIR / stems.get(name, "")
     if not p.exists(): return None
-    return _read_gdf_robusto(p, ["geometry"])  # type: ignore[return-value]
+    g = _read_gdf_robusto(p, ["geometry"])  # garante apenas geometria
+    return g
 
 # ---------- Overlays ----------
+
 def _simplify_overlay_types(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDataFrame":
     try:
         gm = gdf.to_crs(3857)
     except Exception:
         return gdf
+
     def _simp(geom):
         try: gt = geom.geom_type
         except Exception: return geom
@@ -209,14 +235,16 @@ def _simplify_overlay_types(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDa
                 return geom.simplify(tol_m, preserve_topology=False)
         except Exception:
             return geom
+
     try:
         gm["geometry"] = gm.geometry.apply(_simp)
         out = gm.to_crs(4326)
-        # 🔧 evita erros de sublayers (geometrias nulas/vazias)
+        # evita erros de sublayers (geometrias nulas/vazias)
         out = out[ out.geometry.notna() & (~out.geometry.is_empty) ]
         return out
     except Exception:
         return gdf
+
 
 def _read_overlay_any(base: str) -> Optional["gpd.GeoDataFrame"]:
     candidates = [f"{base}.parquet", f"{base}.geojson",
@@ -229,24 +257,28 @@ def _read_overlay_any(base: str) -> Optional["gpd.GeoDataFrame"]:
             if g.crs is None: g = g.set_crs(4326)
             g = _simplify_overlay_types(g.to_crs(4326), SIMPLIFY_M_OVERLAY)
             if g is None or g.empty: continue
-            # 🔧 filtra inválidos
+            # filtra inválidos
             g = g[ g.geometry.notna() & (~g.geometry.is_empty) ]
             return g
         except Exception:
             continue
     return None
 
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
     return _read_overlay_any("area_verde")
+
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_rivers() -> Optional["gpd.GeoDataFrame"]:
     return _read_overlay_any("rios")
 
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_metro_lines() -> Optional["gpd.GeoDataFrame"]:
     return _read_overlay_any("linhas_metro")
+
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_train_lines() -> Optional["gpd.GeoDataFrame"]:
@@ -261,14 +293,27 @@ _HASH_FUNCS = {
     )
 }
 
+
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=256, hash_funcs=_HASH_FUNCS)
 def gdf_to_geojson_str(gdf: "gpd.GeoDataFrame", cols: Tuple[str, ...]) -> str:
-    return gdf[list(cols)].to_json()
+    if gdf is None or len(gdf) == 0 or "geometry" not in gdf.columns:
+        return json.dumps(_empty_fc())
+    # sanitiza colunas e remove geometrias inválidas no momento da exportação
+    safe = gdf[list(cols)].copy()
+    safe = safe[safe.geometry.notna() & (~safe.geometry.is_empty)]
+    if len(safe) == 0:
+        return json.dumps(_empty_fc())
+    return safe.to_json()
+
 
 def gdf_to_geojson_obj(gdf: "gpd.GeoDataFrame", cols: List[str] | Tuple[str, ...]) -> dict:
-    return json.loads(gdf_to_geojson_str(gdf, tuple(cols)))
+    try:
+        return json.loads(gdf_to_geojson_str(gdf, tuple(cols)))
+    except Exception:
+        return _empty_fc()
 
 # ====================== helpers ======================
+
 def _sample_gradient(colors: List[str], n: int) -> List[str]:
     if n <= 1: return [colors[-1]]
     out = []
@@ -284,11 +329,13 @@ def _sample_gradient(colors: List[str], n: int) -> List[str]:
         out.append(r2h(mix))
     return out
 
+
 def _equal_edges(vmin: float, vmax: float, k: int = 6) -> List[float]:
     step = (vmax - vmin) / k
     edges = [vmin + i*step for i in range(k+1)]
     edges[-1] = vmax
     return edges
+
 
 def _quantile_edges(vals: np.ndarray, k: int = 6) -> List[float]:
     qs = np.linspace(0, 1, k+1)
@@ -297,6 +344,7 @@ def _quantile_edges(vals: np.ndarray, k: int = 6) -> List[float]:
         if edges[i] <= edges[i-1]:
             edges[i] = edges[i-1] + 1e-9
     return edges
+
 
 def classify_auto6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[int,int]], List[str]]:
     s = pd.to_numeric(series, errors="coerce")
@@ -326,6 +374,7 @@ def classify_auto6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[int,int]], 
     return idx.fillna(-1).astype("Int64"), breaks_int, palette
 
 # ====================== UI ======================
+
 def left_controls() -> Dict[str, Any]:
     st.markdown("<div style='margin-top:-6px'></div>", unsafe_allow_html=True)
     st.markdown("### Variáveis (Setores Censitários e Isócronas)")
@@ -363,8 +412,9 @@ def left_controls() -> Dict[str, Any]:
     return {"variavel": var, "limite": limite, "fundo": fundo}
 
 # ====================== Legendas ======================
+
 def show_numeric_legend(title: str, breaks: List[Tuple[int,int]], palette: List[str]):
-    ph = st.session_state.get("_legend_ph"); 
+    ph = st.session_state.get("_legend_ph");
     if not ph: return
     if not breaks: ph.empty(); return
     rows = []
@@ -374,12 +424,14 @@ def show_numeric_legend(title: str, breaks: List[Tuple[int,int]], palette: List[
     html = f"<div class='legend-card'><div class='legend-title'>{title}</div>{''.join(rows)}</div>"
     ph.markdown(html, unsafe_allow_html=True)
 
+
 def show_categorical_legend(title: str, items: List[Tuple[str,str]]):
-    ph = st.session_state.get("_legend_ph"); 
+    ph = st.session_state.get("_legend_ph");
     if not ph: return
     rows = [f"<div class='legend-row'><span class='legend-swatch' style='background:{c}'></span><span>{l}</span></div>" for l,c in items]
     html = f"<div class='legend-card'><div class='legend-title'>{title}</div>{''.join(rows)}</div>"
     ph.markdown(html, unsafe_allow_html=True)
+
 
 def render_reference_legend_floating():
     html = """
@@ -393,26 +445,29 @@ def render_reference_legend_floating():
     """
     st.markdown(html, unsafe_allow_html=True)
 
+
 def clear_legend():
     ph = st.session_state.get("_legend_ph")
     if ph: ph.empty()
 
 # ====================== Render (pydeck) ======================
 _MAP_PLACEHOLDER_KEY = "_pb_map_ph"
+
 def _get_map_placeholder():
     ph = st.session_state.get(_MAP_PLACEHOLDER_KEY)
     if ph is None:
         ph = st.empty(); st.session_state[_MAP_PLACEHOLDER_KEY] = ph
     return ph
 
+
 def make_tile_basemap(style: str) -> "pdk.Layer":
-    """Basemap raster com endpoints estáveis (evita DNS/CORS)."""
+    """Basemap raster com endpoints estáveis (evita DNS/CORS e erros 'GeoJSON does not have type')."""
     if style == "Satélite (ESRI)":
         # ESRI World Imagery estável
         url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
         lid = "basemap-esri"
     else:
-        # Substitui CARTO problemático por OSM (estável). Se quiser insistir no CARTO, troque para
+        # CARTO (vetorial) trocado por OSM raster estável; se preferir CARTO raster, use cartocdn light_all
         # url = "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
         url = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
         lid = "basemap-light"
@@ -423,6 +478,7 @@ def make_tile_basemap(style: str) -> "pdk.Layer":
         min_zoom=0, max_zoom=19, tile_size=256,
         loadOptions={"image": {"crossOrigin": "anonymous"}, "fetch": {"referrerPolicy": "no-referrer"}},
     )
+
 
 def collect_reference_overlays() -> List["pdk.Layer"]:
     layers: List[pdk.Layer] = []
@@ -471,6 +527,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
             lineJointRounded=True, lineCapRounded=True,
         ))
     return layers
+
 
 def render_pydeck(center: Tuple[float, float],
                   gdf_layer: Optional["gpd.GeoDataFrame"],
@@ -540,6 +597,7 @@ def render_pydeck(center: Tuple[float, float],
     render_reference_legend_floating()
 
 # ====================== App ======================
+
 def main() -> None:
     inject_css()
     st.markdown(
@@ -600,12 +658,13 @@ def main() -> None:
                         g = gm.to_crs(4326).explode(index_parts=False, ignore_index=True)
                     except Exception:
                         pass
+                    g = g[g.geometry.notna() & (~g.geometry.is_empty)]
                     g["__rgba__"]  = g["__k__"].map(lambda v: _hex_to_rgba(lut_color.get(int(v), "#c8c8c8"), 200))
                     g["__label__"] = g["__k__"].map(lambda v: f"{int(v)} – {lut_label.get(int(v),'Outros')}")
                     gdf_layer = g[["geometry","__rgba__","__label__"]]
                     center = center_from_bounds(g)
                     present = sorted({int(v) for v in g["__k__"].dropna().unique().tolist()})
-                    legend_items = [(f"{k} – {lut_label[k]}", lut_color[k]) for k in present]
+                    legend_items = [(f"{k} – {lut_label[k]}", lut_color[k]) for k in present if k in lut_color]
 
             render_pydeck(center, gdf_layer, limite_gdf,
                           tooltip_field="__label__", categorical_legend=legend_items,
@@ -658,5 +717,13 @@ def main() -> None:
                       categorical_legend=None, numeric_legend=None,
                       draw_setores_outline=draw_setores_outline, basemap=ui["fundo"])
 
+
 if __name__ == "__main__":
     main()
+
+
+
+
+
+if __name__ == "__main__":
+main()
