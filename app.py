@@ -239,13 +239,14 @@ def _valid_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
             mask &= ~g.geometry.is_empty
         except Exception:
             pass
-        # bounds dentro de WGS84
+
         def _ok(b):
             if b is None or not _is_finite(*b):
                 return False
             minx, miny, maxx, maxy = b
             return (-180 <= minx <= 180 and -180 <= maxx <= 180 and
                     -90 <= miny <= 90 and -90 <= maxy <= 90)
+
         bnds = g.geometry.bounds
         if not bnds.empty:
             ok_bounds = bnds.apply(lambda row: _ok((row.minx, row.miny, row.maxx, row.maxy)), axis=1)
@@ -282,15 +283,22 @@ def gdf_to_geojson_obj(gdf: "gpd.GeoDataFrame", cols: List[str] | Tuple[str, ...
 # ====================== helpers ======================
 
 def _sample_gradient(colors: List[str], n: int) -> List[str]:
-    if n <= 1: return [colors[-1]]
+    if n <= 1:
+        return [colors[-1]]
     out: List[str] = []
     for i in range(n):
         t = i / (n - 1)
         pos = t * (len(colors) - 1)
         j = min(int(math.floor(pos)), len(colors) - 2)
         frac = pos - j
-        def h2r(x): x = x.lstrip("#"); return [int(x[k:k+2], 16) for k in (0, 2, 4)]
-        def r2h(r): return "#{:02x}{:02x}{:02x}".format(*r)
+
+        def h2r(x):
+            x = x.lstrip("#")
+            return [int(x[k:k+2], 16) for k in (0, 2, 4)]
+
+        def r2h(r):
+            return "#{:02x}{:02x}{:02x}".format(*r)
+
         c1, c2 = h2r(colors[j]), h2r(colors[j + 1])
         mix = [int(c1[k] + frac * (c2[k] - c1[k])) for k in range(3)]
         out.append(r2h(mix))
@@ -320,22 +328,28 @@ def classify_auto6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[int, int]],
         idx = pd.cut(s, bins=[vmin - 1e-9, vmax + 1e-9], labels=False, include_lowest=True)
         palette = _sample_gradient(ORANGE_RED_GRAD, 6)
         return idx.fillna(-1).astype("Int64"), [(int(round(vmin)), int(round(vmax)))], palette
+
     edges_eq = _equal_edges(vmin, vmax, 6)
     idx_eq = pd.cut(s, bins=[edges_eq[0] - 1e-9] + edges_eq[1:], labels=False, include_lowest=True)
     counts = idx_eq.value_counts(dropna=True)
     non_empty = (counts > 0).sum()
     max_share = (counts.max() / counts.sum()) if counts.sum() > 0 else 1.0
     use_quantile = (max_share > 0.35) or (non_empty < 4)
+
     if use_quantile:
         edges = _quantile_edges(v.to_numpy(), 6)
         idx = pd.cut(s, bins=[edges[0] - 1e-9] + edges[1:], labels=False, include_lowest=True)
     else:
         edges = edges_eq
         idx = idx_eq
+
     breaks_int: List[Tuple[int, int]] = []
     for i in range(6):
-        a = int(round(edges[i])); b = int(round(edges[i + 1])); b = max(b, a)
+        a = int(round(edges[i]))
+        b = int(round(edges[i + 1]))
+        b = max(b, a)
         breaks_int.append((a, b))
+
     palette = _sample_gradient(ORANGE_RED_GRAD, 6)
     return idx.fillna(-1).astype("Int64"), breaks_int, palette
 
@@ -385,19 +399,28 @@ def left_controls() -> Dict[str, Any]:
 
 def show_numeric_legend(title: str, breaks: List[Tuple[int, int]], palette: List[str]):
     ph = st.session_state.get("_legend_ph")
-    if not ph: return
-    if not breaks: ph.empty(); return
+    if not ph:
+        return
+    if not breaks:
+        ph.empty()
+        return
     rows = []
     for (a, b), col in zip(breaks, palette):
         label = f"{a:,} – {b:,}".replace(",", ".")
-        rows.append(f"<div class='legend-row'><span class='legend-swatch' style='background:{col}'></span><span>{label}</span></div>")
+        rows.append(
+            f"<div class='legend-row'><span class='legend-swatch' style='background:{col}'></span><span>{label}</span></div>"
+        )
     html = f"<div class='legend-card'><div class='legend-title'>{title}</div>{''.join(rows)}</div>"
     ph.markdown(html, unsafe_allow_html=True)
 
 def show_categorical_legend(title: str, items: List[Tuple[str, str]]):
     ph = st.session_state.get("_legend_ph")
-    if not ph: return
-    rows = [f"<div class='legend-row'><span class='legend-swatch' style='background:{c}'></span><span>{l}</span></div>" for l, c in items]
+    if not ph:
+        return
+    rows = [
+        f"<div class='legend-row'><span class='legend-swatch' style='background:{c}'></span><span>{l}</span></div>"
+        for l, c in items
+    ]
     html = f"<div class='legend-card'><div class='legend-title'>{title}</div>{''.join(rows)}</div>"
     ph.markdown(html, unsafe_allow_html=True)
 
@@ -415,7 +438,8 @@ def render_reference_legend_floating():
 
 def clear_legend():
     ph = st.session_state.get("_legend_ph")
-    if ph: ph.empty()
+    if ph:
+        ph.empty()
 
 # ====================== Render (pydeck) ======================
 
@@ -437,6 +461,70 @@ def _esri_tilelayer() -> "pdk.Layer":
         loadOptions={"image": {"crossOrigin": "anonymous"}, "fetch": {"referrerPolicy": "no-referrer"}},
     )
 
+# ====================== Overlays de referência (CORREÇÃO DO NameError) ======================
+
+# Procura uma pasta específica para referências; se não existir, cai no DATA_DIR.
+OVERLAY_DIR = (
+    REPO_ROOT / "camadas_referencia"
+    if (REPO_ROOT / "camadas_referencia").exists()
+    else (
+        REPO_ROOT / "referencias"
+        if (REPO_ROOT / "referencias").exists()
+        else DATA_DIR
+    )
+)
+
+def _first_existing_path(names: List[str]) -> Optional[Path]:
+    for n in names:
+        p = OVERLAY_DIR / n
+        if p.exists():
+            return p
+    return None
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _load_overlay_any(names: List[str], simplify_m: int = SIMPLIFY_M_OVERLAY) -> Optional["gpd.GeoDataFrame"]:
+    p = _first_existing_path(names)
+    if p is None:
+        return None
+
+    gdf = _read_gdf_robusto(p, None)
+    if gdf is None or gdf.empty:
+        return None
+
+    # simplificação leve para performance
+    try:
+        gm = gdf.to_crs(3857)
+        gm["geometry"] = gm.geometry.simplify(simplify_m, preserve_topology=True)
+        gdf = gm.to_crs(4326)
+    except Exception:
+        pass
+
+    return gdf
+
+def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
+    return _load_overlay_any([
+        "areas_verdes.parquet", "areasverdes.parquet", "green_areas.parquet",
+        "AreasVerdes.parquet", "Parques.parquet"
+    ])
+
+def load_rivers() -> Optional["gpd.GeoDataFrame"]:
+    return _load_overlay_any([
+        "rios.parquet", "hidrografia.parquet", "rivers.parquet",
+        "Hidrografia.parquet"
+    ])
+
+def load_train_lines() -> Optional["gpd.GeoDataFrame"]:
+    return _load_overlay_any([
+        "linhas_trem.parquet", "trem.parquet", "cptm.parquet",
+        "train_lines.parquet"
+    ])
+
+def load_metro_lines() -> Optional["gpd.GeoDataFrame"]:
+    return _load_overlay_any([
+        "linhas_metro.parquet", "metro.parquet", "subway_lines.parquet",
+        "LinhasMetro.parquet"
+    ])
+
 def collect_reference_overlays() -> List["pdk.Layer"]:
     layers: List[pdk.Layer] = []
 
@@ -446,9 +534,13 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
         g = _explode_keep_types(g, ("Polygon", "MultiPolygon"))
         if not g.empty:
             gj = gdf_to_geojson_obj(g, ("geometry",))
-            layers.append(pdk.Layer("GeoJsonLayer", id="areas-verdes", data=gj,
-                                    filled=True, stroked=False, pickable=False,
-                                    get_fill_color=_hex_to_rgba(REF_GREEN, 255), get_line_width=0))
+            layers.append(
+                pdk.Layer(
+                    "GeoJsonLayer", id="areas-verdes", data=gj,
+                    filled=True, stroked=False, pickable=False,
+                    get_fill_color=_hex_to_rgba(REF_GREEN, 255), get_line_width=0
+                )
+            )
 
     r = load_rivers()
     if r is not None and not r.empty:
@@ -456,11 +548,15 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
         r = _explode_keep_types(r, ("LineString", "MultiLineString"))
         if not r.empty:
             gj = gdf_to_geojson_obj(r, ("geometry",))
-            layers.append(pdk.Layer("GeoJsonLayer", id="rios", data=gj,
-                                    filled=False, stroked=True, pickable=False,
-                                    get_line_color=_hex_to_rgba(REF_BLUE, 255),
-                                    get_line_width=RIVER_WIDTH_PX,
-                                    lineWidthUnits="pixels", lineJointRounded=True, lineCapRounded=True))
+            layers.append(
+                pdk.Layer(
+                    "GeoJsonLayer", id="rios", data=gj,
+                    filled=False, stroked=True, pickable=False,
+                    get_line_color=_hex_to_rgba(REF_BLUE, 255),
+                    get_line_width=RIVER_WIDTH_PX,
+                    lineWidthUnits="pixels", lineJointRounded=True, lineCapRounded=True
+                )
+            )
 
     t = load_train_lines()
     if t is not None and not t.empty:
@@ -468,11 +564,15 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
         t = _explode_keep_types(t, ("LineString", "MultiLineString"))
         if not t.empty:
             gj = gdf_to_geojson_obj(t, ("geometry",))
-            layers.append(pdk.Layer("GeoJsonLayer", id="linhas-trem", data=gj,
-                                    filled=False, stroked=True, pickable=False,
-                                    get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
-                                    get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels",
-                                    lineJointRounded=True, lineCapRounded=True))
+            layers.append(
+                pdk.Layer(
+                    "GeoJsonLayer", id="linhas-trem", data=gj,
+                    filled=False, stroked=True, pickable=False,
+                    get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
+                    get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels",
+                    lineJointRounded=True, lineCapRounded=True
+                )
+            )
 
     m = load_metro_lines()
     if m is not None and not m.empty:
@@ -480,11 +580,15 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
         m = _explode_keep_types(m, ("LineString", "MultiLineString"))
         if not m.empty:
             gj = gdf_to_geojson_obj(m, ("geometry",))
-            layers.append(pdk.Layer("GeoJsonLayer", id="linhas-metro", data=gj,
-                                    filled=False, stroked=True, pickable=False,
-                                    get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
-                                    get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels",
-                                    lineJointRounded=True, lineCapRounded=True))
+            layers.append(
+                pdk.Layer(
+                    "GeoJsonLayer", id="linhas-metro", data=gj,
+                    filled=False, stroked=True, pickable=False,
+                    get_line_color=_hex_to_rgba(REF_DARKGRAY, 255),
+                    get_line_width=RAIL_WIDTH_PX, lineWidthUnits="pixels",
+                    lineJointRounded=True, lineCapRounded=True
+                )
+            )
 
     return layers
 
@@ -509,13 +613,22 @@ def render_pydeck(
     # Camada temática
     if gdf_layer is not None and not gdf_layer.empty and "__rgba__" in gdf_layer.columns:
         gdf_layer = _valid_geoms(gdf_layer)
-        gdf_layer = _explode_keep_types(gdf_layer, ("Polygon", "MultiPolygon", "LineString", "MultiLineString", "Point", "MultiPoint"))
+        gdf_layer = _explode_keep_types(
+            gdf_layer,
+            ("Polygon", "MultiPolygon", "LineString", "MultiLineString", "Point", "MultiPoint"),
+        )
         if not gdf_layer.empty:
             cols = ["geometry", "__rgba__"] + ([tooltip_field] if tooltip_field else [])
             gj = gdf_to_geojson_obj(gdf_layer, tuple(cols))
-            layers.append(pdk.Layer("GeoJsonLayer", id="tematica", data=gj,
-                                    filled=True, stroked=False, pickable=bool(tooltip_field),
-                                    auto_highlight=True, get_fill_color="properties.__rgba__", get_line_width=0))
+            layers.append(
+                pdk.Layer(
+                    "GeoJsonLayer", id="tematica", data=gj,
+                    filled=True, stroked=False, pickable=bool(tooltip_field),
+                    auto_highlight=True,
+                    get_fill_color="properties.__rgba__",
+                    get_line_width=0,
+                )
+            )
 
     # Limite/contorno
     if limite_gdf is not None and not limite_gdf.empty:
@@ -523,10 +636,14 @@ def render_pydeck(
         limite_gdf = _explode_keep_types(limite_gdf, ("Polygon", "MultiPolygon", "LineString", "MultiLineString"))
         if not limite_gdf.empty:
             gj_lim = gdf_to_geojson_obj(limite_gdf, ("geometry",))
-            layers.append(pdk.Layer("GeoJsonLayer", id="limite", data=gj_lim,
-                                    filled=False, stroked=True,
-                                    get_line_color=[20, 20, 20, 180],
-                                    get_line_width=1, lineWidthUnits="pixels"))
+            layers.append(
+                pdk.Layer(
+                    "GeoJsonLayer", id="limite", data=gj_lim,
+                    filled=False, stroked=True,
+                    get_line_color=[20, 20, 20, 180],
+                    get_line_width=1, lineWidthUnits="pixels",
+                )
+            )
 
     if draw_setores_outline:
         try:
@@ -538,15 +655,18 @@ def render_pydeck(
             geoms_only = _explode_keep_types(geoms_only, ("Polygon", "MultiPolygon", "LineString", "MultiLineString"))
             if not geoms_only.empty:
                 gj = gdf_to_geojson_obj(geoms_only, ("geometry",))
-                layers.append(pdk.Layer("GeoJsonLayer", id="setores-outline", data=gj,
-                                        filled=False, stroked=True,
-                                        get_line_color=[80, 80, 80, 160],
-                                        get_line_width=0.6, lineWidthUnits="pixels"))
+                layers.append(
+                    pdk.Layer(
+                        "GeoJsonLayer", id="setores-outline", data=gj,
+                        filled=False, stroked=True,
+                        get_line_color=[80, 80, 80, 160],
+                        get_line_width=0.6, lineWidthUnits="pixels",
+                    )
+                )
 
     # OVERLAYS
     layers.extend(collect_reference_overlays())
 
-    # Deck (sem map_provider; map_style string → MapLibre; sem token)
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0),
@@ -606,7 +726,10 @@ def main() -> None:
 
         # ====== VARIÁVEIS ======
         if var == "Área de influência de bairro":
-            lut_color = {0:"#542788",1:"#f7f7f7",2:"#d8daeb",3:"#b35806",4:"#b2abd2",5:"#8073ac",6:"#fdb863",7:"#7f3b08",8:"#e08214",9:"#fee0b6"}
+            lut_color = {
+                0:"#542788",1:"#f7f7f7",2:"#d8daeb",3:"#b35806",4:"#b2abd2",
+                5:"#8073ac",6:"#fdb863",7:"#7f3b08",8:"#e08214",9:"#fee0b6"
+            }
             lut_label = {
                 0: "Predominância uso misto", 1: "Zona de transição local", 2: "Periférico residencial de média densidade",
                 3: "Transição central verticalizada", 4: "Periférico adensado em transição", 5: "Centralidade comercial e de serviços",
@@ -616,12 +739,16 @@ def main() -> None:
             gdf_layer = None
             legend_items: Optional[List[Tuple[str, str]]] = None
             if iso_raw is not None and not iso_raw.empty:
-                cls = next((c for c in iso_raw.columns if re.sub(r"[^a-z0-9]","",c.lower()) in
-                            {"isocrona","novaclass","classe","class","cat","category"}), None)
+                cls = next(
+                    (c for c in iso_raw.columns if re.sub(r"[^a-z0-9]","",c.lower()) in
+                     {"isocrona","novaclass","classe","class","cat","category"}),
+                    None
+                )
                 if cls:
                     g = iso_raw[[cls, "geometry"]].copy()
                     k = pd.to_numeric(g[cls], errors="coerce").astype("Int64")
-                    g = g[~k.isna()].copy(); g["__k__"] = k
+                    g = g[~k.isna()].copy()
+                    g["__k__"] = k
                     try:
                         gm = g.to_crs(3857)
                         gm["geometry"] = gm.buffer(0).geometry.simplify(SIMPLIFY_M_ISOCRONAS, preserve_topology=True)
@@ -636,12 +763,14 @@ def main() -> None:
                         gdf_layer = g[["geometry", "__rgba__", "__label__"]]
                         center = center_from_bounds(g)
                         present = sorted({int(v) for v in g["__k__"].dropna().unique().tolist()})
-                        legend_items = [(f"{k} – {lut_label[k]}", lut_color[k]) for k in present]
+                        legend_items = [(f"{kk} – {lut_label[kk]}", lut_color[kk]) for kk in present]
 
-            render_pydeck(center, gdf_layer, limite_gdf,
-                          tooltip_field="__label__", categorical_legend=legend_items,
-                          numeric_legend=None, draw_setores_outline=draw_setores_outline,
-                          basemap=ui["fundo"])
+            render_pydeck(
+                center, gdf_layer, limite_gdf,
+                tooltip_field="__label__", categorical_legend=legend_items,
+                numeric_legend=None, draw_setores_outline=draw_setores_outline,
+                basemap=ui["fundo"],
+            )
             return
 
         # Demais variáveis (setores)
@@ -664,37 +793,56 @@ def main() -> None:
                             4: "5 - Predominância de uso comercial e serviços",
                         }
                         s = pd.to_numeric(joined["__value__"], errors="coerce")
-                        joined["__rgba__"] = s.map(lambda v: _hex_to_rgba(cmap.get(int(v) if pd.notna(v) else -1, "#c8c8c8"), 200))
+                        joined["__rgba__"] = s.map(
+                            lambda v: _hex_to_rgba(
+                                cmap.get(int(v) if pd.notna(v) else -1, "#c8c8c8"),
+                                200,
+                            )
+                        )
                         joined["__label__"] = s.map(lambda v: labels.get(int(v), "Outros") if pd.notna(v) else "Sem dado")
                         g = joined[["geometry", "__rgba__", "__label__"]]
-                        g = _valid_geoms(g); g = _explode_keep_types(g, ("Polygon","MultiPolygon"))
+                        g = _valid_geoms(g)
+                        g = _explode_keep_types(g, ("Polygon","MultiPolygon"))
                         if not g.empty:
                             gdf_layer = g
-                            render_pydeck(center, gdf_layer, limite_gdf,
-                                          tooltip_field="__label__", categorical_legend=[(labels[k], cmap[k]) for k in sorted(cmap)],
-                                          numeric_legend=None, draw_setores_outline=draw_setores_outline,
-                                          basemap=ui["fundo"])
+                            render_pydeck(
+                                center, gdf_layer, limite_gdf,
+                                tooltip_field="__label__",
+                                categorical_legend=[(labels[k], cmap[k]) for k in sorted(cmap)],
+                                numeric_legend=None, draw_setores_outline=draw_setores_outline,
+                                basemap=ui["fundo"],
+                            )
                             return
                     else:
                         classes, breaks_int, palette = classify_auto6(joined["__value__"])
                         color_map = {i: _hex_to_rgba(palette[i], 200) for i in range(6)}
-                        joined["__rgba__"] = classes.map(lambda k: color_map.get(int(k) if pd.notna(k) else -1, _hex_to_rgba("#c8c8c8", 200)))
+                        joined["__rgba__"] = classes.map(
+                            lambda k: color_map.get(
+                                int(k) if pd.notna(k) else -1,
+                                _hex_to_rgba("#c8c8c8", 200),
+                            )
+                        )
                         joined["__label__"] = pd.to_numeric(joined["__value__"], errors="coerce").round(0).astype("Int64").astype(str)
                         g = joined[["geometry", "__rgba__", "__label__"]]
-                        g = _valid_geoms(g); g = _explode_keep_types(g, ("Polygon","MultiPolygon"))
+                        g = _valid_geoms(g)
+                        g = _explode_keep_types(g, ("Polygon","MultiPolygon"))
                         if not g.empty:
                             gdf_layer = g
-                            render_pydeck(center, gdf_layer, limite_gdf,
-                                          tooltip_field="__label__", categorical_legend=None,
-                                          numeric_legend=(var, breaks_int, palette),
-                                          draw_setores_outline=draw_setores_outline,
-                                          basemap=ui["fundo"])
+                            render_pydeck(
+                                center, gdf_layer, limite_gdf,
+                                tooltip_field="__label__", categorical_legend=None,
+                                numeric_legend=(var, breaks_int, palette),
+                                draw_setores_outline=draw_setores_outline,
+                                basemap=ui["fundo"],
+                            )
                             return
 
         # sem variável: só fundo + overlays
-        render_pydeck(center, None, limite_gdf,
-                      tooltip_field=None, categorical_legend=None, numeric_legend=None,
-                      draw_setores_outline=draw_setores_outline, basemap=ui["fundo"])
+        render_pydeck(
+            center, None, limite_gdf,
+            tooltip_field=None, categorical_legend=None, numeric_legend=None,
+            draw_setores_outline=draw_setores_outline, basemap=ui["fundo"],
+        )
 
 if __name__ == "__main__":
     main()
