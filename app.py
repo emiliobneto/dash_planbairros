@@ -222,7 +222,7 @@ def _reduce_precision(gdf: "gpd.GeoDataFrame", grid: float = 1e-5) -> "gpd.GeoDa
         return gdf
 
 
-def _dynamic_simplify(gdf: "gpd.GeoDataFrame", base_tol: int = SIMPLIFY_M) -> "gpd.GeoDataFrame"]:
+def _dynamic_simplify(gdf: "gpd.GeoDataFrame", base_tol: int = SIMPLIFY_M) -> "gpd.GeoDataFrame":
     """Simplifica em EPSG:3857 com tolerância que escala com nº de features."""
     n = len(gdf)
     mult = 1.0
@@ -739,3 +739,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
