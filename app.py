@@ -117,6 +117,7 @@ def _hex_to_rgba(h: str, a: int = 255) -> list[int]:
     return [int(h[i:i+2], 16) for i in (0,2,4)] + [a]
 
 # ====================== leitores ======================
+
 def _read_gdf_robusto(path: Path, columns: Optional[List[str]] = None) -> Optional["gpd.GeoDataFrame"]:
     if not path.exists(): return None
     try:
@@ -183,9 +184,10 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
              "Subprefeitura":"Subprefeitura.parquet","Isócronas":"isocronas.parquet"}
     p = DATA_DIR / stems.get(name, "")
     if not p.exists(): return None
-    return _read_gdf_robusto(p, ["geometry"])
+    return _read_gdf_robusto(p, ["geometry"]) 
 
 # ---------- Overlays ----------
+
 def _simplify_overlay_types(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDataFrame":
     try:
         gm = gdf.to_crs(3857)
@@ -255,6 +257,7 @@ def gdf_to_geojson_obj(gdf: "gpd.GeoDataFrame", cols: List[str] | Tuple[str, ...
     return json.loads(gdf_to_geojson_str(gdf, tuple(cols)))
 
 # ====================== helpers ======================
+
 def _sample_gradient(colors: List[str], n: int) -> List[str]:
     if n <= 1: return [colors[-1]]
     out = []
@@ -314,6 +317,7 @@ def classify_auto6(series: pd.Series) -> Tuple[pd.Series, List[Tuple[int,int]], 
     return idx.fillna(-1).astype("Int64"), breaks_int, palette
 
 # ====================== UI ======================
+
 def left_controls() -> Dict[str, Any]:
     st.markdown("<div style='margin-top:-6px'></div>", unsafe_allow_html=True)
     st.markdown("### Variáveis (Setores Censitários e Isócronas)")
@@ -359,6 +363,7 @@ def left_controls() -> Dict[str, Any]:
     return {"variavel": var, "limite": limite, "fundo": fundo}
 
 # ====================== Legendas ======================
+
 def show_numeric_legend(title: str, breaks: List[Tuple[int,int]], palette: List[str]):
     ph = st.session_state.get("_legend_ph")
     if not ph: return
@@ -395,17 +400,19 @@ def clear_legend():
     if ph: ph.empty()
 
 # ====================== Render (pydeck) ======================
+
 def make_tile_basemap(style: str) -> "pdk.Layer":
-    """Basemap via TileLayer (raster) com id único para forçar troca."""
+    """Basemap via TileLayer (raster) com id fixo; troca via URL + key do componente.
+    FIX: id único 'basemap' evita sobras e o key força remontagem no Streamlit.
+    """
     if style == "Satélite (ESRI)":
+        # Esquema XYZ do Esri (z/y/x)
         url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-        lid = "basemap-esri"
     else:
         url = "https://tilebasemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
-        lid = "basemap-carto"
     return pdk.Layer(
         "TileLayer",
-        id=lid,  # <- força re-render quando trocar
+        id="basemap",  # id constante; a troca do URL é garantida pelo key do componente
         data=url, min_zoom=0, max_zoom=19, tile_size=256,
         render_sub_layers=DeckFunction(
             "function (props) { "
@@ -418,6 +425,7 @@ def make_tile_basemap(style: str) -> "pdk.Layer":
             "}"
         ),
     )
+
 
 def collect_reference_overlays() -> List["pdk.Layer"]:
     layers: List[pdk.Layer] = []
@@ -465,6 +473,7 @@ def collect_reference_overlays() -> List["pdk.Layer"]:
         ))
     return layers
 
+
 def render_pydeck(center: Tuple[float, float],
                   gdf_layer: Optional["gpd.GeoDataFrame"],
                   limite_gdf: Optional["gpd.GeoDataFrame"],
@@ -476,7 +485,7 @@ def render_pydeck(center: Tuple[float, float],
                   basemap: str = "Claro (CARTO)"):
     layers: List[pdk.Layer] = []
 
-    # Fundo via TileLayer (sempre) e map_style=None → troca CARTO/ESRI funciona
+    # Fundo via TileLayer (sempre) e map_style=None → sem base do Mapbox
     layers.append(make_tile_basemap(basemap))
     map_style = None
 
@@ -521,10 +530,14 @@ def render_pydeck(center: Tuple[float, float],
         map_style=map_style,
         tooltip={"text": f"{{{tooltip_field}}}"} if tooltip_field else None,
     )
+
+    # FIX CRÍTICO: key dependente do basemap força o Streamlit a remontar o componente
+    # quando o usuário troca de "Claro (CARTO)" para "Satélite (ESRI)" (ou vice-versa).
+    component_key = f"pydeck-map-{basemap}"
     try:
-        st.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT)
+        st.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT, key=component_key)
     except TypeError:
-        st.pydeck_chart(deck, use_container_width=True)
+        st.pydeck_chart(deck, use_container_width=True, key=component_key)
 
     # legendas
     if categorical_legend is not None:
@@ -539,6 +552,7 @@ def render_pydeck(center: Tuple[float, float],
     render_reference_legend_floating()
 
 # ====================== App ======================
+
 def main() -> None:
     inject_css()
     st.markdown(
