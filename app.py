@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-PlanBairros — versão otimizada
+PlanBairros — versão otimizada (consolidada)
 
-Principais melhorias aplicadas:
+Melhorias aplicadas:
 - NÃO limpa cache automaticamente ao trocar seleções (apenas no botão).
-- Recorte dos setores pelo limite selecionado (gpd.clip / bbox fallback).
+- Recorte dos setores pelo limite selecionado (gpd.clip / bbox + sindex fallback rápido).
 - Cache em sessão da serialização GeoJSON por combinação de seleção.
-- Simplificação geométrica mais agressiva (60 m por padrão).
-- Desliga pick/tooltip quando não essencial para reduzir custo de interação.
-- Mantida compatibilidade com os arquivos Parquet existentes.
+- Simplificação geométrica APÓS recorte (menos CPU/memória).
+- Redução de precisão das coordenadas antes da serialização (GeoJSON menor).
+- Guarda-chuva de segurança para payload muito grande (amostra, com aviso).
+- Basemap desativado por padrão para evitar requisições externas (pode reativar).
 """
 from __future__ import annotations
 
@@ -16,17 +17,16 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from unicodedata import normalize as _ud_norm
 import base64, math, re, json
-from decimal import Decimal
 
 import pandas as pd
 import streamlit as st
 
 from shapely.geometry import box
 try:
+    # Shapely 2.x
     from shapely import set_precision as _set_precision
-except Exception:
-    # compat Shapely <2.0
-    from shapely.set_precision import set_precision as _set_precision
+except Exception:  # pragma: no cover — compat Shapely <2.0
+    from shapely.set_precision import set_precision as _set_precision  # type: ignore
 
 # ====================== imports obrigatórios ======================
 
@@ -68,37 +68,37 @@ PLACEHOLDER_LIM = "— selecione o limite —"
 
 LOGO_HEIGHT = 120
 MAP_HEIGHT = 900
-SIMPLIFY_M = 60  # antes 25m — melhor para payload/render
+SIMPLIFY_M = 60   # tolerância padrão (metros em EPSG:3857)
 MAX_FEATURES = 15000  # guarda-chuva de segurança para payload muito grande
 
 
 def inject_css() -> None:
-        st.markdown(
-            f"""
-            <style>
-            @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
-            html, body, .stApp {{ font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }}
-            .main .block-container {{ padding-top: .2rem !important; padding-bottom: .8rem !important; }}
-            .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
-            .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; }}
-            .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:18px 20px; width:100%; }}
-            .pb-title {{ font-size:3.8rem; font-weight:900; line-height:1.05; letter-spacing:.2px }}
-            .pb-subtitle {{ font-size:1.9rem; opacity:.95; margin-top:6px }}
-            .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
-            .legend-card {{ margin-top:12px; background:#fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; padding:10px 12px; }}
-            .legend-title {{ font-weight:800; margin-bottom:6px; }}
-            .legend-row {{ display:flex; align-items:center; gap:8px; margin:4px 0; }}
-            .legend-swatch {{ width:18px; height:18px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); }}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        f"""
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
+        html, body, .stApp {{ font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }}
+        .main .block-container {{ padding-top: .2rem !important; padding-bottom: .8rem !important; }}
+        .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
+        .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; }}
+        .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:18px 20px; width:100%; }}
+        .pb-title {{ font-size:3.8rem; font-weight:900; line-height:1.05; letter-spacing:.2px }}
+        .pb-subtitle {{ font-size:1.9rem; opacity:.95; margin-top:6px }}
+        .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10); box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
+        .legend-card {{ margin-top:12px; background:#fff; border:1px solid rgba(20,64,125,.10); border-radius:12px; padding:10px 12px; }}
+        .legend-title {{ font-weight:800; margin-bottom:6px; }}
+        .legend-row {{ display:flex; align-items:center; gap:8px; margin:4px 0; }}
+        .legend-swatch {{ width:18px; height:18px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ====================== caminhos e util ======================
 try:
     REPO_ROOT = Path(__file__).resolve().parent
-except NameError:
+except NameError:  # streamlit cloud
     REPO_ROOT = Path.cwd()
 
 DATA_DIR = (
@@ -106,8 +106,8 @@ DATA_DIR = (
     if (REPO_ROOT / "limites_administrativos").exists()
     else REPO_ROOT
 )
-GEOM_FILE = DATA_DIR / "IDCenso2023.parquet"  # fid + geometry
-METRICS_FILE = DATA_DIR / "SetoresCensitarios2023.parquet"  # fid + métricas
+GEOM_FILE = DATA_DIR / "IDCenso2023.parquet"                 # fid + geometry
+METRICS_FILE = DATA_DIR / "SetoresCensitarios2023.parquet"   # fid + métricas
 LOGO_PATH = REPO_ROOT / "assets" / "logo_todos.jpg"
 
 
@@ -179,7 +179,7 @@ def _read_gdf_robusto(
 
 
 def _reduce_precision(gdf: "gpd.GeoDataFrame", grid: float = 1e-5) -> "gpd.GeoDataFrame":
-    """Reduz a precisão das coordenadas (grade ~1e-5 ≈ 1 m) para encolher GeoJSON."""
+    """Reduz a precisão das coordenadas (grade ~1e-5 ≈ ~1 m latitude) para encolher GeoJSON."""
     try:
         g2 = gdf.copy()
         g2["geometry"] = g2.geometry.apply(lambda geom: _set_precision(geom, grid))
@@ -192,7 +192,7 @@ def _reduce_precision(gdf: "gpd.GeoDataFrame", grid: float = 1e-5) -> "gpd.GeoDa
 def load_setores_geom() -> Tuple[Optional["gpd.GeoDataFrame"], Optional[str]]:
     if not GEOM_FILE.exists():
         return None, None
-    # lê geometrias, sem simplificar aqui — só depois do recorte
+    # Lê geometrias sem simplificar (vamos simplificar depois do recorte)
     gdf = _read_gdf_robusto(GEOM_FILE, ["fid", "geometry"])
     if gdf is None:
         return None, None
@@ -457,7 +457,7 @@ def render_pydeck(
     var_label: Optional[str],
     draw_setores_outline: bool = False,
 ):
-    layers = []
+    layers: List[Any] = []
 
     # camada cloroplética
     legend_done = False
@@ -481,7 +481,7 @@ def render_pydeck(
             show_categorical_legend("Cluster (perfil urbano)", items)
             legend_done = True
         else:
-            classes, breaks = classify_soft6(gdf["__value__"])  # quebras suaves com a coluna selecionada
+            classes, breaks = classify_soft6(gdf["__value__"])  # quebras suaves
             palette = _sample_gradient(ORANGE_RED_GRAD, 6)
             color_map = {i: _hex_to_rgba(palette[i], 200) for i in range(6)}
             gdf["__rgba__"] = classes.map(
@@ -491,7 +491,6 @@ def render_pydeck(
             legend_done = True
 
         cache_key = f"setores|{var_label}|{len(gdf)}|{gdf.total_bounds.tobytes()}"
-        # antes de serializar, reduz precisão para encolher payload
         gdf_small = _reduce_precision(gdf)
         geojson = geojson_from_gdf(
             gdf_small[["geometry", "__rgba__", "__value__"]],
@@ -547,13 +546,13 @@ def render_pydeck(
             )
             layers.append(sectors_outline)
 
-    # deck.gl — basemap leve: use None para evitar fetch externo se desejar
+    # deck.gl — basemap leve: None evita fetch externo; troque por URL do Carto se quiser
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(
             latitude=center[0], longitude=center[1], zoom=11, bearing=0, pitch=0
         ),
-        map_style=None,  # CARTO/Mapbox opcional; None evita requests externos
+        map_style=None,
         tooltip=(
             {"text": f"{var_label}: {{__value__}}"}
             if var_label and var_label != "Cluster (perfil urbano)"
@@ -642,11 +641,11 @@ def main() -> None:
                 metric = load_metric_column(var)
                 if metric is not None:
                     joined = geoms.merge(metric, on="fid", how="left")
-                    # ativa modo rápido se o universo for grande
+                    # modo rápido baseado em tamanho
                     fast_mode = len(joined) > 30000 or (limite_gdf is not None and len(limite_gdf) > 200)
                     joined = clip_to_limit(joined, limite_gdf, fast=fast_mode)
                     if joined is not None and not joined.empty:
-                        # simplifica APÓS recorte
+                        # simplifica APÓS recorte (em metros / 3857)
                         try:
                             jm = joined.to_crs(3857)
                             tol = 60 if fast_mode else SIMPLIFY_M
@@ -657,9 +656,9 @@ def main() -> None:
                         # guarda-chuva
                         if len(joined) > MAX_FEATURES:
                             st.warning(
-                                f"Seleção muito grande (" \
-                                f"{len(joined):,} polígonos). Exibindo amostra de {MAX_FEATURES:,}. "
-                                "Refine o limite para ver tudo.")
+                                f"Seleção muito grande (" f"{len(joined):,} polígonos). "
+                                f"Exibindo amostra de {MAX_FEATURES:,}. Refine o limite para ver tudo."
+                            )
                             joined = joined.sample(MAX_FEATURES, random_state=0)
                         joined = _reduce_precision(joined)
                         setores_joined = joined
@@ -671,24 +670,8 @@ def main() -> None:
             limite_gdf=limite_gdf,
             var_label=None if var in (PLACEHOLDER_VAR, "Área de influência de bairro") else var,
             draw_setores_outline=draw_setores_outline,
-        )(
-            center=center,
-            setores_joined=setores_joined,
-            limite_gdf=limite_gdf,
-            var_label=None if var in (PLACEHOLDER_VAR, "Área de influência de bairro") else var,
-            draw_setores_outline=draw_setores_outline,
-        )(
-            center=center,
-            setores_joined=setores_joined,
-            limite_gdf=limite_gdf,
-            var_label=None if var in (PLACEHOLDER_VAR, "Área de influência de bairro") else var,
-            draw_setores_outline=draw_setores_outline,
         )
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
