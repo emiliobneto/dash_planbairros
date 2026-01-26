@@ -102,7 +102,12 @@ def inject_css() -> None:
             max-width: 210px;
             font-size: 10px;
         }}
-        </style>
+        /* aumenta largura dos selectboxes (x2) e do dropdown */
+.pb-card .stSelectbox > div[data-baseweb="select"],
+.pb-card .stSelectbox div[role="combobox"] { min-width: 520px; }
+/* painel do popover (BaseWeb) que abre a lista */
+[data-baseweb="popover"] { width: 520px; max-width: 520px; }
+</style>
         """,
         unsafe_allow_html=True,
     )
@@ -539,13 +544,13 @@ def make_tile_basemap(style: str) -> "pdk.Layer":
     """Basemap via TileLayer (raster) com URLs estáveis e CORS-friendly.
 
     * IDs distintos por estilo (evita resíduos ao alternar)
-    * ESRI via server.arcgisonline.com (ordem {z}/{y}/{x}.jpg)
+    * ESRI via services.arcgisonline.com (ordem {z}/{y}/{x}.jpg)
     * Sem render_sub_layers (usa padrão do deck.gl)
     * Força crossOrigin=anonymous via loadOptions
     """
     if style == "Satélite (ESRI)":
         url = (
-            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/"
+            "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/"
             "MapServer/tile/{z}/{y}/{x}.jpg"
         )
         lid = "basemap-esri"
@@ -559,7 +564,7 @@ def make_tile_basemap(style: str) -> "pdk.Layer":
         min_zoom=0,
         max_zoom=19,
         tile_size=256,
-        loadOptions={"image": {"crossOrigin": "anonymous"}},
+        loadOptions={"image": {"crossOrigin": "anonymous"}, "fetch": {"referrerPolicy": "no-referrer"}},
     )
 
 
