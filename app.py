@@ -401,12 +401,43 @@ def clear_legend():
 
 # ====================== Render (pydeck) ======================
 
+# placeholder fixo para podermos "limpar" o mapa antes de redesenhar
+_def_map_placeholder_key = "_pb_map_ph"
+
+def _get_map_placeholder():
+    ph = st.session_state.get(_def_map_placeholder_key)
+    if ph is None:
+        ph = st.empty()
+        st.session_state[_def_map_placeholder_key] = ph
+    return ph
+
 def make_tile_basemap(style: str) -> "pdk.Layer":
-    """Basemap via TileLayer (raster) com id fixo; troca via URL + key do componente.
-    FIX: id único 'basemap' evita sobras e o key força remontagem no Streamlit.
+    """Basemap via TileLayer (raster).
+    FIXES:
+      - Usa ID diferente por estilo (evita qualquer "ghost" do diff de camadas do deck.gl)
+      - URLs corretas para CARTO/ESRI
     """
     if style == "Satélite (ESRI)":
-        # Esquema XYZ do Esri (z/y/x)
+        url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        lid = "basemap-esri"
+    else:
+        url = "https://tilebasemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
+        lid = "basemap-carto"
+    return pdk.Layer(
+        "TileLayer",
+        id=lid,
+        data=url, min_zoom=0, max_zoom=19, tile_size=256,
+        render_sub_layers=DeckFunction(
+            "function (props) { "
+            "  var b = props.tile.bbox; "
+            "  return new deck.BitmapLayer({ "
+            "    id: props.layer.id + '-bitmap', "
+            "    image: props.data, "
+            "    bounds: [b.west, b.south, b.east, b.north] "
+            "  }); "
+            "}"
+        ),
+    )
         url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
     else:
         url = "https://tilebasemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
@@ -531,13 +562,14 @@ def render_pydeck(center: Tuple[float, float],
         tooltip={"text": f"{{{tooltip_field}}}"} if tooltip_field else None,
     )
 
-    # FIX CRÍTICO: key dependente do basemap força o Streamlit a remontar o componente
-    # quando o usuário troca de "Claro (CARTO)" para "Satélite (ESRI)" (ou vice-versa).
-    component_key = f"pydeck-map-{basemap}"
+    # FIX CRÍTICO: limpar o container antes de redesenhar para garantir que
+    # a base anterior (CARTO) não permaneça quando alternamos para ESRI e vice-versa.
+    ph = _get_map_placeholder()
+    ph.empty()
     try:
-        st.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT, key=component_key)
+        ph.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT)
     except TypeError:
-        st.pydeck_chart(deck, use_container_width=True, key=component_key)
+        ph.pydeck_chart(deck, use_container_width=True)
 
     # legendas
     if categorical_legend is not None:
