@@ -227,66 +227,7 @@ def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
         return None
     return _read_gdf_robusto(p, ["geometry"])  # type: ignore[return-value]
 
-# ---------- limpeza + loaders de overlays (REPOSTOS) ----------
-
-def _simplify_overlay_types(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDataFrame":
-    try:
-        gm = gdf.to_crs(3857)
-    except Exception:
-        return gdf
-    try:
-        def _simp(geom):
-            try:
-                gt = geom.geom_type
-            except Exception:
-                return geom
-            try:
-                if gt in ("Polygon", "MultiPolygon"):
-                    return geom.buffer(0).simplify(tol_m, preserve_topology=True)
-                return geom.simplify(tol_m, preserve_topology=False)
-            except Exception:
-                return geom
-        gm["geometry"] = gm.geometry.apply(_simp)
-        return gm.to_crs(4326)
-    except Exception:
-        return gdf
-
-def _read_overlay_any(base: str) -> Optional["gpd.GeoDataFrame"]:
-    candidates = [
-        f"{base}.parquet",
-        f"{base}.geojson",
-        f"{base.replace(' ', '_')}.geojson",
-        f"{base.replace('_', ' ')}.geojson",
-    ]
-    for nm in candidates:
-        p = DATA_DIR / nm
-        if not p.exists():
-            continue
-        try:
-            g = gpd.read_parquet(p) if p.suffix.lower() == ".parquet" else gpd.read_file(p)
-            if g.crs is None:
-                g = g.set_crs(4326)
-            g = _simplify_overlay_types(g.to_crs(4326), SIMPLIFY_M_OVERLAY)
-            return g
-        except Exception:
-            continue
-    return None
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
-    return _read_overlay_any("area_verde")
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_rivers() -> Optional["gpd.GeoDataFrame"]:
-    return _read_overlay_any("rios")
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_metro_lines() -> Optional["gpd.GeoDataFrame"]:
-    return _read_overlay_any("linhas_metro")
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_train_lines() -> Optional["gpd.GeoDataFrame"]:
-    return _read_overlay_any("linhas_trem")
+# ---------- limpeza de geometrias ----------
 
 def _valid_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
     if gdf is None or gdf.empty:
