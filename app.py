@@ -4,16 +4,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from unicodedata import normalize as _ud_norm
-import base64
 import math
 import re
+import json
+import base64
+from decimal import Decimal
 
 import pandas as pd
 import streamlit as st
 
-# ==========================
-# Geo libs (hard deps do app)
-# ==========================
+# Geo libs
 try:
     import geopandas as gpd  # type: ignore
     import folium  # type: ignore
@@ -27,7 +27,7 @@ except Exception:
 
 
 # =============================================================================
-# Página + Identidade PlanBairros
+# Config / identidade
 # =============================================================================
 st.set_page_config(
     page_title="PlanBairros",
@@ -44,19 +44,45 @@ PB_COLORS = {
     "teal": "#6FA097",
     "navy": "#14407D",
 }
-
 PB_NAVY = PB_COLORS["navy"]
-LOGO_HEIGHT = 46
 
-# Jenks (6 classes) – paleta quente (alto contraste)
-JENKS_COLORS_6 = ["#fff7ec", "#fee8c8", "#fdd49e", "#fdbb84", "#fc8d59", "#e34a33"]
+ORANGE_RED_GRAD_6 = ["#fee8c8", "#fdd49e", "#fdbb84", "#fc8d59", "#e34a33", "#b30000"]
+SIMPLIFY_TOL = 0.0006  # simplificação em graus (leve; segura)
 
-# Simplificação (em metros) para acelerar GeoJSON no Folium
-SIMPLIFY_M_FILL = 18     # polígonos preenchidos (coroplético)
-SIMPLIFY_M_LINE = 55     # linhas (limites / contornos)
+# Carto tiles explícito (robusto)
+CARTO_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+CARTO_ATTR = "© OpenStreetMap contributors © CARTO"
+
 
 # =============================================================================
-# CSS (identidade + layout)
+# Paths
+# =============================================================================
+try:
+    REPO_ROOT = Path(__file__).resolve().parent
+except NameError:
+    REPO_ROOT = Path.cwd()
+
+DATA_DIR = REPO_ROOT / "limites_administrativos"
+LOGO_PATH = REPO_ROOT / "assets" / "logo_todos.jpg"
+
+# Logo maior para “encaixar” na faixa azul
+LOGO_HEIGHT = 78
+
+
+def _logo_data_uri() -> str:
+    if LOGO_PATH.exists():
+        suf = LOGO_PATH.suffix.lstrip(".").lower()
+        mime = "jpeg" if suf in ("jpg", "jpeg") else suf
+        b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode("utf-8")
+        return f"data:image/{mime};base64,{b64}"
+    return (
+        "https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/"
+        "logomark/streamlit-mark-color.png"
+    )
+
+
+# =============================================================================
+# CSS (margens laterais ~0,5 cm + logo maior)
 # =============================================================================
 def inject_css() -> None:
     st.markdown(
@@ -66,28 +92,27 @@ def inject_css() -> None:
         html, body, .stApp {{
             font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
         }}
+
+        /* margens laterais ~0,5 cm */
         .main .block-container {{
             padding-top: .15rem !important;
             padding-bottom: .6rem !important;
+            padding-left: 0.5cm !important;
+            padding-right: 0.5cm !important;
+            max-width: none !important;
         }}
 
-        .pb-row {{
-            display:flex; align-items:center; gap:12px; margin-bottom:0;
-        }}
+        .pb-row {{ display:flex; align-items:center; gap:14px; margin-bottom:0; }}
         .pb-logo {{
             height:{LOGO_HEIGHT}px; width:auto; display:block;
-            border-radius: 10px;
+            border-radius:10px;
         }}
         .pb-header {{
             background:{PB_NAVY}; color:#fff; border-radius:14px;
-            padding:14px 15px; width:100%;
+            padding:10px 14px; width:100%;
         }}
-        .pb-title {{
-            font-size:2.2rem; font-weight:900; line-height:1.05; letter-spacing:.2px;
-        }}
-        .pb-subtitle {{
-            font-size:1.05rem; opacity:.95; margin-top:5px;
-        }}
+        .pb-title {{ font-size:2.15rem; font-weight:900; line-height:1.05; letter-spacing:.2px; }}
+        .pb-subtitle {{ font-size:1.05rem; opacity:.95; margin-top:4px; }}
 
         .pb-card {{
             background:#fff;
@@ -97,10 +122,10 @@ def inject_css() -> None:
             padding:10px 11px;
         }}
 
-        /* Tooltips grandes (se você quiser reativar em algum momento) */
+        /* Tooltips grandes */
         .leaflet-tooltip.pb-big-tooltip,
         .leaflet-tooltip.pb-big-tooltip * {{
-            font-size: 22px !important;
+            font-size: 24px !important;
             font-weight: 900 !important;
             color: #111 !important;
             line-height: 1 !important;
@@ -109,17 +134,11 @@ def inject_css() -> None:
             background:#fff !important;
             border: 2px solid #222 !important;
             border-radius: 10px !important;
-            padding: 8px 10px !important;
+            padding: 10px 12px !important;
             white-space: nowrap !important;
             pointer-events: none !important;
-            box-shadow: 0 2px 6px rgba(0,0,0,.2) !important;
+            box-shadow:0 2px 6px rgba(0,0,0,.2) !important;
             z-index: 200000 !important;
-        }}
-
-        /* evita “lateral direita vazia” por container quebrado */
-        .st-emotion-cache-1jicfl2 {{
-            padding-left: .2rem !important;
-            padding-right: .2rem !important;
         }}
         </style>
         """,
@@ -128,45 +147,25 @@ def inject_css() -> None:
 
 
 # =============================================================================
-# Paths (GitHub)
-# =============================================================================
-try:
-    REPO_ROOT = Path(__file__).resolve().parent
-except NameError:
-    REPO_ROOT = Path.cwd()
-
-DATA_DIR = (
-    REPO_ROOT / "limites_administrativos"
-    if (REPO_ROOT / "limites_administrativos").exists()
-    else REPO_ROOT
-)
-
-LOGO_PATH = REPO_ROOT / "assets" / "logo_todos.jpg"
-
-
-def _logo_data_uri() -> str:
-    if LOGO_PATH.exists():
-        b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode("utf-8")
-        ext = LOGO_PATH.suffix.lstrip(".").lower() or "jpg"
-        return f"data:image/{ext};base64,{b64}"
-    # fallback
-    return (
-        "https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/"
-        "logomark/streamlit-mark-color.png"
-    )
-
-
-# =============================================================================
-# Utils
+# Utilidades
 # =============================================================================
 def _slug(s: str) -> str:
     s2 = _ud_norm("NFKD", str(s)).encode("ASCII", "ignore").decode("ASCII")
     return re.sub(r"[^a-z0-9]+", "", s2.strip().lower())
 
 
-def find_col(cols: List[str], *cands: str) -> Optional[str]:
-    """acha coluna por match case-insensitive + normalização"""
-    low = {c.lower(): c for c in cols}
+def _find_file(folder: Path, candidates: List[str], exts: Tuple[str, ...]) -> Optional[Path]:
+    if not folder.exists():
+        return None
+    wanted = {_slug(c) for c in candidates}
+    for fp in folder.iterdir():
+        if fp.is_file() and fp.suffix.lower() in exts and _slug(fp.stem) in wanted:
+            return fp
+    return None
+
+
+def find_col(df_cols, *cands) -> Optional[str]:
+    low = {c.lower(): c for c in df_cols}
     norm = {re.sub(r"[^a-z0-9]", "", k.lower()): v for k, v in low.items()}
     for c in cands:
         if not c:
@@ -179,474 +178,569 @@ def find_col(cols: List[str], *cands: str) -> Optional[str]:
     return None
 
 
-def center_from_bounds(gdf: "gpd.GeoDataFrame") -> Tuple[float, float]:
+def center_from_bounds(gdf) -> tuple[float, float]:
     minx, miny, maxx, maxy = gdf.total_bounds
     return ((miny + maxy) / 2, (minx + maxx) / 2)
 
 
-def _list_files(folder: Path) -> Dict[str, Path]:
-    """map slug(stem) -> path, incluindo parquet/geojson/json"""
-    out: Dict[str, Path] = {}
-    if not folder.exists():
-        return out
-    for fp in folder.iterdir():
-        if not fp.is_file():
-            continue
-        if fp.suffix.lower() not in (".parquet", ".geojson", ".json"):
-            continue
-        out[_slug(fp.stem)] = fp
-    return out
+def _to_float(x):
+    if isinstance(x, Decimal):
+        return float(x)
+    return x
 
 
-def _pick_layer_file(folder: Path, stems: List[str]) -> Optional[Path]:
-    files = _list_files(folder)
-    wanted = {_slug(s) for s in stems}
-    for k in wanted:
-        if k in files:
-            return files[k]
-    return None
+def to_float_series(s: pd.Series) -> pd.Series:
+    if s.dtype == "object":
+        return s.apply(_to_float).astype("Float64")
+    return pd.to_numeric(s, errors="coerce").astype("Float64")
 
 
-def _ensure_4326(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
-    if gdf.crs is None:
-        gdf = gdf.set_crs(4326)
-    return gdf.to_crs(4326)
-
-
-def _drop_empty_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
-    gdf = gdf.copy()
-    gdf = gdf[gdf.geometry.notna()]
-    gdf = gdf[~gdf.geometry.is_empty]
+# =============================================================================
+# Leitura/saneamento (evita GeoJSON quebrado derrubar o st_folium)
+# =============================================================================
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
+def read_gdf_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
+    if gpd is None:
+        return None
+    try:
+        gdf = gpd.read_parquet(path)
+    except Exception:
+        return None
+    try:
+        if gdf.crs is None:
+            gdf = gdf.set_crs(4326)
+        gdf = gdf.to_crs(4326)
+    except Exception:
+        try:
+            gdf = gdf.set_crs(4326, allow_override=True)
+        except Exception:
+            pass
     return gdf
 
 
-def _simplify_m(gdf: "gpd.GeoDataFrame", tol_m: float) -> "gpd.GeoDataFrame":
-    """simplifica em metros (EPSG:3857) e volta pra 4326"""
-    if gdf.empty:
-        return gdf
-    try:
-        g2 = gdf.to_crs(3857).copy()
-        g2["geometry"] = g2.geometry.simplify(tol_m, preserve_topology=True)
-        g2 = g2.to_crs(4326)
-        return _drop_empty_geoms(g2)
-    except Exception:
-        return _drop_empty_geoms(gdf)
-
-
-def _to_int_series(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce").astype("Int64")
-
-
-# =============================================================================
-# Leitura (parquet + geojson) – on-demand + cache
-# =============================================================================
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
-def read_gdf(path: str) -> Optional["gpd.GeoDataFrame"]:
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
+def read_gdf_geojson(path: Path) -> Optional["gpd.GeoDataFrame"]:
     if gpd is None:
         return None
-    p = Path(path)
-    if not p.exists():
-        return None
     try:
-        if p.suffix.lower() == ".parquet":
-            gdf = gpd.read_parquet(p)
-        else:
-            # .geojson / .json
-            gdf = gpd.read_file(p)
-        gdf = _ensure_4326(gdf)
-        gdf = _drop_empty_geoms(gdf)
+        gdf = gpd.read_file(path)
+        if gdf.crs is None:
+            gdf = gdf.set_crs(4326)
+        gdf = gdf.to_crs(4326)
         return gdf
     except Exception:
         return None
 
 
-def load_admin_layer(name: str) -> Optional["gpd.GeoDataFrame"]:
-    stems = {
-        "Distritos": ["Distritos"],
-        "SetoresCensitarios2023": ["SetoresCensitarios2023", "IDCenso2023", "IDCenso"],
-        "ZonasOD2023": ["ZonasOD2023", "ZonasOD2023", "ZonasOD"],
-        "Subprefeitura": ["Subprefeitura", "subprefeitura"],
-        "Isócronas": ["isocronas", "isócronas", "Isocronas"],
-    }.get(name, [name])
-    p = _pick_layer_file(DATA_DIR, stems)
-    return read_gdf(str(p)) if p else None
+def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
+    if gdf is None or gdf.empty:
+        return gdf
+    gdf = gdf.copy()
+    gdf = gdf[gdf.geometry.notna()]
+    try:
+        gdf = gdf[~gdf.geometry.is_empty]
+    except Exception:
+        pass
+    # tenta consertar inválidas (buffer(0))
+    try:
+        inv = ~gdf.geometry.is_valid
+        if inv.any():
+            gdf.loc[inv, "geometry"] = gdf.loc[inv, "geometry"].buffer(0)
+    except Exception:
+        pass
+    gdf = gdf[gdf.geometry.notna()]
+    try:
+        gdf = gdf[~gdf.geometry.is_empty]
+    except Exception:
+        pass
+    return gdf
 
 
-def load_idcenso_geom() -> Optional["gpd.GeoDataFrame"]:
-    p = _pick_layer_file(DATA_DIR, ["IDCenso2023", "IDCenso", "SetoresCensitarios2023"])
-    return read_gdf(str(p)) if p else None
+def _simplify_safe(gdf: "gpd.GeoDataFrame", tol: float) -> "gpd.GeoDataFrame":
+    if gdf is None or gdf.empty:
+        return gdf
+    gdf = gdf.copy()
+    try:
+        gdf["geometry"] = gdf.geometry.simplify(tol, preserve_topology=True)
+    except Exception:
+        pass
+    return _drop_bad_geoms(gdf)
 
 
-def load_setores_metrics_df() -> Optional[pd.DataFrame]:
-    p = _pick_layer_file(DATA_DIR, ["SetoresCensitarios2023", "SetoresCensitarios"])
+def gdf_to_featurecollection(gdf: "gpd.GeoDataFrame", keep_cols: Optional[List[str]] = None) -> Optional[dict]:
+    """
+    Cria FeatureCollection filtrando features sem geometry/coordinates.
+    Isso evita o KeyError do folium/utilities.get_bounds.
+    """
+    if gdf is None or gdf.empty:
+        return None
+    gdf = _drop_bad_geoms(gdf)
+    if gdf.empty:
+        return None
+
+    if keep_cols is not None:
+        cols = [c for c in keep_cols if c in gdf.columns]
+        if "geometry" not in cols:
+            cols.append("geometry")
+        gdf = gdf[cols].copy()
+
+    try:
+        gj = json.loads(gdf.to_json())
+    except Exception:
+        return None
+
+    feats = []
+    for f in gj.get("features", []):
+        geom = f.get("geometry")
+        if not geom:
+            continue
+        if "coordinates" not in geom:
+            continue
+        feats.append(f)
+
+    if not feats:
+        return None
+
+    gj["features"] = feats
+    return gj
+
+
+# =============================================================================
+# Localizadores (nomes do GitHub)
+# =============================================================================
+def p_distritos() -> Optional[Path]:
+    return _find_file(DATA_DIR, ["Distritos"], (".parquet",))
+
+def p_subprefeitura() -> Optional[Path]:
+    return _find_file(DATA_DIR, ["Subprefeitura", "subprefeitura"], (".parquet",))
+
+def p_zonasod() -> Optional[Path]:
+    return _find_file(DATA_DIR, ["ZonasOD2023", "ZonasOD"], (".parquet",))
+
+def p_isocronas() -> Optional[Path]:
+    return _find_file(DATA_DIR, ["isocronas", "isócronas", "Isocronas"], (".parquet",))
+
+def p_idcenso() -> Optional[Path]:
+    return _find_file(DATA_DIR, ["IDCenso2023", "IDCenso"], (".parquet",))
+
+def p_setores_geom_alt() -> Optional[Path]:
+    # se IDCenso não existir, usa SetoresCensitarios2023 como geometria “igual”
+    return _find_file(DATA_DIR, ["SetoresCensitarios2023", "SetoresCensitarios"], (".parquet",))
+
+def p_setores_vars() -> Optional[Path]:
+    return _find_file(DATA_DIR, ["SetoresCensitarios2023", "SetoresCensitarios"], (".parquet",))
+
+def p_area_verde() -> Optional[Path]:
+    return _find_file(DATA_DIR, ["area_verde", "areaverde", "areas_verdes"], (".geojson", ".json"))
+
+def p_rios() -> Optional[Path]:
+    return _find_file(DATA_DIR, ["rios", "rio"], (".geojson", ".json"))
+
+def p_linhas_metro() -> Optional[Path]:
+    return _find_file(DATA_DIR, ["linhas_metro", "metro"], (".geojson", ".json"))
+
+def p_linhas_trem() -> Optional[Path]:
+    return _find_file(DATA_DIR, ["linhas_trem", "trem"], (".geojson", ".json"))
+
+
+# =============================================================================
+# Loaders
+# =============================================================================
+def load_admin(name: str) -> Optional["gpd.GeoDataFrame"]:
+    if name == "Distritos":
+        p = p_distritos()
+    elif name == "Subprefeitura":
+        p = p_subprefeitura()
+    elif name == "ZonasOD2023":
+        p = p_zonasod()
+    elif name == "Isócronas":
+        p = p_isocronas()
+    else:
+        p = None
     if not p:
         return None
+    gdf = read_gdf_parquet(p)
+    if gdf is None:
+        return None
+    return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
+
+
+def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
+    p = p_area_verde()
+    if not p:
+        return None
+    gdf = read_gdf_geojson(p)
+    if gdf is None:
+        return None
+    return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
+
+
+def load_rios() -> Optional["gpd.GeoDataFrame"]:
+    p = p_rios()
+    if not p:
+        return None
+    gdf = read_gdf_geojson(p)
+    if gdf is None:
+        return None
+    return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
+
+
+def load_linhas_metro() -> Optional["gpd.GeoDataFrame"]:
+    p = p_linhas_metro()
+    if not p:
+        return None
+    gdf = read_gdf_geojson(p)
+    if gdf is None:
+        return None
+    return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
+
+
+def load_linhas_trem() -> Optional["gpd.GeoDataFrame"]:
+    p = p_linhas_trem()
+    if not p:
+        return None
+    gdf = read_gdf_geojson(p)
+    if gdf is None:
+        return None
+    return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
+
+
+def load_setores_geom() -> Optional["gpd.GeoDataFrame"]:
+    # preferência: IDCenso2023
+    p = p_idcenso() or p_setores_geom_alt()
+    if not p:
+        return None
+    gdf = read_gdf_parquet(p)
+    if gdf is None:
+        return None
+    return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
+def read_setores_vars_df(path: Path) -> Optional[pd.DataFrame]:
     try:
-        df = pd.read_parquet(p)
-        return df
+        return pd.read_parquet(path)
     except Exception:
         return None
 
 
-def load_isocronas() -> Optional["gpd.GeoDataFrame"]:
-    p = _pick_layer_file(DATA_DIR, ["isocronas", "isócronas", "Isocronas"])
-    return read_gdf(str(p)) if p else None
-
-
-def load_overlay_geo(name: str) -> Optional["gpd.GeoDataFrame"]:
-    stems = {
-        "Áreas verdes": ["area_verde", "areas_verdes", "areasverdes", "areaverde"],
-        "Rios": ["rios", "rio"],
-        "Trem": ["linhas_trem", "linhasdetrem", "trem", "linha_trem"],
-        "Metrô": ["linhas_metro", "linhasdemetro", "metro", "linha_metro"],
-    }.get(name, [name])
-    p = _pick_layer_file(DATA_DIR, stems)
-    return read_gdf(str(p)) if p else None
-
-
+# =============================================================================
+# JOIN por fid (CORRIGIDO - elimina o KeyError do merge)
+# =============================================================================
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
-def build_setores_joined() -> Optional["gpd.GeoDataFrame"]:
+def build_setores_joined_by_fid() -> Optional["gpd.GeoDataFrame"]:
     """
-    Geometria: IDCenso2023 (ou SetoresCensitarios2023 se for igual)
-    Métricas: SetoresCensitarios2023
-    Join: fid (normalizado)
+    Geometria: IDCenso2023.parquet (ou SetoresCensitarios2023 se IDCenso não existir)
+    Variáveis: SetoresCensitarios2023.parquet
+    Join: fid
     """
     if gpd is None:
         return None
 
-    geom = load_idcenso_geom()
-    dfm = load_setores_metrics_df()
-    if geom is None or dfm is None:
+    g_id = load_setores_geom()
+    p_vars = p_setores_vars()
+    if g_id is None or g_id.empty or not p_vars:
         return None
 
-    fid_g = find_col(list(geom.columns), "fid", "FID")
-    if not fid_g:
+    df_vars = read_setores_vars_df(p_vars)
+    if df_vars is None or df_vars.empty:
         return None
 
-    fid_m = find_col(list(dfm.columns), "fid", "FID")
-    if not fid_m:
+    fid_geom = find_col(g_id.columns, "fid", "FID")
+    fid_vars = find_col(df_vars.columns, "fid", "FID")
+
+    if not fid_geom or not fid_vars:
         return None
 
-    g = geom[[fid_g, "geometry"]].copy()
-    g["fid"] = _to_int_series(g[fid_g])
-    g = g.drop(columns=[fid_g], errors="ignore")
+    g = g_id.copy()
+    v = df_vars.copy()
 
-    m = dfm.copy()
-    m["fid"] = _to_int_series(m[fid_m])
-    m = m.drop(columns=[fid_m], errors="ignore")
+    # normaliza fid -> Int64
+    g["_fid_join_"] = pd.to_numeric(g[fid_geom].apply(_to_float), errors="coerce").astype("Int64")
+    v["_fid_join_"] = pd.to_numeric(v[fid_vars].apply(_to_float), errors="coerce").astype("Int64")
 
-    # remove possíveis colunas geometry em dfm para não confundir
-    for c in list(m.columns):
+    # remove linhas sem fid e dup do lado direito
+    v = v.dropna(subset=["_fid_join_"]).drop_duplicates(subset=["_fid_join_"]).copy()
+
+    # remove geometry do df_vars (se existir)
+    for c in list(v.columns):
         if c.lower() in ("geometry", "geom"):
-            m = m.drop(columns=[c], errors="ignore")
+            v = v.drop(columns=[c], errors="ignore")
 
-    merged = g.merge(m, on="fid", how="left")
-    merged = gpd.GeoDataFrame(merged, geometry="geometry", crs=geom.crs)
-    merged = _ensure_4326(merged)
-    merged = _drop_empty_geoms(merged)
-    return merged
+    # garante que a coluna final se chama fid
+    g = g.drop(columns=[fid_geom], errors="ignore")
+    v = v.drop(columns=[fid_vars], errors="ignore")
+    g = g.rename(columns={"_fid_join_": "fid"})
+    v = v.rename(columns={"_fid_join_": "fid"})
+
+    # >>> aqui estava o bug comum: quando a coluna já era 'fid', o código anterior podia dropar e sumir.
+    # agora 'fid' sempre existe em g e v.
+
+    joined = g.merge(v, on="fid", how="left")
+    joined = gpd.GeoDataFrame(joined, geometry="geometry", crs=g_id.crs)
+    return _drop_bad_geoms(joined)
 
 
 # =============================================================================
-# Folium – Base Carto + Panes
+# Jenks (6 classes) - implementação leve (sem dependências)
 # =============================================================================
-def make_carto_map(center: Tuple[float, float], zoom: int = 11) -> "folium.Map":
+def jenks_breaks(values: List[float], k: int) -> Optional[List[float]]:
+    vals = [float(x) for x in values if x is not None and not (isinstance(x, float) and math.isnan(x))]
+    vals = sorted(vals)
+    n = len(vals)
+    if n == 0:
+        return None
+
+    uniq = sorted(set(vals))
+    if len(uniq) <= k:
+        br = [uniq[0]] + uniq[1:] + [uniq[-1]]
+        while len(br) < k + 1:
+            br.insert(-1, br[-2])
+        return br[: k + 1]
+
+    mat1 = [[0] * (k + 1) for _ in range(n + 1)]
+    mat2 = [[0] * (k + 1) for _ in range(n + 1)]
+    for i in range(1, k + 1):
+        mat1[1][i] = 1
+        mat2[1][i] = 0
+        for j in range(2, n + 1):
+            mat2[j][i] = float("inf")
+
+    v = 0.0
+    for l in range(2, n + 1):
+        s1 = s2 = w = 0.0
+        for m in range(1, l + 1):
+            i3 = l - m + 1
+            val = vals[i3 - 1]
+            s2 += val * val
+            s1 += val
+            w += 1
+            v = s2 - (s1 * s1) / w
+            i4 = i3 - 1
+            if i4 != 0:
+                for j in range(2, k + 1):
+                    if mat2[l][j] >= (v + mat2[i4][j - 1]):
+                        mat1[l][j] = i3
+                        mat2[l][j] = v + mat2[i4][j - 1]
+        mat1[l][1] = 1
+        mat2[l][1] = v
+
+    breaks = [0.0] * (k + 1)
+    breaks[k] = vals[-1]
+    count = k
+    idx = n
+    while count >= 2:
+        idxt = int(mat1[idx][count]) - 2
+        breaks[count - 1] = vals[idxt]
+        idx = int(mat1[idx][count]) - 1
+        count -= 1
+    breaks[0] = vals[0]
+    return breaks
+
+
+def jenks_class(v: float, breaks: List[float]) -> int:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return -1
+    for i in range(1, len(breaks)):
+        if v <= breaks[i]:
+            return i - 1
+    return len(breaks) - 2
+
+
+# =============================================================================
+# Folium – Carto sempre visível + bounds garantido
+# =============================================================================
+def make_carto_map(center=(-23.55, -46.63), zoom=11):
+    if folium is None:
+        return None
+
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True, prefer_canvas=True)
 
-    # Basemap fixo – CartoDB Positron (leve)
     folium.TileLayer(
-        tiles="CartoDB positron",
+        tiles=CARTO_LIGHT_URL,
+        attr=CARTO_ATTR,
         name="Carto Positron",
         overlay=False,
         control=False,
+        subdomains="abcd",
+        max_zoom=20,
     ).add_to(m)
 
-    # Panes (ordem importa)
+    # marcador invisível => garante bounds válido no st_folium
+    folium.Marker(location=center, icon=folium.DivIcon(html="")).add_to(m)
+
+    # panes (ordem)
     try:
-        folium.map.CustomPane("admin", z_index=520).add_to(m)
-        folium.map.CustomPane("setores_fill", z_index=560).add_to(m)
-        folium.map.CustomPane("setores_line", z_index=610).add_to(m)
-        folium.map.CustomPane("rios", z_index=640).add_to(m)
-        folium.map.CustomPane("rail", z_index=650).add_to(m)
-        folium.map.CustomPane("green", z_index=680).add_to(m)  # acima de tudo
+        folium.map.CustomPane("admin", z_index=610).add_to(m)
+        folium.map.CustomPane("setores_line", z_index=615).add_to(m)
+        folium.map.CustomPane("choropleth", z_index=620).add_to(m)
+        folium.map.CustomPane("hydro", z_index=630).add_to(m)
+        folium.map.CustomPane("rails", z_index=640).add_to(m)
+        folium.map.CustomPane("green", z_index=650).add_to(m)
     except Exception:
         pass
 
     return m
 
 
-def add_outline_lines(m: "folium.Map", gdf: "gpd.GeoDataFrame", name: str, color: str, weight: float, pane: str):
-    if gdf is None or gdf.empty:
+def add_admin_outline(m, gdf, name: str, color="#000000", weight=1.2, pane="admin", show=True):
+    if folium is None or gdf is None or gdf.empty:
         return
 
-    gg = gdf.copy()
-    # boundary para polígonos; linhas ficam como estão
+    line = gdf[["geometry"]].copy()
     try:
-        geom_types = set(gg.geometry.geom_type.unique())
+        line["geometry"] = line.geometry.boundary
     except Exception:
-        geom_types = set()
+        return
 
-    if any(t in ("Polygon", "MultiPolygon") for t in geom_types):
-        gg["geometry"] = gg.geometry.boundary
+    line = _simplify_safe(_drop_bad_geoms(line), SIMPLIFY_TOL)
+    gj = gdf_to_featurecollection(line, keep_cols=["geometry"])
+    if not gj:
+        return
 
-    gg = _drop_empty_geoms(gg)
-    gg = _simplify_m(gg, SIMPLIFY_M_LINE)
-
-    # IMPORTANTÍSSIMO: não mandar feature com geometry None (evita KeyError no get_bounds)
-    gj = gg[["geometry"]].to_json()
-
+    fg = folium.FeatureGroup(name=name, show=show)
     folium.GeoJson(
         data=gj,
-        name=name,
         pane=pane,
-        style_function=lambda f: {"fillOpacity": 0, "color": color, "weight": weight, "opacity": 1.0},
-    ).add_to(m)
+        style_function=lambda f: {"fillOpacity": 0, "color": color, "weight": weight},
+    ).add_to(fg)
+    fg.add_to(m)
 
 
-def add_green_areas(m: "folium.Map", gdf: "gpd.GeoDataFrame"):
-    if gdf is None or gdf.empty:
+def add_green(m, gdf, show=True):
+    if folium is None or gdf is None or gdf.empty:
         return
-    gg = gdf.copy()
-    gg = _drop_empty_geoms(gg)
-    gg = _simplify_m(gg, 12)  # pode ser mais agressivo; é só overlay
-    gj = gg[["geometry"]].to_json()
 
+    poly = _simplify_safe(_drop_bad_geoms(gdf[["geometry"]].copy()), SIMPLIFY_TOL)
+    gj = gdf_to_featurecollection(poly, keep_cols=["geometry"])
+    if not gj:
+        return
+
+    fg = folium.FeatureGroup(name="Áreas verdes", show=show)
     folium.GeoJson(
         data=gj,
-        name="Áreas verdes",
         pane="green",
-        style_function=lambda f: {"fillOpacity": 1.0, "color": "#1b7f3a", "weight": 0.6, "opacity": 1.0},
-    ).add_to(m)
-
-
-def add_rivers(m: "folium.Map", gdf: "gpd.GeoDataFrame"):
-    if gdf is None or gdf.empty:
-        return
-    gg = gdf.copy()
-    gg = _drop_empty_geoms(gg)
-    gg = _simplify_m(gg, 18)
-    gj = gg[["geometry"]].to_json()
-
-    folium.GeoJson(
-        data=gj,
-        name="Rios",
-        pane="rios",
-        style_function=lambda f: {"fillOpacity": 0, "color": "#1f78b4", "weight": 1.3, "opacity": 1.0},
-    ).add_to(m)
-
-
-def add_rail_lines(m: "folium.Map", gdf: "gpd.GeoDataFrame", label: str):
-    if gdf is None or gdf.empty:
-        return
-    gg = gdf.copy()
-    gg = _drop_empty_geoms(gg)
-    gg = _simplify_m(gg, 18)
-    gj = gg[["geometry"]].to_json()
-
-    folium.GeoJson(
-        data=gj,
-        name=label,
-        pane="rail",
-        style_function=lambda f: {"fillOpacity": 0, "color": "#111111", "weight": 1.6, "opacity": 1.0},
-    ).add_to(m)
-
-
-# =============================================================================
-# Coroplético (Jenks 6 classes) – mais leve + cache
-# =============================================================================
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=24)
-def jenks_classes(values: List[float], k: int = 6) -> List[float]:
-    """
-    Retorna os breaks (bins) do Jenks com k classes.
-    Usa mapclassify se disponível.
-    """
-    v = pd.Series(values).dropna().astype(float)
-    if v.empty:
-        return []
-    try:
-        import mapclassify as mc  # type: ignore
-        nb = mc.NaturalBreaks(v.values, k=k)
-        return list(nb.bins)  # tamanho k
-    except Exception:
-        # fallback quantis
-        qs = [v.quantile(i / k) for i in range(1, k + 1)]
-        return [float(x) for x in qs]
-
-
-def _bin_index(x: float, bins: List[float]) -> int:
-    # bins são os limites superiores de cada classe
-    for i, b in enumerate(bins):
-        if x <= b:
-            return i
-    return max(0, len(bins) - 1)
-
-
-def paint_choropleth_setores(
-    m: "folium.Map",
-    setores: "gpd.GeoDataFrame",
-    value_col: str,
-    title: str,
-):
-    if setores is None or setores.empty:
-        return
-
-    s = pd.to_numeric(setores[value_col], errors="coerce").astype(float)
-    bins = jenks_classes(s.tolist(), k=6)
-    if not bins:
-        st.info(f"Sem valores válidos para '{title}'.")
-        return
-
-    # GeoJSON mínimo: geometry + class + value
-    g = setores[["geometry"]].copy()
-    g = _drop_empty_geoms(g)
-
-    # simplifica preenchimento (ganho real)
-    g = _simplify_m(g, SIMPLIFY_M_FILL)
-
-    # reindex para alinhar com s (garante mesmo comprimento)
-    s2 = pd.to_numeric(setores.loc[g.index, value_col], errors="coerce").astype(float)
-
-    g["__v__"] = s2
-    g["__cls__"] = s2.apply(lambda x: _bin_index(float(x), bins) if pd.notna(x) else None)
-
-    # remove nulos para reduzir payload
-    g2 = g.dropna(subset=["__v__", "__cls__"]).copy()
-    if g2.empty:
-        st.info(f"Sem valores válidos para '{title}' após limpeza.")
-        return
-
-    def style_fn(feat):
-        cls = feat["properties"].get("__cls__")
-        try:
-            i = int(cls)
-        except Exception:
-            i = 0
-        i = max(0, min(5, i))
-        return {
-            "fillOpacity": 0.80,
+        style_function=lambda f: {
+            "color": PB_COLORS["verde"],
             "weight": 0.0,
-            "color": "#00000000",
-            "fillColor": JENKS_COLORS_6[i],
-        }
-
-    folium.GeoJson(
-        data=g2[["geometry", "__v__", "__cls__"]].to_json(),
-        name=title,
-        pane="setores_fill",
-        style_function=style_fn,
-        # tooltip opcional (pode pesar em 27k features; deixe simples)
-        tooltip=folium.features.GeoJsonTooltip(
-            fields=["__v__"],
-            aliases=[f"{title}: "],
-            localize=True,
-            sticky=False,
-            labels=False,
-            class_name="pb-big-tooltip",
-        ),
-    ).add_to(m)
+            "fillOpacity": 1.0,
+            "fillColor": PB_COLORS["verde"],
+        },
+    ).add_to(fg)
+    fg.add_to(m)
 
 
-def paint_cluster_setores(m: "folium.Map", setores: "gpd.GeoDataFrame", cluster_col: str):
-    if setores is None or setores.empty:
+def add_lines(m, gdf, name: str, color: str, weight: float, pane: str, show=True):
+    if folium is None or gdf is None or gdf.empty:
         return
 
-    color_map = {0: "#bf7db2", 1: "#f7bd6a", 2: "#cf651f", 3: "#ede4e6", 4: "#793393"}
-    default_color = "#c8c8c8"
+    ln = _simplify_safe(_drop_bad_geoms(gdf[["geometry"]].copy()), SIMPLIFY_TOL)
+    gj = gdf_to_featurecollection(ln, keep_cols=["geometry"])
+    if not gj:
+        return
 
-    g = setores[["geometry"]].copy()
-    g = _drop_empty_geoms(g)
-    g = _simplify_m(g, SIMPLIFY_M_FILL)
+    fg = folium.FeatureGroup(name=name, show=show)
+    folium.GeoJson(
+        data=gj,
+        pane=pane,
+        style_function=lambda f: {"color": color, "weight": weight, "fillOpacity": 0},
+    ).add_to(fg)
+    fg.add_to(m)
 
-    c = pd.to_numeric(setores.loc[g.index, cluster_col], errors="coerce").astype("Int64")
-    g["__c__"] = c
+
+def paint_setores_jenks(m, setores: "gpd.GeoDataFrame", value_col: str, label: str):
+    if folium is None or setores is None or setores.empty:
+        return
+
+    s = to_float_series(setores[value_col])
+    vals = s.dropna().astype(float).tolist()
+    br = jenks_breaks(vals, 6)
+    if not br:
+        return
+
+    df = setores[["geometry"]].copy()
+    df["__v__"] = s
+    df = _simplify_safe(_drop_bad_geoms(df), SIMPLIFY_TOL)
+    if df.empty:
+        return
+
+    df["__k__"] = df["__v__"].apply(lambda x: jenks_class(float(x), br) if pd.notna(x) else -1).astype("Int64")
+    gj = gdf_to_featurecollection(df, keep_cols=["geometry", "__k__", "__v__"])
+    if not gj:
+        return
 
     def style_fn(feat):
-        v = feat["properties"].get("__c__")
+        k = feat["properties"].get("__k__", -1)
         try:
-            k = int(v)
+            k = int(k)
         except Exception:
             k = -1
-        col = color_map.get(k, default_color)
-        return {"fillOpacity": 0.75, "weight": 0.0, "color": "#00000000", "fillColor": col}
+        fill = "#c8c8c8" if k < 0 else ORANGE_RED_GRAD_6[min(k, len(ORANGE_RED_GRAD_6) - 1)]
+        return {"fillOpacity": 0.82, "weight": 0.0, "color": "#00000000", "fillColor": fill}
 
+    fg = folium.FeatureGroup(name=label, show=True)
     folium.GeoJson(
-        data=g[["geometry", "__c__"]].to_json(),
-        name="Cluster",
-        pane="setores_fill",
+        data=gj,
+        pane="choropleth",
         style_function=style_fn,
-    ).add_to(m)
+        tooltip=folium.features.GeoJsonTooltip(
+            fields=["__v__"], aliases=[label + ": "], sticky=True, labels=False, class_name="pb-big-tooltip"
+        ),
+    ).add_to(fg)
+    fg.add_to(m)
 
 
 # =============================================================================
-# UI
+# UI – limites como checkboxes (tudo desmarcado)
 # =============================================================================
 def left_controls() -> Dict[str, Any]:
-    st.markdown("### Variáveis (Setores Censitários)")
+    st.markdown("### Variáveis (Setores Censitários 2023)")
     var = st.selectbox(
         "Selecione a variável",
         [
-            "",  # começa vazio
+            "— Selecione a variável —",
             "Populacao",
             "densidade_demografica",
             "Diferenca_elevacao",
             "elevacao",
-            "Isocrona",   # <-- pedida por você (coluna existe no seu print)
+            "raio_maximo_caminhada",
+            "Isocrona",
             "Cluster",
         ],
         index=0,
         key="pb_var",
-        help="Começa vazio (só Carto). Variáveis são pintadas em Setores (join por fid).",
+        help="O basemap Carto aparece sempre. O coroplético só carrega após escolher a variável.",
     )
 
-    st.markdown("### Limites Administrativos")
-    limite = st.selectbox(
-        "Selecione o limite",
-        ["Distritos", "ZonasOD2023", "Subprefeitura", "Isócronas"],
-        index=0,
-        key="pb_limite",
-        help="Mostra contorno do limite selecionado + linhas dos setores como referência.",
-    )
+    st.markdown("### Limites Administrativos (linhas)")
+    show_setores_line = st.checkbox("Setores Censitários 2023 (linhas)", value=False)
+    show_distritos = st.checkbox("Distritos (linha)", value=False)
+    show_zonasod = st.checkbox("ZonasOD2023 (linha)", value=False)
+    show_subpref = st.checkbox("Subprefeitura (linha)", value=False)
+    show_isocronas = st.checkbox("Isócronas (linha)", value=False)
 
-    st.markdown("### Camadas de referência")
-    show_green = st.checkbox("Áreas verdes", value=True, key="pb_green")
-    show_rivers = st.checkbox("Rios", value=True, key="pb_rivers")
-    show_trem = st.checkbox("Linhas de trem", value=True, key="pb_trem")
-    show_metro = st.checkbox("Linhas de metrô", value=True, key="pb_metro")
+    st.markdown("### Referências (sobre o Carto)")
+    show_green = st.checkbox("Áreas verdes (fill 100%)", value=False)
+    show_rios = st.checkbox("Rios (azul)", value=False)
+    show_metro = st.checkbox("Linhas de metrô (preto)", value=False)
+    show_trem = st.checkbox("Linhas de trem (preto)", value=False)
 
-    st.caption("Se algo mudar no GitHub, limpe cache para recarregar.")
     if st.button("🧹 Limpar cache de dados", type="secondary"):
         st.cache_data.clear()
-        st.success("Cache limpo. Selecione novamente camada/variável.")
+        st.success("Cache limpo.")
 
     return {
         "variavel": var,
-        "limite": limite,
-        "green": show_green,
-        "rivers": show_rivers,
-        "trem": show_trem,
-        "metro": show_metro,
+        "show_setores_line": show_setores_line,
+        "show_distritos": show_distritos,
+        "show_zonasod": show_zonasod,
+        "show_subpref": show_subpref,
+        "show_isocronas": show_isocronas,
+        "show_green": show_green,
+        "show_rios": show_rios,
+        "show_metro": show_metro,
+        "show_trem": show_trem,
     }
-
-
-# =============================================================================
-# Header (logo no topo)
-# =============================================================================
-def render_header():
-    logo_uri = _logo_data_uri()
-    st.markdown(
-        f"""
-        <div class="pb-header">
-          <div class="pb-row">
-            <img class="pb-logo" src="{logo_uri}" />
-            <div style="display:flex; flex-direction:column;">
-              <div class="pb-title">PlanBairros</div>
-              <div class="pb-subtitle">Plataforma de visualização e planejamento em escala de bairro</div>
-            </div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 # =============================================================================
@@ -658,7 +752,23 @@ def main() -> None:
         return
 
     inject_css()
-    render_header()
+
+    # Header
+    logo_uri = _logo_data_uri()
+    st.markdown(
+        f"""
+        <div class="pb-header">
+          <div class="pb-row">
+            <img src="{logo_uri}" class="pb-logo" />
+            <div style="display:flex;flex-direction:column">
+              <div class="pb-title">PlanBairros</div>
+              <div class="pb-subtitle">Plataforma de visualização e planejamento em escala de bairro</div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     left, map_col = st.columns([1, 4], gap="large")
     with left:
@@ -667,97 +777,63 @@ def main() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
     with map_col:
-        # 1) Centro base – sempre renderiza Carto (mesmo vazio)
+        # Carto sempre visível (centro SP)
         center = (-23.55, -46.63)
-
-        # 2) Carrega limite (contorno)
-        limite_gdf = load_admin_layer(ui["limite"])
-        if limite_gdf is not None and not limite_gdf.empty:
-            center = center_from_bounds(limite_gdf)
-
         fmap = make_carto_map(center=center, zoom=11)
+        if fmap is None:
+            st.error("Falha ao inicializar o mapa Folium.")
+            return
 
-        # 3) Sempre desenha: contorno do limite selecionado
-        if limite_gdf is not None and not limite_gdf.empty:
-            add_outline_lines(
-                fmap,
-                limite_gdf,
-                name=f"{ui['limite']} (contorno)",
-                color="#000000",
-                weight=1.2,
-                pane="admin",
-            )
-        else:
-            st.info("Limite selecionado não encontrado. Verifique nomes dos arquivos em limites_administrativos/")
+        # Limites (só se o usuário marcar)
+        if ui["show_distritos"]:
+            add_admin_outline(fmap, load_admin("Distritos"), "Distritos", color="#000000", weight=1.2, pane="admin", show=True)
+        if ui["show_subpref"]:
+            add_admin_outline(fmap, load_admin("Subprefeitura"), "Subprefeitura", color="#000000", weight=1.0, pane="admin", show=True)
+        if ui["show_zonasod"]:
+            add_admin_outline(fmap, load_admin("ZonasOD2023"), "ZonasOD2023", color="#000000", weight=0.9, pane="admin", show=True)
+        if ui["show_isocronas"]:
+            add_admin_outline(fmap, load_admin("Isócronas"), "Isócronas", color="#000000", weight=0.9, pane="admin", show=True)
 
-        # 4) Alteração #1 solicitada: linhas dos setores (IDCenso/Setores) como referência nos limites
-        setores_lines = load_idcenso_geom()
-        if setores_lines is not None and not setores_lines.empty:
-            add_outline_lines(
-                fmap,
-                setores_lines,
-                name="Setores (linhas)",
-                color="#444444",
-                weight=0.6,
-                pane="setores_line",
-            )
+        # Setores (linhas) como “limite” adicional
+        if ui["show_setores_line"]:
+            gset = load_setores_geom()
+            if gset is not None and not gset.empty:
+                add_admin_outline(fmap, gset, "Setores Censitários 2023", color="#444444", weight=0.6, pane="setores_line", show=True)
 
-        # 5) Overlays de referência (agora lendo .geojson também)
-        if ui["green"]:
-            g = load_overlay_geo("Áreas verdes")
-            if g is not None and not g.empty:
-                add_green_areas(fmap, g)
+        # Overlays (referências)
+        if ui["show_rios"]:
+            add_lines(fmap, load_rios(), "Rios", color="#2b7bff", weight=2.0, pane="hydro", show=True)
+        if ui["show_metro"]:
+            add_lines(fmap, load_linhas_metro(), "Linhas de metrô", color="#000000", weight=2.6, pane="rails", show=True)
+        if ui["show_trem"]:
+            add_lines(fmap, load_linhas_trem(), "Linhas de trem", color="#000000", weight=2.6, pane="rails", show=True)
+        if ui["show_green"]:
+            add_green(fmap, load_green_areas(), show=True)
 
-        if ui["rivers"]:
-            r = load_overlay_geo("Rios")
-            if r is not None and not r.empty:
-                add_rivers(fmap, r)
-
-        if ui["trem"]:
-            t = load_overlay_geo("Trem")
-            if t is not None and not t.empty:
-                add_rail_lines(fmap, t, "Linhas de trem")
-
-        if ui["metro"]:
-            mt = load_overlay_geo("Metrô")
-            if mt is not None and not mt.empty:
-                add_rail_lines(fmap, mt, "Linhas de metrô")
-
-        # 6) Coroplético (só quando variável selecionada)
-        var = ui["variavel"]
-
-        if var:
-            setores = build_setores_joined()
-            if setores is None or setores.empty:
-                st.warning(
-                    "Não consegui montar Setores (join por fid). "
-                    "Cheque se IDCenso2023.parquet e SetoresCensitarios2023.parquet existem e possuem 'fid'."
-                )
+        # Coroplético: só monta join quando selecionar variável
+        if ui["variavel"] != "— Selecione a variável —":
+            setores_join = build_setores_joined_by_fid()
+            if setores_join is None or setores_join.empty:
+                st.warning("Join por 'fid' não foi montado (geometria + SetoresCensitarios2023).")
             else:
-                # nomes conforme seu print: Populacao / Diferenca_elevacao / Isocrona / Cluster / elevacao / densidade_demografica
-                col = find_col(list(setores.columns), var, var.lower(), var.upper())
-                if not col:
-                    # tenta mapear var "densidade_demografica" caso esteja truncada/variante
-                    if var == "densidade_demografica":
-                        col = find_col(list(setores.columns), "densidade_demografica", "Densidade_demografica", "nsidade_demografica")
-                if not col:
-                    st.info(f"Coluna '{var}' não encontrada após join. Verifique grafia no parquet.")
+                # tentativa direta + fallback por nomes comuns
+                wanted = ui["variavel"]
+                col = (
+                    find_col(setores_join.columns, wanted, wanted.lower(), wanted.upper())
+                    or (find_col(setores_join.columns, "densidade_demografica", "nsidade_demograf") if wanted == "densidade_demografica" else None)
+                )
+                if col:
+                    paint_setores_jenks(fmap, setores_join, col, ui["variavel"])
                 else:
-                    if var == "Cluster":
-                        paint_cluster_setores(fmap, setores, col)
-                    else:
-                        paint_choropleth_setores(fmap, setores, col, var)
+                    st.info(f"Coluna '{ui['variavel']}' não encontrada após o join por fid.")
 
-        # 7) Render
-        # Observação: o KeyError do get_bounds (st_folium) acontece quando um GeoJSON tem feature sem coordinates.
-        # Nós já filtramos geometrias vazias/nulas e simplificamos antes de to_json.
-        st_folium(
-            fmap,
-            height=790,
-            use_container_width=True,
-            key="pb_map",
-            returned_objects=[],
-        )
+        # Controle de camadas (inferior direita)
+        try:
+            folium.LayerControl(position="bottomright", collapsed=False).add_to(fmap)
+        except Exception:
+            pass
+
+        st_folium(fmap, height=790, use_container_width=True, key="map_view")
 
 
 if __name__ == "__main__":
