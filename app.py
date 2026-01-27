@@ -27,7 +27,7 @@ except Exception:
 
 
 # =============================================================================
-# Config da página e identidade
+# Config / identidade
 # =============================================================================
 st.set_page_config(
     page_title="PlanBairros",
@@ -46,14 +46,16 @@ PB_COLORS = {
 }
 PB_NAVY = PB_COLORS["navy"]
 
-# 6 classes (Jenks)
 ORANGE_RED_GRAD = ["#fee8c8", "#fdd49e", "#fdbb84", "#fc8d59", "#e34a33", "#b30000"]
-
 SIMPLIFY_TOL = 0.0006
+
+# Carto tiles explícito (mais robusto)
+CARTO_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+CARTO_ATTR = "© OpenStreetMap contributors © CARTO"
 
 
 # =============================================================================
-# Paths (GitHub) e logo
+# Paths
 # =============================================================================
 try:
     REPO_ROOT = Path(__file__).resolve().parent
@@ -92,36 +94,15 @@ def inject_css() -> None:
             padding-top: .15rem !important;
             padding-bottom: .6rem !important;
         }}
-        .pb-row {{
-            display:flex;
-            align-items:center;
-            gap:12px;
-            margin-bottom:0;
-        }}
-        .pb-logo {{
-            height:{LOGO_HEIGHT}px;
-            width:auto;
-            display:block;
-            border-radius: 8px;
-        }}
+        .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
+        .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; border-radius:8px; }}
         .pb-header {{
-            background:{PB_NAVY};
-            color:#fff;
-            border-radius:14px;
-            padding:14px 15px;
-            width:100%;
+            background:{PB_NAVY}; color:#fff; border-radius:14px;
+            padding:14px 15px; width:100%;
         }}
-        .pb-title {{
-            font-size:2.25rem;
-            font-weight:900;
-            line-height:1.05;
-            letter-spacing:.2px;
-        }}
-        .pb-subtitle {{
-            font-size:1.05rem;
-            opacity:.95;
-            margin-top:5px;
-        }}
+        .pb-title {{ font-size:2.25rem; font-weight:900; line-height:1.05; letter-spacing:.2px; }}
+        .pb-subtitle {{ font-size:1.05rem; opacity:.95; margin-top:5px; }}
+
         .pb-card {{
             background:#fff;
             border:1px solid rgba(20,64,125,.10);
@@ -204,7 +185,7 @@ def to_float_series(s: pd.Series) -> pd.Series:
 
 
 # =============================================================================
-# Leitura/saneamento geoespacial (evita crash no get_bounds)
+# Leitura/saneamento (evita GeoJSON quebrado derrubar o st_folium)
 # =============================================================================
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
 def read_gdf_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
@@ -309,48 +290,42 @@ def gdf_to_featurecollection(gdf: "gpd.GeoDataFrame", keep_cols: Optional[List[s
 
 
 # =============================================================================
-# Carregadores
+# Localizadores (nomes do GitHub)
 # =============================================================================
 def p_distritos() -> Optional[Path]:
     return _find_file(DATA_DIR, ["Distritos"], (".parquet",))
 
-
 def p_subprefeitura() -> Optional[Path]:
     return _find_file(DATA_DIR, ["Subprefeitura", "subprefeitura"], (".parquet",))
-
 
 def p_zonasod() -> Optional[Path]:
     return _find_file(DATA_DIR, ["ZonasOD2023", "ZonasOD"], (".parquet",))
 
-
 def p_isocronas() -> Optional[Path]:
     return _find_file(DATA_DIR, ["isocronas", "isócronas"], (".parquet",))
-
 
 def p_idcenso() -> Optional[Path]:
     return _find_file(DATA_DIR, ["IDCenso2023", "IDCenso"], (".parquet",))
 
-
 def p_setores_vars() -> Optional[Path]:
     return _find_file(DATA_DIR, ["SetoresCensitarios2023", "SetoresCensitarios"], (".parquet",))
-
 
 def p_area_verde() -> Optional[Path]:
     return _find_file(DATA_DIR, ["area_verde"], (".geojson",))
 
-
 def p_rios() -> Optional[Path]:
     return _find_file(DATA_DIR, ["rios"], (".geojson",))
 
-
 def p_linhas_metro() -> Optional[Path]:
     return _find_file(DATA_DIR, ["linhas_metro"], (".geojson",))
-
 
 def p_linhas_trem() -> Optional[Path]:
     return _find_file(DATA_DIR, ["linhas_trem"], (".geojson",))
 
 
+# =============================================================================
+# Loaders
+# =============================================================================
 def load_admin(name: str) -> Optional["gpd.GeoDataFrame"]:
     if name == "Distritos":
         p = p_distritos()
@@ -369,7 +344,6 @@ def load_admin(name: str) -> Optional["gpd.GeoDataFrame"]:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
 
-
 def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
     p = p_area_verde()
     if not p:
@@ -378,7 +352,6 @@ def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
     if gdf is None:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
-
 
 def load_rios() -> Optional["gpd.GeoDataFrame"]:
     p = p_rios()
@@ -389,7 +362,6 @@ def load_rios() -> Optional["gpd.GeoDataFrame"]:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
 
-
 def load_linhas_metro() -> Optional["gpd.GeoDataFrame"]:
     p = p_linhas_metro()
     if not p:
@@ -398,7 +370,6 @@ def load_linhas_metro() -> Optional["gpd.GeoDataFrame"]:
     if gdf is None:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
-
 
 def load_linhas_trem() -> Optional["gpd.GeoDataFrame"]:
     p = p_linhas_trem()
@@ -409,7 +380,6 @@ def load_linhas_trem() -> Optional["gpd.GeoDataFrame"]:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
 
-
 def load_idcenso_geom() -> Optional["gpd.GeoDataFrame"]:
     p = p_idcenso()
     if not p:
@@ -419,14 +389,12 @@ def load_idcenso_geom() -> Optional["gpd.GeoDataFrame"]:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
 
-
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
 def read_setores_vars_df(path: Path) -> Optional[pd.DataFrame]:
     try:
         return pd.read_parquet(path)
     except Exception:
         return None
-
 
 def build_setores_joined_by_fid() -> Optional["gpd.GeoDataFrame"]:
     if gpd is None:
@@ -451,7 +419,6 @@ def build_setores_joined_by_fid() -> Optional["gpd.GeoDataFrame"]:
 
     g[fid_geom] = pd.to_numeric(g[fid_geom].apply(_to_float), errors="coerce").astype("Int64")
     v[fid_vars] = pd.to_numeric(v[fid_vars].apply(_to_float), errors="coerce").astype("Int64")
-
     v = v.dropna(subset=[fid_vars]).drop_duplicates(subset=[fid_vars]).copy()
 
     if fid_vars != "fid":
@@ -469,7 +436,7 @@ def build_setores_joined_by_fid() -> Optional["gpd.GeoDataFrame"]:
 
 
 # =============================================================================
-# Jenks (Natural Breaks)
+# Jenks (6 classes)
 # =============================================================================
 def jenks_breaks(values: List[float], k: int) -> Optional[List[float]]:
     vals = [float(x) for x in values if x is not None and not (isinstance(x, float) and math.isnan(x))]
@@ -523,7 +490,6 @@ def jenks_breaks(values: List[float], k: int) -> Optional[List[float]]:
     breaks[0] = vals[0]
     return breaks
 
-
 def jenks_class(v: float, breaks: List[float]) -> int:
     if v is None or (isinstance(v, float) and math.isnan(v)):
         return -1
@@ -534,16 +500,32 @@ def jenks_class(v: float, breaks: List[float]) -> int:
 
 
 # =============================================================================
-# Folium – Carto como basemap fixo (sempre visível)
+# Folium – Carto sempre visível + bounds garantido
 # =============================================================================
 def make_carto_map(center=(-23.55, -46.63), zoom=11):
     if folium is None:
         return None
 
-    # IMPORTANTE: tiles já setado no Map => Carto SEMPRE aparece
-    m = folium.Map(location=center, zoom_start=zoom, tiles="CartoDB positron", control_scale=True)
+    # tiles=None + TileLayer explícito => mais robusto
+    m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True, prefer_canvas=True)
 
-    # Panes para sobreposição (basemap fica abaixo)
+    folium.TileLayer(
+        tiles=CARTO_LIGHT_URL,
+        attr=CARTO_ATTR,
+        name="Carto Positron",
+        overlay=False,
+        control=False,
+        subdomains="abcd",
+        max_zoom=20,
+    ).add_to(m)
+
+    # marcador invisível => garante bounds válido para st_folium
+    folium.Marker(
+        location=center,
+        icon=folium.DivIcon(html=""),
+    ).add_to(m)
+
+    # panes
     try:
         folium.map.CustomPane("admin", z_index=610).add_to(m)
         folium.map.CustomPane("choropleth", z_index=620).add_to(m)
@@ -613,12 +595,12 @@ def add_lines(m, gdf, name: str, color: str, weight: float, pane: str, show=True
         return
 
     fg = folium.FeatureGroup(name=name, show=show)
-    add_layer = folium.GeoJson(  # <- corrigido (sem "folium add_layer")
+    layer = folium.GeoJson(
         data=gj,
         pane=pane,
         style_function=lambda f: {"color": color, "weight": weight, "fillOpacity": 0},
     )
-    add_layer.add_to(fg)
+    layer.add_to(fg)
     fg.add_to(m)
 
 
@@ -665,27 +647,36 @@ def paint_setores_jenks(m, setores: "gpd.GeoDataFrame", value_col: str, label: s
 
 
 # =============================================================================
-# UI
+# UI – começa com variável vazia
 # =============================================================================
 def left_controls() -> Dict[str, Any]:
-    st.markdown("### Variáveis (Setores Censitários)")
+    st.markdown("### Variáveis (Setores Censitários 2023)")
     var = st.selectbox(
         "Selecione a variável",
-        ["Populacao", "Densidade_demografica", "Diferenca_elevacao", "elevacao", "raio_maximo_caminhada", "Cluster"],
-        index=1,
+        [
+            "— Selecione a variável —",
+            "Populacao",
+            "Densidade_demografica",
+            "Diferenca_elevacao",
+            "elevacao",
+            "raio_maximo_caminhada",
+            "Cluster",
+        ],
+        index=0,
         key="pb_var",
+        help="O mapa base (Carto) aparece mesmo sem variável. A variável só carrega quando selecionada.",
     )
 
     st.markdown("### Camadas (sobre o basemap Carto)")
-    show_distritos = st.checkbox("Distritos (linha)", value=True)
+    show_distritos = st.checkbox("Distritos (linha)", value=False)
     show_zonasod = st.checkbox("ZonasOD2023 (linha)", value=False)
     show_subpref = st.checkbox("Subprefeitura (linha)", value=False)
     show_isocronas = st.checkbox("Isocronas (linha)", value=False)
 
-    show_green = st.checkbox("Áreas verdes (fill 100%)", value=True)
-    show_rios = st.checkbox("Rios (azul)", value=True)
-    show_metro = st.checkbox("Linhas de metrô (preto)", value=True)
-    show_trem = st.checkbox("Linhas de trem (preto)", value=True)
+    show_green = st.checkbox("Áreas verdes (fill 100%)", value=False)
+    show_rios = st.checkbox("Rios (azul)", value=False)
+    show_metro = st.checkbox("Linhas de metrô (preto)", value=False)
+    show_trem = st.checkbox("Linhas de trem (preto)", value=False)
 
     if st.button("🧹 Limpar cache de dados", type="secondary"):
         st.cache_data.clear()
@@ -738,20 +729,14 @@ def main() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
     with map_col:
-        # dados
-        setores_join = build_setores_joined_by_fid()
-
+        # Centro padrão (leve): São Paulo
         center = (-23.55, -46.63)
-        g_base = load_admin("Distritos") if ui["show_distritos"] else None
-        if g_base is not None and not g_base.empty:
-            center = center_from_bounds(g_base)
-        elif setores_join is not None and not setores_join.empty:
-            center = center_from_bounds(setores_join)
-
-        # Basemap Carto sempre visível
         fmap = make_carto_map(center=center, zoom=11)
+        if fmap is None:
+            st.error("Falha ao inicializar o mapa Folium.")
+            return
 
-        # Limites (linhas)
+        # Limites (só carrega se usuário pedir)
         if ui["show_distritos"]:
             add_admin_outline(fmap, load_admin("Distritos"), "Distritos", color="#000000", weight=1.2, show=True)
         if ui["show_subpref"]:
@@ -761,18 +746,7 @@ def main() -> None:
         if ui["show_isocronas"]:
             add_admin_outline(fmap, load_admin("Isócronas"), "Isocronas", color="#000000", weight=0.9, show=True)
 
-        # Variável (choropleth)
-        if setores_join is not None and not setores_join.empty:
-            var = ui["variavel"]
-            col = find_col(setores_join.columns, var, var.lower())
-            if col:
-                paint_setores_jenks(fmap, setores_join, col, var)
-            else:
-                st.info(f"Coluna '{var}' não encontrada no join por fid.")
-        else:
-            st.warning("Join dos setores por fid não foi montado (IDCenso2023 + SetoresCensitarios2023).")
-
-        # Overlays
+        # Overlays (só carrega se usuário pedir)
         if ui["show_rios"]:
             add_lines(fmap, load_rios(), "Rios", color="#2b7bff", weight=2.0, pane="hydro", show=True)
         if ui["show_metro"]:
@@ -782,12 +756,25 @@ def main() -> None:
         if ui["show_green"]:
             add_green(fmap, load_green_areas(), show=True)
 
-        # Controle de camadas (basemap não muda)
+        # Variável: só monta join quando selecionar
+        if ui["variavel"] != "— Selecione a variável —":
+            setores_join = build_setores_joined_by_fid()
+            if setores_join is None or setores_join.empty:
+                st.warning("Join por 'fid' não foi montado (IDCenso2023 + SetoresCensitarios2023).")
+            else:
+                col = find_col(setores_join.columns, ui["variavel"], ui["variavel"].lower())
+                if col:
+                    paint_setores_jenks(fmap, setores_join, col, ui["variavel"])
+                else:
+                    st.info(f"Coluna '{ui['variavel']}' não encontrada após o join por fid.")
+
+        # Controle de camadas
         try:
             folium.LayerControl(position="bottomright", collapsed=False).add_to(fmap)
         except Exception:
             pass
 
+        # Render (Carto SEMPRE deve aparecer)
         st_folium(fmap, height=780, use_container_width=True, key="map_view")
 
 
