@@ -49,9 +49,36 @@ PB_NAVY = PB_COLORS["navy"]
 ORANGE_RED_GRAD = ["#fee8c8", "#fdd49e", "#fdbb84", "#fc8d59", "#e34a33", "#b30000"]
 SIMPLIFY_TOL = 0.0006
 
-# Carto tiles explícito (mais robusto)
+# Carto tiles explícito
 CARTO_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
 CARTO_ATTR = "© OpenStreetMap contributors © CARTO"
+
+# Cores fixas solicitadas
+CLUSTER_CMAP = {0:"#bf7db2", 1:"#f7bd6a", 2:"#cf651f", 3:"#ede4e6", 4:"#793393"}
+CLUSTER_LABELS = {
+    0: "1 - Periférico com predominância residencial de alta densidade construtiva",
+    1: "2 - Uso misto de média densidade construtiva",
+    2: "3 - Periférico com predominância residencial de média densidade construtiva",
+    3: "4 - Verticalizado de uso-misto",
+    4: "5 - Predominância de uso comercial e serviços",
+}
+
+ISO_LUT_COLOR = {
+    0:"#542788", 1:"#f7f7f7", 2:"#d8daeb", 3:"#b35806", 4:"#b2abd2",
+    5:"#8073ac", 6:"#fdb863", 7:"#7f3b08", 8:"#e08214", 9:"#fee0b6"
+}
+ISO_LUT_LABEL = {
+    0: "Predominância uso misto",
+    1: "Zona de transição local",
+    2: "Periférico residencial de média densidade",
+    3: "Transição central verticalizada",
+    4: "Periférico adensado em transição",
+    5: "Centralidade comercial e de serviços",
+    6: "Predominância residencial média densidade",
+    7: "Áreas íngremes e de encosta",
+    8: "Alta densidade residencial",
+    9: "Central verticalizado",
+}
 
 
 # =============================================================================
@@ -129,6 +156,19 @@ def inject_css() -> None:
             box-shadow:0 2px 6px rgba(0,0,0,.2) !important;
             z-index: 200000 !important;
         }}
+
+        /* Legenda flutuante */
+        .pb-floating-legend {{
+            position: fixed; right: 14px; bottom: 14px; z-index: 999999;
+            background: #fff; border:1px solid rgba(20,64,125,.10);
+            border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.18);
+            padding:8px 10px; max-width: 340px; font-size: 11px;
+        }}
+        .legend-title {{ font-weight:900; margin-bottom:6px; }}
+        .legend-row {{ display:flex; align-items:flex-start; gap:8px; margin:4px 0; }}
+        .legend-swatch {{ width:14px; height:14px; border-radius:4px; display:inline-block; border:1px solid rgba(0,0,0,.15); flex:0 0 auto; margin-top:2px; }}
+        .legend-text {{ line-height: 1.15; }}
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -167,11 +207,6 @@ def find_col(df_cols, *cands) -> Optional[str]:
     return None
 
 
-def center_from_bounds(gdf) -> tuple[float, float]:
-    minx, miny, maxx, maxy = gdf.total_bounds
-    return ((miny + maxy) / 2, (minx + maxx) / 2)
-
-
 def _to_float(x):
     if isinstance(x, Decimal):
         return float(x)
@@ -184,57 +219,49 @@ def to_float_series(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").astype("Float64")
 
 
-# =============================================================================
-# WARNING leve: valida CRS sem reprojetar (barato)
-# =============================================================================
-def _warn_if_not_4326(gdf, name: str) -> None:
+def _ensure_4326(gdf, name: str) -> Optional["gpd.GeoDataFrame"]:
+    """Verifica CRS e, se necessário, reprojeta para EPSG:4326 (como no código modelo)."""
+    if gdf is None:
+        return None
     try:
-        if gdf is None:
-            return
-        if getattr(gdf, "crs", None) is None:
-            st.warning(f"CRS ausente em '{name}'. Esperado EPSG:4326.")
-            return
+        if gdf.crs is None:
+            st.warning(f"CRS ausente em '{name}'. Assumindo EPSG:4326.")
+            gdf = gdf.set_crs(4326, allow_override=True)
+            return gdf
         epsg = gdf.crs.to_epsg()
         if epsg is None or int(epsg) != 4326:
-            st.warning(f"CRS de '{name}' = {gdf.crs}. Esperado EPSG:4326.")
+            st.warning(f"CRS de '{name}' = {gdf.crs}. Reprojetando para EPSG:4326.")
+            gdf = gdf.to_crs(4326)
     except Exception:
-        # warning deve ser leve e nunca quebrar o app
-        return
+        # sem quebrar o app
+        return gdf
+    return gdf
 
 
 # =============================================================================
-# Leitura/saneamento (sem to_crs) + warning CRS
+# Leitura/saneamento (robusto p/ st_folium)
 # =============================================================================
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
-def read_gdf_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
+def read_gdf_parquet(path: Path, name: str) -> Optional["gpd.GeoDataFrame"]:
     if gpd is None:
         return None
     try:
         gdf = gpd.read_parquet(path)
     except Exception:
         return None
-    # carimba se vier sem CRS (barato)
-    if gdf.crs is None:
-        try:
-            gdf = gdf.set_crs(4326, allow_override=True)
-        except Exception:
-            pass
+    gdf = _ensure_4326(gdf, name)
     return gdf
 
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
-def read_gdf_geojson(path: Path) -> Optional["gpd.GeoDataFrame"]:
+def read_gdf_geojson(path: Path, name: str) -> Optional["gpd.GeoDataFrame"]:
     if gpd is None:
         return None
     try:
         gdf = gpd.read_file(path)
     except Exception:
         return None
-    if gdf.crs is None:
-        try:
-            gdf = gdf.set_crs(4326, allow_override=True)
-        except Exception:
-            pass
+    gdf = _ensure_4326(gdf, name)
     return gdf
 
 
@@ -307,7 +334,7 @@ def gdf_to_featurecollection(gdf: "gpd.GeoDataFrame", keep_cols: Optional[List[s
 
 
 # =============================================================================
-# Localizadores (nomes do GitHub)
+# Localizadores
 # =============================================================================
 def p_distritos() -> Optional[Path]:
     return _find_file(DATA_DIR, ["Distritos"], (".parquet",))
@@ -341,7 +368,7 @@ def p_linhas_trem() -> Optional[Path]:
 
 
 # =============================================================================
-# Loaders (com warning leve de CRS)
+# Loaders
 # =============================================================================
 def load_admin(name: str) -> Optional["gpd.GeoDataFrame"]:
     if name == "Distritos":
@@ -356,8 +383,7 @@ def load_admin(name: str) -> Optional["gpd.GeoDataFrame"]:
         p = None
     if not p:
         return None
-    gdf = read_gdf_parquet(p)
-    _warn_if_not_4326(gdf, name)
+    gdf = read_gdf_parquet(p, name)
     if gdf is None:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
@@ -366,8 +392,7 @@ def load_green_areas() -> Optional["gpd.GeoDataFrame"]:
     p = p_area_verde()
     if not p:
         return None
-    gdf = read_gdf_geojson(p)
-    _warn_if_not_4326(gdf, "Áreas verdes")
+    gdf = read_gdf_geojson(p, "Áreas verdes")
     if gdf is None:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
@@ -376,8 +401,7 @@ def load_rios() -> Optional["gpd.GeoDataFrame"]:
     p = p_rios()
     if not p:
         return None
-    gdf = read_gdf_geojson(p)
-    _warn_if_not_4326(gdf, "Rios")
+    gdf = read_gdf_geojson(p, "Rios")
     if gdf is None:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
@@ -386,8 +410,7 @@ def load_linhas_metro() -> Optional["gpd.GeoDataFrame"]:
     p = p_linhas_metro()
     if not p:
         return None
-    gdf = read_gdf_geojson(p)
-    _warn_if_not_4326(gdf, "Linhas de metrô")
+    gdf = read_gdf_geojson(p, "Linhas de metrô")
     if gdf is None:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
@@ -396,8 +419,7 @@ def load_linhas_trem() -> Optional["gpd.GeoDataFrame"]:
     p = p_linhas_trem()
     if not p:
         return None
-    gdf = read_gdf_geojson(p)
-    _warn_if_not_4326(gdf, "Linhas de trem")
+    gdf = read_gdf_geojson(p, "Linhas de trem")
     if gdf is None:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
@@ -406,12 +428,10 @@ def load_idcenso_geom() -> Optional["gpd.GeoDataFrame"]:
     p = p_idcenso()
     if not p:
         return None
-    gdf = read_gdf_parquet(p)
-    _warn_if_not_4326(gdf, "IDCenso2023")
+    gdf = read_gdf_parquet(p, "IDCenso2023")
     if gdf is None:
         return None
     return _simplify_safe(_drop_bad_geoms(gdf), SIMPLIFY_TOL)
-
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
 def read_setores_vars_df(path: Path) -> Optional[pd.DataFrame]:
@@ -419,7 +439,6 @@ def read_setores_vars_df(path: Path) -> Optional[pd.DataFrame]:
         return pd.read_parquet(path)
     except Exception:
         return None
-
 
 def build_setores_joined_by_fid() -> Optional["gpd.GeoDataFrame"]:
     if gpd is None:
@@ -437,6 +456,7 @@ def build_setores_joined_by_fid() -> Optional["gpd.GeoDataFrame"]:
     fid_geom = find_col(g_id.columns, "fid", "FID")
     fid_vars = find_col(df_vars.columns, "fid", "FID")
     if not fid_geom or not fid_vars:
+        st.warning("Coluna 'fid' não encontrada em IDCenso/SetoresCensitarios (necessária para o join).")
         return None
 
     g = g_id.copy()
@@ -515,7 +535,6 @@ def jenks_breaks(values: List[float], k: int) -> Optional[List[float]]:
     breaks[0] = vals[0]
     return breaks
 
-
 def jenks_class(v: float, breaks: List[float]) -> int:
     if v is None or (isinstance(v, float) and math.isnan(v)):
         return -1
@@ -526,7 +545,7 @@ def jenks_class(v: float, breaks: List[float]) -> int:
 
 
 # =============================================================================
-# Folium – Carto sempre visível + bounds garantido
+# Folium – Carto sempre visível + panes + bounds garantido
 # =============================================================================
 def make_carto_map(center=(-23.55, -46.63), zoom=11):
     if folium is None:
@@ -534,6 +553,7 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
 
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True, prefer_canvas=True)
 
+    # IMPORTANT: base tile control=False e overlay=False (fixo)
     folium.TileLayer(
         tiles=CARTO_LIGHT_URL,
         attr=CARTO_ATTR,
@@ -547,6 +567,7 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
     # marcador invisível => garante bounds válido para st_folium
     folium.Marker(location=center, icon=folium.DivIcon(html="")).add_to(m)
 
+    # panes (z-index maior = acima)
     try:
         folium.map.CustomPane("admin", z_index=610).add_to(m)
         folium.map.CustomPane("choropleth", z_index=620).add_to(m)
@@ -562,16 +583,19 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
 def add_admin_outline(m, gdf, name: str, color="#000000", weight=1.2, show=True):
     if folium is None or gdf is None or gdf.empty:
         return
+
     line = gdf[["geometry"]].copy()
     try:
         line["geometry"] = line.geometry.boundary
     except Exception:
         return
+
     line = _simplify_safe(_drop_bad_geoms(line), SIMPLIFY_TOL)
     gj = gdf_to_featurecollection(line, keep_cols=["geometry"])
     if not gj:
         return
-    fg = folium.FeatureGroup(name=name, show=show)
+
+    fg = folium.FeatureGroup(name=name, show=show, overlay=True, control=True)
     folium.GeoJson(
         data=gj,
         pane="admin",
@@ -583,11 +607,13 @@ def add_admin_outline(m, gdf, name: str, color="#000000", weight=1.2, show=True)
 def add_green(m, gdf, show=True):
     if folium is None or gdf is None or gdf.empty:
         return
+
     poly = _simplify_safe(_drop_bad_geoms(gdf[["geometry"]].copy()), SIMPLIFY_TOL)
     gj = gdf_to_featurecollection(poly, keep_cols=["geometry"])
     if not gj:
         return
-    fg = folium.FeatureGroup(name="Áreas verdes", show=show)
+
+    fg = folium.FeatureGroup(name="Áreas verdes", show=show, overlay=True, control=True)
     folium.GeoJson(
         data=gj,
         pane="green",
@@ -604,11 +630,13 @@ def add_green(m, gdf, show=True):
 def add_lines(m, gdf, name: str, color: str, weight: float, pane: str, show=True):
     if folium is None or gdf is None or gdf.empty:
         return
+
     ln = _simplify_safe(_drop_bad_geoms(gdf[["geometry"]].copy()), SIMPLIFY_TOL)
     gj = gdf_to_featurecollection(ln, keep_cols=["geometry"])
     if not gj:
         return
-    fg = folium.FeatureGroup(name=name, show=show)
+
+    fg = folium.FeatureGroup(name=name, show=show, overlay=True, control=True)
     folium.GeoJson(
         data=gj,
         pane=pane,
@@ -617,25 +645,77 @@ def add_lines(m, gdf, name: str, color: str, weight: float, pane: str, show=True
     fg.add_to(m)
 
 
-def paint_setores_jenks(m, setores: "gpd.GeoDataFrame", value_col: str, label: str):
-    if folium is None or setores is None or setores.empty:
+# =============================================================================
+# Choropleth builders (cache por variável) + Legend
+# =============================================================================
+def _fmt_num(x: float) -> str:
+    try:
+        if abs(x) >= 1000:
+            return f"{x:,.0f}".replace(",", ".")
+        if abs(x) >= 10:
+            return f"{x:.1f}".replace(".", ",")
+        return f"{x:.2f}".replace(".", ",")
+    except Exception:
+        return str(x)
+
+def add_floating_legend(m, title: str, items: List[Tuple[str, str]]):
+    if folium is None or Element is None or not items:
         return
+    rows = "\n".join(
+        f"<div class='legend-row'><span class='legend-swatch' style='background:{c}'></span>"
+        f"<div class='legend-text'>{lab}</div></div>"
+        for c, lab in items
+    )
+    html = f"""
+    <div class="pb-floating-legend">
+      <div class="legend-title">{title}</div>
+      {rows}
+    </div>
+    """
+    m.get_root().html.add_child(Element(html))
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=48)
+def build_jenks_geojson_for(value_col: str) -> Tuple[Optional[dict], Optional[List[float]]]:
+    setores = build_setores_joined_by_fid()
+    if setores is None or setores.empty:
+        return None, None
+    if value_col not in setores.columns:
+        return None, None
 
     s = to_float_series(setores[value_col])
     vals = s.dropna().astype(float).tolist()
     br = jenks_breaks(vals, 6)
     if not br:
-        return
+        return None, None
 
     df = setores[["geometry"]].copy()
     df["__v__"] = s
     df = _simplify_safe(_drop_bad_geoms(df), SIMPLIFY_TOL)
     if df.empty:
-        return
+        return None, None
 
     df["__k__"] = df["__v__"].apply(lambda x: jenks_class(float(x), br) if pd.notna(x) else -1).astype("Int64")
     gj = gdf_to_featurecollection(df, keep_cols=["geometry", "__k__", "__v__"])
-    if not gj:
+    return gj, br
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=48)
+def build_categorical_geojson_for(value_col: str) -> Optional[dict]:
+    setores = build_setores_joined_by_fid()
+    if setores is None or setores.empty:
+        return None
+    if value_col not in setores.columns:
+        return None
+
+    df = setores[["geometry"]].copy()
+    df["__c__"] = pd.to_numeric(setores[value_col].apply(_to_float), errors="coerce").astype("Int64")
+    df = _simplify_safe(_drop_bad_geoms(df), SIMPLIFY_TOL)
+    if df.empty:
+        return None
+    gj = gdf_to_featurecollection(df, keep_cols=["geometry", "__c__"])
+    return gj
+
+def paint_jenks(m, gj: dict, breaks: List[float], label: str):
+    if folium is None or not gj or not breaks:
         return
 
     def style_fn(feat):
@@ -647,7 +727,7 @@ def paint_setores_jenks(m, setores: "gpd.GeoDataFrame", value_col: str, label: s
         fill = "#c8c8c8" if k < 0 else ORANGE_RED_GRAD[min(k, len(ORANGE_RED_GRAD) - 1)]
         return {"fillOpacity": 0.82, "weight": 0.0, "color": "#00000000", "fillColor": fill}
 
-    fg = folium.FeatureGroup(name=label, show=True)
+    fg = folium.FeatureGroup(name=label, show=True, overlay=True, control=True)
     folium.GeoJson(
         data=gj,
         pane="choropleth",
@@ -658,34 +738,110 @@ def paint_setores_jenks(m, setores: "gpd.GeoDataFrame", value_col: str, label: s
     ).add_to(fg)
     fg.add_to(m)
 
+    # legenda
+    items = []
+    for i in range(6):
+        lo = breaks[i]
+        hi = breaks[i + 1]
+        items.append((ORANGE_RED_GRAD[i], f"{_fmt_num(lo)} – {_fmt_num(hi)}"))
+    add_floating_legend(m, label, items)
+
+def paint_cluster(m, gj: dict):
+    if folium is None or not gj:
+        return
+
+    def style_fn(feat):
+        c = feat["properties"].get("__c__", None)
+        try:
+            c = int(c)
+        except Exception:
+            c = None
+        fill = CLUSTER_CMAP.get(c, "#c8c8c8")
+        return {"fillOpacity": 0.85, "weight": 0.0, "color": "#00000000", "fillColor": fill}
+
+    fg = folium.FeatureGroup(name="Cluster", show=True, overlay=True, control=True)
+    folium.GeoJson(
+        data=gj,
+        pane="choropleth",
+        style_function=style_fn,
+    ).add_to(fg)
+    fg.add_to(m)
+
+    items = [(CLUSTER_CMAP[k], CLUSTER_LABELS[k]) for k in sorted(CLUSTER_CMAP.keys())]
+    add_floating_legend(m, "Cluster", items)
+
+def paint_isocrona_area_influencia(m, gj: dict):
+    if folium is None or not gj:
+        return
+
+    def style_fn(feat):
+        c = feat["properties"].get("__c__", None)
+        try:
+            c = int(c)
+        except Exception:
+            c = None
+        fill = ISO_LUT_COLOR.get(c, "#c8c8c8")
+        return {"fillOpacity": 0.85, "weight": 0.0, "color": "#00000000", "fillColor": fill}
+
+    fg = folium.FeatureGroup(name="Área de influência de bairro", show=True, overlay=True, control=True)
+    folium.GeoJson(
+        data=gj,
+        pane="choropleth",
+        style_function=style_fn,
+    ).add_to(fg)
+    fg.add_to(m)
+
+    items = [(ISO_LUT_COLOR[k], ISO_LUT_LABEL[k]) for k in sorted(ISO_LUT_COLOR.keys())]
+    add_floating_legend(m, "Área de influência de bairro", items)
+
 
 # =============================================================================
-# UI – começa com variável vazia
+# UI
 # =============================================================================
+VAR_OPTIONS = [
+    "— Selecione a variável —",
+    "Populacao",
+    "Densidade_demografica",
+    "Diferenca_elevacao",
+    "elevacao",
+    "raio_maximo_caminhada",
+    "Cluster",
+    "Área de influência de bairro",
+]
+
+# mapeia label do selectbox -> candidatos de coluna
+VAR_CANDS = {
+    "Populacao": ["Populacao", "populacao", "POPULACAO", "pop"],
+    "Densidade_demografica": ["Densidade_demografica", "densidade_demografica", "densidade", "DENSIDADE"],
+    "Diferenca_elevacao": ["Diferenca_elevacao", "diferenca_elevacao", "dif_elev", "diferença_elevacao"],
+    "elevacao": ["elevacao", "Elevacao", "elevation", "altitude"],
+    "raio_maximo_caminhada": ["raio_maximo_caminhada", "raio_maximo", "raio_max", "raio_maximo_de_caminhada"],
+    "Cluster": ["Cluster", "cluster", "cluster_id"],
+    "Área de influência de bairro": [
+        "isocrona", "isócrona", "isocronas", "iso", "iso_class", "iso_classe",
+        "area_influencia", "area_de_influencia", "areainfluencia", "area_influencia_bairro"
+    ],
+}
+
 def left_controls() -> Dict[str, Any]:
     st.markdown("### Variáveis (Setores Censitários 2023)")
     var = st.selectbox(
         "Selecione a variável",
-        [
-            "— Selecione a variável —",
-            "Populacao",
-            "Densidade_demografica",
-            "Diferenca_elevacao",
-            "elevacao",
-            "raio_maximo_caminhada",
-            "Cluster",
-        ],
+        VAR_OPTIONS,
         index=0,
         key="pb_var",
         help="O mapa base (Carto) aparece mesmo sem variável. A variável só carrega quando selecionada.",
     )
 
-    st.markdown("### Camadas (sobre o basemap Carto)")
+    st.markdown("### Limites administrativos (linha)")
+    # começam desselecionadas
+    show_setores_line = st.checkbox("Setores Censitários 2023 (linha)", value=False)
     show_distritos = st.checkbox("Distritos (linha)", value=False)
     show_zonasod = st.checkbox("ZonasOD2023 (linha)", value=False)
     show_subpref = st.checkbox("Subprefeitura (linha)", value=False)
-    show_isocronas = st.checkbox("Isocronas (linha)", value=False)
+    show_isocronas = st.checkbox("Isócronas (linha)", value=False)
 
+    st.markdown("### Camadas (sobre o basemap Carto)")
     show_green = st.checkbox("Áreas verdes (fill 100%)", value=False)
     show_rios = st.checkbox("Rios (azul)", value=False)
     show_metro = st.checkbox("Linhas de metrô (preto)", value=False)
@@ -697,6 +853,7 @@ def left_controls() -> Dict[str, Any]:
 
     return {
         "variavel": var,
+        "show_setores_line": show_setores_line,
         "show_distritos": show_distritos,
         "show_zonasod": show_zonasod,
         "show_subpref": show_subpref,
@@ -742,14 +899,18 @@ def main() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
     with map_col:
-        # Centro padrão (leve): São Paulo
         center = (-23.55, -46.63)
         fmap = make_carto_map(center=center, zoom=11)
         if fmap is None:
             st.error("Falha ao inicializar o mapa Folium.")
             return
 
-        # Limites (só carrega se usuário pedir)
+        # Limites (linha)
+        if ui["show_setores_line"]:
+            add_admin_outline(
+                fmap, load_idcenso_geom(), "Setores Censitários 2023",
+                color="#111111", weight=0.55, show=True
+            )
         if ui["show_distritos"]:
             add_admin_outline(fmap, load_admin("Distritos"), "Distritos", color="#000000", weight=1.2, show=True)
         if ui["show_subpref"]:
@@ -757,9 +918,9 @@ def main() -> None:
         if ui["show_zonasod"]:
             add_admin_outline(fmap, load_admin("ZonasOD2023"), "ZonasOD2023", color="#000000", weight=0.9, show=True)
         if ui["show_isocronas"]:
-            add_admin_outline(fmap, load_admin("Isócronas"), "Isocronas", color="#000000", weight=0.9, show=True)
+            add_admin_outline(fmap, load_admin("Isócronas"), "Isócronas", color="#000000", weight=0.9, show=True)
 
-        # Overlays (só carrega se usuário pedir)
+        # Overlays (hidro/rails/verde) — acima do Carto
         if ui["show_rios"]:
             add_lines(fmap, load_rios(), "Rios", color="#2b7bff", weight=2.0, pane="hydro", show=True)
         if ui["show_metro"]:
@@ -769,17 +930,33 @@ def main() -> None:
         if ui["show_green"]:
             add_green(fmap, load_green_areas(), show=True)
 
-        # Variável: só monta join quando selecionar
-        if ui["variavel"] != "— Selecione a variável —":
-            setores_join = build_setores_joined_by_fid()
-            if setores_join is None or setores_join.empty:
+        # Variável
+        var = ui["variavel"]
+        if var != "— Selecione a variável —":
+            setores = build_setores_joined_by_fid()
+            if setores is None or setores.empty:
                 st.warning("Join por 'fid' não foi montado (IDCenso2023 + SetoresCensitarios2023).")
             else:
-                col = find_col(setores_join.columns, ui["variavel"], ui["variavel"].lower())
-                if col:
-                    paint_setores_jenks(fmap, setores_join, col, ui["variavel"])
+                # resolve coluna por candidatos
+                cands = VAR_CANDS.get(var, [var, var.lower()])
+                col = find_col(setores.columns, *cands)
+
+                if not col:
+                    st.info(f"Coluna para '{var}' não encontrada após o join.")
                 else:
-                    st.info(f"Coluna '{ui['variavel']}' não encontrada após o join por fid.")
+                    # Cluster e Área de influência: LUT fixa
+                    if var == "Cluster":
+                        gj = build_categorical_geojson_for(col)
+                        if gj:
+                            paint_cluster(fmap, gj)
+                    elif var == "Área de influência de bairro":
+                        gj = build_categorical_geojson_for(col)
+                        if gj:
+                            paint_isocrona_area_influencia(fmap, gj)
+                    else:
+                        gj, br = build_jenks_geojson_for(col)
+                        if gj and br:
+                            paint_jenks(fmap, gj, br, var)
 
         # Controle de camadas
         try:
@@ -787,8 +964,14 @@ def main() -> None:
         except Exception:
             pass
 
-        # Render (Carto SEMPRE deve aparecer)
-        st_folium(fmap, height=780, use_container_width=True, key="map_view")
+        # Render — IMPORTANT: evita callback em zoom/pan (não reprocessa a cada zoom)
+        st_folium(
+            fmap,
+            height=780,
+            use_container_width=True,
+            key="map_view",
+            returned_objects=[],  # <- reduz rerun por interação
+        )
 
 
 if __name__ == "__main__":
