@@ -24,14 +24,6 @@ except Exception:
 
 import pandas as pd  # type: ignore
 
-
-PB_SUBPREF_FILE_ID = "https://drive.google.com/file/d/1vPY34cQLCoGfADpyOJjL9pNCYkVrmSZA/view?usp=drive_link"
-PB_DISTRITO_FILE_ID = "https://drive.google.com/file/d/1K-t2BiSHN_D8De0oCFxzGdrEMhnGnh10/view?usp=drive_link"
-PB_ISOCRONAS_FILE_ID = "https://drive.google.com/file/d/18ukyzMiYQ6vMqrU6-ctaPFbXMPX9XS9i/view?usp=drive_link"
-PB_QUADRAS_FILE_ID = "https://drive.google.com/file/d/1XKAYLNdt82ZPNAE-rseSuuaCFmjfn8IP/view?usp=drive_link"
-PB_LOTES_FILE_ID = "https://drive.google.com/file/d/1oTFAZff1mVAWD6KQTJSz45I6B6pi6ceP/view?usp=drive_link"
-PB_CENSO_FILE_ID = "https://drive.google.com/file/d/1APp7fxT2mgTpegVisVyQwjTRWOPz6Rgn/view?usp=drive_link"
-
 # =============================================================================
 # CONFIG / UI
 # =============================================================================
@@ -140,12 +132,12 @@ def _get_secret(key: str) -> str:
 # keys esperadas em secrets.toml:
 # PB_SUBPREF_FILE_ID, PB_DISTRITO_FILE_ID, PB_ISOCRONAS_FILE_ID, PB_QUADRAS_FILE_ID, PB_LOTES_FILE_ID, PB_CENSO_FILE_ID
 SECRETS_MAP = {
-    "subpref": "PB_SUBPREF_FILE_ID",
-    "dist": "PB_DISTRITO_FILE_ID",
-    "iso": "PB_ISOCRONAS_FILE_ID",
-    "quadra": "PB_QUADRAS_FILE_ID",
-    "lote": "PB_LOTES_FILE_ID",
-    "censo": "PB_CENSO_FILE_ID",
+    "subpref":"PB_SUBPREF_FILE_ID" = "https://drive.google.com/file/d/1vPY34cQLCoGfADpyOJjL9pNCYkVrmSZA/view?usp=drive_link",
+    "dist": "PB_DISTRITO_FILE_ID" = "https://drive.google.com/file/d/1K-t2BiSHN_D8De0oCFxzGdrEMhnGnh10/view?usp=drive_link",
+    "iso": "PB_ISOCRONAS_FILE_ID" = "https://drive.google.com/file/d/18ukyzMiYQ6vMqrU6-ctaPFbXMPX9XS9i/view?usp=drive_link",
+    "quadra": "PB_QUADRAS_FILE_ID" = "https://drive.google.com/file/d/1XKAYLNdt82ZPNAE-rseSuuaCFmjfn8IP/view?usp=drive_link",
+    "lote": "PB_LOTES_FILE_ID" = "https://drive.google.com/file/d/1oTFAZff1mVAWD6KQTJSz45I6B6pi6ceP/view?usp=drive_link",
+    "censo": "PB_CENSO_FILE_ID"= "https://drive.google.com/file/d/1APp7fxT2mgTpegVisVyQwjTRWOPz6Rgn/view?usp=drive_link",
 }
 
 
@@ -1239,4 +1231,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
