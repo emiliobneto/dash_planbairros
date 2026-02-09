@@ -24,6 +24,14 @@ except Exception:
 
 import pandas as pd  # type: ignore
 
+
+PB_SUBPREF_FILE_ID = "https://drive.google.com/file/d/1vPY34cQLCoGfADpyOJjL9pNCYkVrmSZA/view?usp=drive_link"
+PB_DISTRITO_FILE_ID = "https://drive.google.com/file/d/1K-t2BiSHN_D8De0oCFxzGdrEMhnGnh10/view?usp=drive_link"
+PB_ISOCRONAS_FILE_ID = "https://drive.google.com/file/d/18ukyzMiYQ6vMqrU6-ctaPFbXMPX9XS9i/view?usp=drive_link"
+PB_QUADRAS_FILE_ID = "https://drive.google.com/file/d/1XKAYLNdt82ZPNAE-rseSuuaCFmjfn8IP/view?usp=drive_link"
+PB_LOTES_FILE_ID = "https://drive.google.com/file/d/1oTFAZff1mVAWD6KQTJSz45I6B6pi6ceP/view?usp=drive_link"
+PB_CENSO_FILE_ID = "https://drive.google.com/file/d/1APp7fxT2mgTpegVisVyQwjTRWOPz6Rgn/view?usp=drive_link"
+
 # =============================================================================
 # CONFIG / UI
 # =============================================================================
@@ -1231,3 +1239,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
