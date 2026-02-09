@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import base64
+import re
 from typing import Optional, Dict, Any, Tuple, Set
 
 import streamlit as st
@@ -20,7 +21,7 @@ except Exception:
 
 
 # =============================================================================
-# Config / identidade (UI)
+# CONFIG / IDENTIDADE (UI)
 # =============================================================================
 st.set_page_config(
     page_title="PlanBairros",
@@ -39,45 +40,112 @@ PB_COLORS = {
 }
 PB_NAVY = PB_COLORS["navy"]
 
-SIMPLIFY_TOL = 0.0006  # simplificação só para LINHAS/outlines
+SIMPLIFY_TOL = 0.0006
 CARTO_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
 CARTO_ATTR = "© OpenStreetMap contributors © CARTO"
 
 REPO_ROOT = Path.cwd()
-DATA_DIR = REPO_ROOT / "limites_administrativos"
-LOGO_PATH = REPO_ROOT / "assets" / "logo_todos.jpg"
+ASSETS_DIR = REPO_ROOT / "assets"
+LOGO_PATH = ASSETS_DIR / "logo_todos.jpg"
 LOGO_HEIGHT = 46
 
+# =============================================================================
+# GOOGLE DRIVE (PASTA)
+# =============================================================================
+GOOGLE_DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1YdJuACMnudDgb6__wAl_TYibvnxlJz0M?usp=drive_link"
+
+DATA_CACHE_DIR = REPO_ROOT / "data_cache"
+DRIVE_SYNC_DIR = DATA_CACHE_DIR / "drive_folder_sync"
+
+# nomes exatos conforme seu print
+EXPECTED_FILES = {
+    "subpref": "Subprefeitura.parquet",
+    "dist": "Distrito.parquet",
+    "iso": "Isocronas.parquet",
+    "quadra": "Quadras.parquet",
+    "lote": "Lotes.parquet",
+    "censo": "Setorcensitario.parquet",
+}
+
+
+def _extract_drive_folder_id(url: str) -> Optional[str]:
+    m = re.search(r"/folders/([a-zA-Z0-9_-]+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", url)
+    if m:
+        return m.group(1)
+    return None
+
+
+@st.cache_resource(show_spinner=False)
+def ensure_drive_folder_synced(folder_url: str, out_dir: Path) -> Path:
+    """
+    Baixa a pasta do Google Drive para disco local.
+    Cacheada em memória do processo (não rebaixa a cada rerun).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import gdown  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "Dependência ausente: 'gdown'. Adicione em requirements.txt: gdown\n"
+            f"Erro: {e}"
+        )
+
+    # Se já tem conteúdo, não rebaixa
+    if any(out_dir.rglob("*")):
+        return out_dir
+
+    folder_id = _extract_drive_folder_id(folder_url)
+    if not folder_id:
+        raise RuntimeError("Não consegui extrair o folder_id do link do Google Drive.")
+
+    url = f"https://drive.google.com/drive/folders/{folder_id}"
+
+    # download_folder pode criar subpasta interna; depois a gente procura com rglob
+    gdown.download_folder(
+        url=url,
+        output=str(out_dir),
+        quiet=True,
+        use_cookies=False,
+        remaining_ok=True,
+    )
+    return out_dir
+
+
+def resolve_expected_files(root: Path) -> Dict[str, Path]:
+    """
+    Procura cada arquivo esperado recursivamente dentro do root sincronizado.
+    """
+    found: Dict[str, Path] = {}
+    for key, fname in EXPECTED_FILES.items():
+        hits = list(root.rglob(fname))
+        if hits:
+            found[key] = hits[0]
+    return found
+
 
 # =============================================================================
-# Paths (ajuste se seus arquivos tiverem outros nomes)
+# IDs EXPLÍCITOS (encadeamento)
 # =============================================================================
-P_SUBPREF = DATA_DIR / "Subprefeitura.parquet"
-P_DIST = DATA_DIR / "Distritos.parquet"
-P_ISO = DATA_DIR / "Isocronas.parquet"
-P_QUADRA = DATA_DIR / "Quadras.parquet"
-P_LOTE = DATA_DIR / "Lotes.parquet"
-
-
-# =============================================================================
-# IDs EXPLÍCITOS (conforme seu encadeamento)
-# =============================================================================
-# IDs únicos por camada
 SUBPREF_ID = "subpref_id"
 DIST_ID = "distrito_id"
 ISO_ID = "iso_id"
 QUADRA_ID = "quadra_id"
 LOTE_ID = "lote_id"
+CENSO_ID = "censo_id"
 
-# Chaves pai → filho (FK)
-DIST_PARENT = "subpref_id"      # Distritos têm subpref_id
-ISO_PARENT = "distrito_id"      # Isócronas têm distrito_id
-QUADRA_PARENT = "iso_id"        # Quadras têm iso_id (recomendado)
-LOTE_PARENT = "quadra_id"       # Lotes têm quadra_id
+DIST_PARENT = "subpref_id"
+ISO_PARENT = "distrito_id"
+QUADRA_PARENT = "iso_id"
+LOTE_PARENT = "quadra_id"
+CENSO_PARENT = "iso_id"
 
 
 # =============================================================================
-# CSS (estética principal)
+# CSS (estética)
 # =============================================================================
 def _logo_data_uri() -> str:
     if LOGO_PATH.exists():
@@ -151,9 +219,9 @@ def render_header() -> None:
 
 
 # =============================================================================
-# Estado (drill-down)
+# ESTADO (drill-down)
 # =============================================================================
-LEVELS = ["subpref", "distrito", "isocrona", "quadra", "lote"]
+LEVELS = ["subpref", "distrito", "isocrona", "quadra", "final"]
 
 
 def init_state() -> None:
@@ -162,6 +230,7 @@ def init_state() -> None:
     st.session_state.setdefault("selected_distrito_id", None)
     st.session_state.setdefault("selected_iso_ids", set())     # multi
     st.session_state.setdefault("selected_quadra_ids", set())  # multi
+    st.session_state.setdefault("final_mode", "lote")          # "lote" | "censo"
     st.session_state.setdefault("view_center", (-23.55, -46.63))
     st.session_state.setdefault("view_zoom", 11)
 
@@ -173,17 +242,21 @@ def reset_to(level: str) -> None:
         st.session_state["selected_distrito_id"] = None
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
+        st.session_state["final_mode"] = "lote"
         st.session_state["view_center"] = (-23.55, -46.63)
         st.session_state["view_zoom"] = 11
     elif level == "distrito":
         st.session_state["selected_distrito_id"] = None
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
+        st.session_state["final_mode"] = "lote"
     elif level == "isocrona":
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
+        st.session_state["final_mode"] = "lote"
     elif level == "quadra":
         st.session_state["selected_quadra_ids"] = set()
+        st.session_state["final_mode"] = "lote"
 
 
 def _back_one_level() -> None:
@@ -204,9 +277,9 @@ def _toggle_in_set(key: str, value: Any) -> None:
 
 
 # =============================================================================
-# Leitura/saneamento (sem análise, só preparação)
+# IO / SANITIZAÇÃO
 # =============================================================================
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
 def read_layer_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
     if gpd is None:
         return None
@@ -236,7 +309,6 @@ def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
 
 
 def _simplify_lines(gdf: "gpd.GeoDataFrame", tol: float) -> "gpd.GeoDataFrame":
-    """Simplificação apenas para linhas/outlines."""
     if gdf is None or gdf.empty:
         return gdf
     gdf = gdf.copy()
@@ -265,7 +337,6 @@ def bounds_center_zoom(gdf: "gpd.GeoDataFrame") -> Tuple[Tuple[float, float], in
 
 
 def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_col: str) -> Optional[Any]:
-    """Identifica feição clicada via point-in-polygon (rápido se gdf já recortado)."""
     if gdf is None or gdf.empty or not click_latlon:
         return None
     if id_col not in gdf.columns:
@@ -300,7 +371,6 @@ def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_
 
 
 def subset_by_parent(child: "gpd.GeoDataFrame", parent_col: str, parent_val: Any) -> "gpd.GeoDataFrame":
-    """Filtro por FK (encadeamento rápido)."""
     if child is None or child.empty:
         return child
     child = _drop_bad_geoms(child)
@@ -313,7 +383,6 @@ def subset_by_parent(child: "gpd.GeoDataFrame", parent_col: str, parent_val: Any
 
 
 def subset_by_parent_multi(child: "gpd.GeoDataFrame", parent_col: str, parent_vals: Set[Any]) -> "gpd.GeoDataFrame":
-    """Filtro por FK multi (encadeamento rápido)."""
     if child is None or child.empty:
         return child
     child = _drop_bad_geoms(child)
@@ -326,7 +395,7 @@ def subset_by_parent_multi(child: "gpd.GeoDataFrame", parent_col: str, parent_va
 
 
 # =============================================================================
-# Folium – Carto + panes + camadas
+# MAPA (Folium)
 # =============================================================================
 def make_carto_map(center=(-23.55, -46.63), zoom=11):
     if folium is None:
@@ -344,7 +413,6 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
         max_zoom=20,
     ).add_to(m)
 
-    # panes: shapes abaixo, linhas acima
     try:
         folium.map.CustomPane("detail_shapes", z_index=640).add_to(m)
         folium.map.CustomPane("top_lines", z_index=660).add_to(m)
@@ -355,7 +423,6 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
 
 
 def add_outline(m, gdf: "gpd.GeoDataFrame", name: str, color="#111111", weight=1.2, show=True) -> None:
-    """Outline (linhas) — padrão do seu código modelo (boundary + simplify)."""
     if folium is None or gdf is None or gdf.empty:
         return
 
@@ -390,15 +457,12 @@ def add_polygons_selectable(
     selected_weight: float = 2.4,
     selected_fill_opacity: float = 0.18,
 ) -> None:
-    """Polígonos com estilo diferenciado para selecionados (UX/UI)."""
     if folium is None or gdf is None or gdf.empty:
         return
     if id_col not in gdf.columns:
-        # sem id -> render sem seleção
         id_col = ""
 
     selected_ids = selected_ids or set()
-
     cols = ["geometry"] + ([id_col] if id_col else [])
     mini = gdf[cols].copy()
 
@@ -418,42 +482,52 @@ def add_polygons_selectable(
         data=mini.to_json(),
         pane=pane,
         style_function=style_fn,
-        highlight_function=lambda _f: {"weight": base_weight + 1.2, "fillOpacity": min(fill_opacity + 0.10, 0.35)},
+        highlight_function=lambda _f: {
+            "weight": base_weight + 1.2,
+            "fillOpacity": min(fill_opacity + 0.10, 0.35),
+        },
     ).add_to(fg)
     fg.add_to(m)
 
 
 # =============================================================================
-# UI lateral (breadcrumb + status)
+# UI
 # =============================================================================
-def left_panel() -> None:
+def left_panel(files_found: Dict[str, Path]) -> None:
     st.markdown("<span class='pb-badge'>🧭 Fluxo</span>", unsafe_allow_html=True)
-    st.caption("Subprefeitura → Distrito → Isócronas → Quadras → Lotes")
+    st.caption("Subprefeitura → Distrito → Isócronas → Quadras → (Lotes | Setor)")
 
     st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
-
     c1, c2 = st.columns(2)
     with c1:
         st.button("Voltar 1 nível", use_container_width=True, on_click=_back_one_level)
     with c2:
         st.button("Reset", type="secondary", use_container_width=True, on_click=reset_to, args=("subpref",))
 
-    st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
+    if st.session_state["level"] == "final":
+        st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
+        st.markdown("<span class='pb-badge'>🧩 Nível final</span>", unsafe_allow_html=True)
+        st.session_state["final_mode"] = st.radio(
+            "Visualizar",
+            ["lote", "censo"],
+            index=0 if st.session_state["final_mode"] == "lote" else 1,
+            horizontal=True,
+        )
 
+    st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
     st.markdown("<span class='pb-badge'>📌 Seleção</span>", unsafe_allow_html=True)
     st.write(
         {
             "level": st.session_state["level"],
             "subpref_id": st.session_state["selected_subpref_id"],
             "distrito_id": st.session_state["selected_distrito_id"],
-            "iso_ids": sorted(list(st.session_state["selected_iso_ids"]))[:30],
-            "quadra_ids": sorted(list(st.session_state["selected_quadra_ids"]))[:30],
+            "iso_ids": sorted(list(st.session_state["selected_iso_ids"]))[:25],
+            "quadra_ids": sorted(list(st.session_state["selected_quadra_ids"]))[:25],
         }
     )
-    st.markdown(
-        "<div class='pb-note'>Clique no mapa para avançar. Em Isócronas e Quadras, o clique alterna seleção (multi).</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
+    st.markdown("<span class='pb-badge'>🗂️ Arquivos detectados</span>", unsafe_allow_html=True)
+    st.write({k: str(v) for k, v in files_found.items()})
 
 
 def kpis_row() -> None:
@@ -462,30 +536,26 @@ def kpis_row() -> None:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
         st.markdown("<span class='pb-badge'>📍 Nível</span>", unsafe_allow_html=True)
         st.markdown(f"**{st.session_state['level']}**")
-        st.caption("Camada em exibição")
         st.markdown("</div>", unsafe_allow_html=True)
     with c2:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
         st.markdown("<span class='pb-badge'>🏛️ Subpref</span>", unsafe_allow_html=True)
         st.markdown(f"**{st.session_state['selected_subpref_id'] or '—'}**")
-        st.caption("Seleção")
         st.markdown("</div>", unsafe_allow_html=True)
     with c3:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
         st.markdown("<span class='pb-badge'>🗺️ Distrito</span>", unsafe_allow_html=True)
         st.markdown(f"**{st.session_state['selected_distrito_id'] or '—'}**")
-        st.caption("Seleção")
         st.markdown("</div>", unsafe_allow_html=True)
     with c4:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
         st.markdown("<span class='pb-badge'>🧩 Multi</span>", unsafe_allow_html=True)
         st.markdown(f"**Iso: {len(st.session_state['selected_iso_ids'])} | Quad: {len(st.session_state['selected_quadra_ids'])}**")
-        st.caption("Seleções ativas")
         st.markdown("</div>", unsafe_allow_html=True)
 
 
 # =============================================================================
-# App
+# APP
 # =============================================================================
 def main() -> None:
     init_state()
@@ -496,171 +566,118 @@ def main() -> None:
         st.error("Este app requer `geopandas`, `folium` e `streamlit-folium`.")
         return
 
+    # 1) Sync pasta do Drive
+    with st.spinner("Baixando dados do Google Drive…"):
+        try:
+            drive_dir = ensure_drive_folder_synced(GOOGLE_DRIVE_FOLDER_URL, DRIVE_SYNC_DIR)
+        except Exception as e:
+            st.error("Falha ao baixar a pasta do Google Drive.")
+            st.code(str(e))
+            st.info("Confira permissões: 'Qualquer pessoa com o link' (Leitor).")
+            return
+
+    files_found = resolve_expected_files(drive_dir)
+
+    # 2) Validação rápida
+    missing = [k for k in EXPECTED_FILES.keys() if k not in files_found]
+    if missing:
+        st.error("Não encontrei alguns arquivos esperados dentro da pasta baixada.")
+        st.write("Faltando:", missing)
+        st.write("Procurando por:", EXPECTED_FILES)
+        st.write("Pasta sincronizada:", str(drive_dir))
+        st.write("Arquivos encontrados:", {k: str(v) for k, v in files_found.items()})
+        return
+
+    # 3) Carrega (cache_data)
+    g_subpref = read_layer_parquet(files_found["subpref"])
+    g_dist = read_layer_parquet(files_found["dist"])
+    g_iso = read_layer_parquet(files_found["iso"])
+    g_quadra = read_layer_parquet(files_found["quadra"])
+    g_lote = read_layer_parquet(files_found["lote"])
+    g_censo = read_layer_parquet(files_found["censo"])
+
+    if g_subpref is None or g_subpref.empty:
+        st.error(f"Subprefeitura vazia/erro ao ler: {files_found['subpref']}")
+        return
+
+    # saneia
+    g_subpref = _drop_bad_geoms(g_subpref)
+    g_dist = _drop_bad_geoms(g_dist) if g_dist is not None else None
+    g_iso = _drop_bad_geoms(g_iso) if g_iso is not None else None
+    g_quadra = _drop_bad_geoms(g_quadra) if g_quadra is not None else None
+    g_lote = _drop_bad_geoms(g_lote) if g_lote is not None else None
+    g_censo = _drop_bad_geoms(g_censo) if g_censo is not None else None
+
     left, right = st.columns([1, 4], gap="large")
 
     with left:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
-        left_panel()
+        left_panel(files_found)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
         kpis_row()
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
 
-        # --- Carrega camadas (cacheadas) ---
-        g_subpref = read_layer_parquet(P_SUBPREF)
-        g_dist = read_layer_parquet(P_DIST)
-        g_iso = read_layer_parquet(P_ISO)
-        g_quadra = read_layer_parquet(P_QUADRA)
-        g_lote = read_layer_parquet(P_LOTE)
-
-        # --- Validação mínima ---
-        if g_subpref is None or g_subpref.empty:
-            st.warning(f"Subprefeitura não encontrada/vazia: {P_SUBPREF}")
-            st.markdown("</div>", unsafe_allow_html=True)
-            return
-
-        # saneia
-        g_subpref = _drop_bad_geoms(g_subpref)
-        if g_dist is not None:
-            g_dist = _drop_bad_geoms(g_dist)
-        if g_iso is not None:
-            g_iso = _drop_bad_geoms(g_iso)
-        if g_quadra is not None:
-            g_quadra = _drop_bad_geoms(g_quadra)
-        if g_lote is not None:
-            g_lote = _drop_bad_geoms(g_lote)
-
-        # --- Mapa base ---
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
         if m is None:
             st.error("Falha ao inicializar o mapa.")
-            st.markdown("</div>", unsafe_allow_html=True)
             return
 
         level = st.session_state["level"]
 
-        # =====================================================================================
-        # NÍVEL 0: SUBPREF (abre com LINHAS)
-        # =====================================================================================
         if level == "subpref":
             st.markdown("### Subprefeituras")
-            st.caption("Clique em uma subprefeitura para abrir os distritos (recorte).")
-
             add_outline(m, g_subpref, "Subprefeituras (linha)", color="#111111", weight=1.25, show=True)
-
             st.session_state["view_center"] = (-23.55, -46.63)
             st.session_state["view_zoom"] = 11
 
-        # =====================================================================================
-        # NÍVEL 1: DISTRITOS (da subpref selecionada)
-        # =====================================================================================
         elif level == "distrito":
-            if g_dist is None or g_dist.empty:
-                st.warning(f"Distritos não encontrados/vazios: {P_DIST}")
-                st.markdown("</div>", unsafe_allow_html=True)
-                return
-
             sp = st.session_state["selected_subpref_id"]
             if sp is None:
-                reset_to("subpref")
-                st.rerun()
+                reset_to("subpref"); st.rerun()
 
-            g_show = subset_by_parent(g_dist, DIST_PARENT, sp)
-
+            g_show = subset_by_parent(g_dist, DIST_PARENT, sp)  # type: ignore
             st.markdown(f"### Distritos (Subpref {sp})")
-            st.caption("Clique em um distrito para abrir isócronas.")
-
             add_outline(m, g_show, "Distritos (linha)", color="#111111", weight=1.0, show=True)
-            add_polygons_selectable(
-                m,
-                g_show,
-                name="Distritos (clique)",
-                id_col=DIST_ID,
-                selected_ids=set(),
-                base_color="#111111",
-                base_weight=0.6,
-                fill_color="#ffffff",
-                fill_opacity=0.06,
-            )
+            add_polygons_selectable(m, g_show, "Distritos (clique)", DIST_ID, selected_ids=set(), base_weight=0.6, fill_opacity=0.06)
 
             if not g_show.empty:
                 center, zoom = bounds_center_zoom(g_show)
                 st.session_state["view_center"], st.session_state["view_zoom"] = center, zoom
                 m.location, m.zoom_start = center, zoom
 
-        # =====================================================================================
-        # NÍVEL 2: ISÓCRONAS (do distrito selecionado)
-        # =====================================================================================
         elif level == "isocrona":
-            if g_iso is None or g_iso.empty:
-                st.warning(f"Isócronas não encontradas/vazias: {P_ISO}")
-                st.markdown("</div>", unsafe_allow_html=True)
-                return
-
             d = st.session_state["selected_distrito_id"]
             if d is None:
-                reset_to("distrito")
-                st.rerun()
+                reset_to("distrito"); st.rerun()
 
-            g_show = subset_by_parent(g_iso, ISO_PARENT, d)
-
+            g_show = subset_by_parent(g_iso, ISO_PARENT, d)  # type: ignore
             st.markdown(f"### Isócronas (Distrito {d})")
-            st.caption("Clique para selecionar múltiplas isócronas. Ao selecionar, abre Quadras.")
-
             add_polygons_selectable(
-                m,
-                g_show,
-                name="Isócronas (multi)",
-                id_col=ISO_ID,
+                m, g_show, "Isócronas (multi)", ISO_ID,
                 selected_ids=st.session_state["selected_iso_ids"],
-                base_color="#111111",
-                base_weight=0.6,
-                fill_color="#ffffff",
-                fill_opacity=0.10,
-                selected_color=PB_NAVY,
-                selected_weight=2.4,
-                selected_fill_opacity=0.20,
+                base_weight=0.6, fill_opacity=0.10,
+                selected_color=PB_NAVY, selected_weight=2.4, selected_fill_opacity=0.20
             )
-            add_outline(m, g_show, "Isócronas (linha)", color="#111111", weight=0.7, show=False)
 
             if not g_show.empty:
                 center, zoom = bounds_center_zoom(g_show)
                 st.session_state["view_center"], st.session_state["view_zoom"] = center, zoom
                 m.location, m.zoom_start = center, zoom
 
-        # =====================================================================================
-        # NÍVEL 3: QUADRAS (das isócronas selecionadas)
-        # =====================================================================================
         elif level == "quadra":
-            if g_quadra is None or g_quadra.empty:
-                st.warning(f"Quadras não encontradas/vazias: {P_QUADRA}")
-                st.markdown("</div>", unsafe_allow_html=True)
-                return
-
             iso_ids: Set[Any] = st.session_state["selected_iso_ids"]
             if not iso_ids:
-                reset_to("isocrona")
-                st.rerun()
+                reset_to("isocrona"); st.rerun()
 
-            g_show = subset_by_parent_multi(g_quadra, QUADRA_PARENT, iso_ids)
-
+            g_show = subset_by_parent_multi(g_quadra, QUADRA_PARENT, iso_ids)  # type: ignore
             st.markdown("### Quadras (Isócronas selecionadas)")
-            st.caption("Clique para selecionar múltiplas quadras. Ao selecionar, abre Lotes.")
-
             add_polygons_selectable(
-                m,
-                g_show,
-                name="Quadras (multi)",
-                id_col=QUADRA_ID,
+                m, g_show, "Quadras (multi)", QUADRA_ID,
                 selected_ids=st.session_state["selected_quadra_ids"],
-                base_color="#111111",
-                base_weight=0.45,
-                fill_color="#ffffff",
-                fill_opacity=0.10,
-                selected_color=PB_NAVY,
-                selected_weight=2.2,
-                selected_fill_opacity=0.22,
+                base_weight=0.45, fill_opacity=0.10,
+                selected_color=PB_NAVY, selected_weight=2.2, selected_fill_opacity=0.22
             )
 
             if not g_show.empty:
@@ -668,57 +685,39 @@ def main() -> None:
                 st.session_state["view_center"], st.session_state["view_zoom"] = center, min(zoom + 1, 17)
                 m.location, m.zoom_start = st.session_state["view_center"], st.session_state["view_zoom"]
 
-        # =====================================================================================
-        # NÍVEL 4: LOTES (das quadras selecionadas) — último nível
-        # =====================================================================================
-        else:  # "lote"
-            if g_lote is None or g_lote.empty:
-                st.warning(f"Lotes não encontrados/vazios: {P_LOTE}")
-                st.markdown("</div>", unsafe_allow_html=True)
-                return
-
+        else:  # final
+            iso_ids: Set[Any] = st.session_state["selected_iso_ids"]
             quad_ids: Set[Any] = st.session_state["selected_quadra_ids"]
-            if not quad_ids:
-                reset_to("quadra")
-                st.rerun()
+            if not iso_ids:
+                reset_to("isocrona"); st.rerun()
 
-            g_show = subset_by_parent_multi(g_lote, LOTE_PARENT, quad_ids)
+            mode = st.session_state["final_mode"]
+            if mode == "lote":
+                if not quad_ids:
+                    reset_to("quadra"); st.rerun()
+                g_show = subset_by_parent_multi(g_lote, LOTE_PARENT, quad_ids)  # type: ignore
+                st.markdown("### Lotes (Quadras selecionadas)")
+                add_polygons_selectable(m, g_show, "Lotes", LOTE_ID, selected_ids=set(), base_weight=0.25, fill_opacity=0.10)
+            else:
+                g_show = subset_by_parent_multi(g_censo, CENSO_PARENT, iso_ids)  # type: ignore
+                st.markdown("### Setores Censitários (Isócronas selecionadas)")
+                add_polygons_selectable(m, g_show, "Setor censitário", CENSO_ID, selected_ids=set(), base_weight=0.35, fill_opacity=0.08)
 
-            st.markdown("### Lotes (Quadras selecionadas)")
-            st.caption("Último nível de agregação. Aqui você pode plugar painel de atributos e ações.")
-
-            add_polygons_selectable(
-                m,
-                g_show,
-                name="Lotes",
-                id_col=LOTE_ID if (LOTE_ID in g_show.columns) else "",
-                selected_ids=set(),
-                base_color="#111111",
-                base_weight=0.25,
-                fill_color="#ffffff",
-                fill_opacity=0.10,
-            )
-
-            if not g_show.empty:
+            if g_show is not None and not g_show.empty:
                 center, zoom = bounds_center_zoom(g_show)
                 st.session_state["view_center"], st.session_state["view_zoom"] = center, min(zoom + 1, 18)
                 m.location, m.zoom_start = st.session_state["view_center"], st.session_state["view_zoom"]
 
-        # Layer control
         try:
             folium.LayerControl(position="bottomright", collapsed=False).add_to(m)
         except Exception:
             pass
 
-        # Render
         out = st_folium(m, height=780, use_container_width=True, key="map_view", returned_objects=[])
 
-        # =====================================================================================
-        # CLIQUES: atualiza estado e avança no fluxo
-        # =====================================================================================
+        # CLIQUES → avança
         click = (out or {}).get("last_clicked")
         if click:
-            # 0) subpref -> distrito
             if level == "subpref":
                 picked = pick_feature_id(g_subpref, click, SUBPREF_ID)
                 if picked is not None:
@@ -726,7 +725,6 @@ def main() -> None:
                     st.session_state["level"] = "distrito"
                     st.rerun()
 
-            # 1) distrito -> isocrona
             elif level == "distrito":
                 sp = st.session_state["selected_subpref_id"]
                 g_show = subset_by_parent(g_dist, DIST_PARENT, sp)  # type: ignore
@@ -735,10 +733,10 @@ def main() -> None:
                     st.session_state["selected_distrito_id"] = picked
                     st.session_state["selected_iso_ids"] = set()
                     st.session_state["selected_quadra_ids"] = set()
+                    st.session_state["final_mode"] = "lote"
                     st.session_state["level"] = "isocrona"
                     st.rerun()
 
-            # 2) isocrona (multi): toggle; se houver >=1 -> quadra
             elif level == "isocrona":
                 d = st.session_state["selected_distrito_id"]
                 g_show = subset_by_parent(g_iso, ISO_PARENT, d)  # type: ignore
@@ -750,7 +748,6 @@ def main() -> None:
                         st.session_state["level"] = "quadra"
                     st.rerun()
 
-            # 3) quadra (multi): toggle; se houver >=1 -> lote
             elif level == "quadra":
                 iso_ids = st.session_state["selected_iso_ids"]
                 g_show = subset_by_parent_multi(g_quadra, QUADRA_PARENT, iso_ids)  # type: ignore
@@ -758,12 +755,8 @@ def main() -> None:
                 if picked is not None:
                     _toggle_in_set("selected_quadra_ids", picked)
                     if len(st.session_state["selected_quadra_ids"]) >= 1:
-                        st.session_state["level"] = "lote"
+                        st.session_state["level"] = "final"
                     st.rerun()
-
-            # 4) lote: (opcional) selecionar lote aqui — por enquanto só visual
-            else:
-                pass
 
         st.markdown("</div>", unsafe_allow_html=True)
 
