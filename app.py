@@ -22,6 +22,8 @@ except Exception:
     st_folium = None  # type: ignore
     Point = None  # type: ignore
 
+import pandas as pd  # type: ignore
+
 # =============================================================================
 # CONFIG / UI
 # =============================================================================
@@ -54,10 +56,10 @@ LINE_CAP = "round"
 LINE_JOIN = "round"
 
 # “Sombra” do nível acima (bem sutil, tracejada e fina)
-PARENT_FILL_OPACITY = 0.12          # sombra suave
+PARENT_FILL_OPACITY = 0.12
 PARENT_STROKE_OPACITY = 0.30
-PARENT_STROKE_WEIGHT = 0.7          # bem fino
-PARENT_STROKE_DASH = "2,6"          # tracejado leve
+PARENT_STROKE_WEIGHT = 0.7
+PARENT_STROKE_DASH = "2,6"
 
 # Simplificação por nível (somente para VISUAL, não para análise)
 SIMPLIFY_TOL_BY_LEVEL = {
@@ -81,7 +83,7 @@ LOGO_PATH = ASSETS_DIR / "logo_todos.jpg"
 LOGO_HEIGHT = 46
 
 # =============================================================================
-# IDS DO ENCADEAMENTO (VOCÊ VAI GERAR)
+# IDS DO ENCADEAMENTO
 # =============================================================================
 SUBPREF_ID = "subpref_id"
 DIST_ID = "distrito_id"
@@ -98,26 +100,14 @@ CENSO_PARENT = "iso_id"        # setor censitário -> isócrona
 
 LEVELS = ["subpref", "distrito", "isocrona", "quadra", "final"]
 
-# =============================================================================
-# DRIVE LINKS/IDS (via secrets.toml)
-#  - você pode colocar: o ID puro "1abc..." OU a URL completa do drive
-# =============================================================================
-def _get_secret(key: str) -> str:
-    try:
-        return str(st.secrets.get(key, "")).strip()
-    except Exception:
-        return ""
-
-
-# chaves esperadas em secrets.toml:
-# PB_SUBPREF_FILE_ID, PB_DISTRITO_FILE_ID, PB_ISOCRONAS_FILE_ID, PB_QUADRAS_FILE_ID, PB_LOTES_FILE_ID, PB_CENSO_FILE_ID
-GDRIVE_RAW = {
-    "subpref": _get_secret("PB_SUBPREF_FILE_ID"),
-    "dist": _get_secret("PB_DISTRITO_FILE_ID"),
-    "iso": _get_secret("PB_ISOCRONAS_FILE_ID"),
-    "quadra": _get_secret("PB_QUADRAS_FILE_ID"),
-    "lote": _get_secret("PB_LOTES_FILE_ID"),
-    "censo": _get_secret("PB_CENSO_FILE_ID"),
+# colunas que precisam ser normalizadas por layer (ID + PAI)
+LAYER_ID_COLS = {
+    "subpref": [SUBPREF_ID],
+    "dist": [DIST_ID, DIST_PARENT],
+    "iso": [ISO_ID, ISO_PARENT],
+    "quadra": [QUADRA_ID, QUADRA_PARENT],
+    "lote": [LOTE_ID, LOTE_PARENT],
+    "censo": [CENSO_ID, CENSO_PARENT],
 }
 
 LOCAL_FILENAMES = {
@@ -128,6 +118,37 @@ LOCAL_FILENAMES = {
     "lote": "Lotes.parquet",
     "censo": "Setorcensitario.parquet",
 }
+
+# =============================================================================
+# SECRETS + OVERRIDES (sidebar)
+# =============================================================================
+def _get_secret(key: str) -> str:
+    try:
+        return str(st.secrets.get(key, "")).strip()
+    except Exception:
+        return ""
+
+
+# keys esperadas em secrets.toml:
+# PB_SUBPREF_FILE_ID, PB_DISTRITO_FILE_ID, PB_ISOCRONAS_FILE_ID, PB_QUADRAS_FILE_ID, PB_LOTES_FILE_ID, PB_CENSO_FILE_ID
+SECRETS_MAP = {
+    "subpref": "PB_SUBPREF_FILE_ID",
+    "dist": "PB_DISTRITO_FILE_ID",
+    "iso": "PB_ISOCRONAS_FILE_ID",
+    "quadra": "PB_QUADRAS_FILE_ID",
+    "lote": "PB_LOTES_FILE_ID",
+    "censo": "PB_CENSO_FILE_ID",
+}
+
+
+def get_drive_raw(layer_key: str) -> str:
+    """Prioridade: sidebar (session_state) > secrets.toml."""
+    ui_key = f"drive_{layer_key}_raw"
+    raw_ui = str(st.session_state.get(ui_key, "")).strip()
+    if raw_ui:
+        return raw_ui
+    return _get_secret(SECRETS_MAP.get(layer_key, ""))
+
 
 # =============================================================================
 # CSS / HEADER
@@ -202,6 +223,7 @@ def render_header() -> None:
         unsafe_allow_html=True,
     )
 
+
 # =============================================================================
 # STATE
 # =============================================================================
@@ -258,6 +280,44 @@ def _toggle_in_set(key: str, value: Any) -> None:
 
 
 # =============================================================================
+# ID NORMALIZATION (CORRIGE “LINKS” ENTRE ARQUIVOS)
+# =============================================================================
+def _id_to_str(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+
+    if isinstance(v, float):
+        if v.is_integer():
+            return str(int(v))
+        return str(v).strip()
+
+    if isinstance(v, int):
+        return str(v)
+
+    s = str(v).strip()
+    if s.endswith(".0"):
+        core = s[:-2]
+        if core.isdigit():
+            return core
+    return s
+
+
+def normalize_id_cols(gdf: "gpd.GeoDataFrame", cols: Iterable[str]) -> "gpd.GeoDataFrame":
+    if gdf is None or gdf.empty:
+        return gdf
+    g = gdf.copy()
+    for c in cols:
+        if c in g.columns:
+            g[c] = g[c].map(_id_to_str)
+    return g
+
+
+# =============================================================================
 # DRIVE helpers
 # =============================================================================
 _DRIVE_ID_RE_1 = re.compile(r"/file/d/([a-zA-Z0-9_-]+)")
@@ -268,7 +328,6 @@ def extract_drive_id(raw: str) -> str:
     raw = (raw or "").strip()
     if not raw:
         return ""
-    # se já é um ID puro:
     if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", raw) and "http" not in raw.lower():
         return raw
 
@@ -280,27 +339,11 @@ def extract_drive_id(raw: str) -> str:
     if m:
         return m.group(1)
 
-    # fallback: tenta pegar algo que pareça ID
     m = re.search(r"([a-zA-Z0-9_-]{20,})", raw)
     return m.group(1) if m else ""
 
 
-def _ensure_file_ids_configured(keys: list[str]) -> Optional[str]:
-    missing = []
-    for k in keys:
-        if not extract_drive_id(GDRIVE_RAW.get(k, "")):
-            missing.append(k)
-    if missing:
-        return (
-            "Faltam FILE_IDs (ou links válidos) no secrets.toml para: "
-            + ", ".join(missing)
-            + "."
-        )
-    return None
-
-
 def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path:
-    """Download robusto (streaming) via requests. Evita manter o conteúdo em memória."""
     import requests
 
     file_id = extract_drive_id(file_id_or_url)
@@ -329,7 +372,7 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
         raise RuntimeError(f"Download falhou (status={response.status_code}).")
 
     total = int(response.headers.get("Content-Length", 0) or 0)
-    chunk = 1024 * 1024  # 1MB
+    chunk = 1024 * 1024
 
     ui_label = label or dst.name
     prog = st.progress(0, text=f"Baixando {ui_label}…")
@@ -349,12 +392,27 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
     return dst
 
 
+def local_layer_path(layer_key: str) -> Path:
+    return DATA_CACHE_DIR / LOCAL_FILENAMES[layer_key]
+
+
+def layer_available_locally(layer_key: str) -> bool:
+    p = local_layer_path(layer_key)
+    return p.exists() and p.stat().st_size > 0
+
+
 def ensure_local_layer(layer_key: str) -> Path:
-    raw = GDRIVE_RAW.get(layer_key, "")
+    """Preferência: arquivo local -> Drive (se configurado)."""
+    dst = local_layer_path(layer_key)
+    if layer_available_locally(layer_key):
+        return dst
+
+    raw = get_drive_raw(layer_key)
     if not raw:
-        raise RuntimeError(f"FILE_ID não configurado para layer '{layer_key}'.")
-    dst = DATA_CACHE_DIR / LOCAL_FILENAMES[layer_key]
-    return download_drive_file(raw, dst, label=LOCAL_FILENAMES[layer_key])
+        raise RuntimeError(
+            f"Layer '{layer_key}' não encontrada localmente em {dst.name} e não há FILE_ID/link configurado."
+        )
+    return download_drive_file(raw, dst, label=dst.name)
 
 
 # =============================================================================
@@ -389,17 +447,6 @@ def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
     return gdf
 
 
-def simplify_for_display(gdf: "gpd.GeoDataFrame", tol: float) -> "gpd.GeoDataFrame":
-    if gdf is None or gdf.empty:
-        return gdf
-    g = gdf.copy()
-    try:
-        g["geometry"] = g.geometry.simplify(tol, preserve_topology=True)
-    except Exception:
-        pass
-    return _drop_bad_geoms(g)
-
-
 def bounds_center_zoom(gdf: "gpd.GeoDataFrame") -> Tuple[Tuple[float, float], int]:
     minx, miny, maxx, maxy = gdf.total_bounds
     center = ((miny + maxy) / 2, (minx + maxx) / 2)
@@ -423,7 +470,12 @@ def subset_by_parent(child: "gpd.GeoDataFrame", parent_col: str, parent_val: Any
     child = _drop_bad_geoms(child)
     if parent_col not in child.columns or parent_val is None:
         return child.iloc[0:0].copy()
-    return child[child[parent_col] == parent_val]
+
+    pv = _id_to_str(parent_val)
+    if pv is None:
+        return child.iloc[0:0].copy()
+
+    return child[child[parent_col].map(_id_to_str) == pv]
 
 
 def subset_by_parent_multi(child: "gpd.GeoDataFrame", parent_col: str, parent_vals: Set[Any]) -> "gpd.GeoDataFrame":
@@ -432,7 +484,12 @@ def subset_by_parent_multi(child: "gpd.GeoDataFrame", parent_col: str, parent_va
     child = _drop_bad_geoms(child)
     if parent_col not in child.columns or not parent_vals:
         return child.iloc[0:0].copy()
-    return child[child[parent_col].isin(list(parent_vals))]
+
+    pset = {v for v in (_id_to_str(x) for x in parent_vals) if v is not None}
+    if not pset:
+        return child.iloc[0:0].copy()
+
+    return child[child[parent_col].map(_id_to_str).isin(list(pset))]
 
 
 def subset_by_id(gdf: "gpd.GeoDataFrame", id_col: str, id_val: Any) -> "gpd.GeoDataFrame":
@@ -440,7 +497,12 @@ def subset_by_id(gdf: "gpd.GeoDataFrame", id_col: str, id_val: Any) -> "gpd.GeoD
         return gdf
     if id_col not in gdf.columns or id_val is None:
         return gdf.iloc[0:0].copy()
-    return gdf[gdf[id_col] == id_val]
+
+    iv = _id_to_str(id_val)
+    if iv is None:
+        return gdf.iloc[0:0].copy()
+
+    return gdf[gdf[id_col].map(_id_to_str) == iv]
 
 
 def subset_by_id_multi(gdf: "gpd.GeoDataFrame", id_col: str, ids: Set[Any]) -> "gpd.GeoDataFrame":
@@ -448,14 +510,66 @@ def subset_by_id_multi(gdf: "gpd.GeoDataFrame", id_col: str, ids: Set[Any]) -> "
         return gdf
     if id_col not in gdf.columns or not ids:
         return gdf.iloc[0:0].copy()
-    return gdf[gdf[id_col].isin(list(ids))]
+
+    iset = {v for v in (_id_to_str(x) for x in ids) if v is not None}
+    if not iset:
+        return gdf.iloc[0:0].copy()
+
+    return gdf[gdf[id_col].map(_id_to_str).isin(list(iset))]
+
+
+# =============================================================================
+# DIAGNÓSTICO FK
+# =============================================================================
+def diag_layer(gdf: "gpd.GeoDataFrame", title: str, cols: list[str]) -> None:
+    with st.expander(f"🧪 Diagnóstico: {title}", expanded=False):
+        if gdf is None or gdf.empty:
+            st.warning("GDF vazio.")
+            return
+        st.write(f"Linhas: **{len(gdf):,}**")
+        for c in cols:
+            if c not in gdf.columns:
+                st.error(f"Coluna ausente: {c}")
+                continue
+            s = gdf[c]
+            n_null = int(s.isna().sum())
+            n_unique = int(s.dropna().nunique())
+            ex = s.dropna().astype(str).head(5).tolist()
+            st.write(f"- **{c}** | dtype={s.dtype} | nulos={n_null} | únicos={n_unique} | ex={ex}")
+
+
+def diag_fk(parent: "gpd.GeoDataFrame", parent_id: str, child: "gpd.GeoDataFrame", child_fk: str, label: str) -> None:
+    with st.expander(f"🔗 Checagem FK: {label}", expanded=False):
+        if parent is None or parent.empty or child is None or child.empty:
+            st.warning("Pai ou filho vazio.")
+            return
+        if parent_id not in parent.columns or child_fk not in child.columns:
+            st.error("Coluna ID/FK ausente.")
+            return
+
+        pvals = pd.Series(parent[parent_id].dropna().map(_id_to_str).unique())
+        cvals = pd.Series(child[child_fk].dropna().map(_id_to_str).unique())
+
+        pset = set(pvals.tolist())
+        cset = set(cvals.tolist())
+
+        missing = sorted(list(cset - pset))
+        ok = len(cset) - len(missing)
+        pct_ok = (ok / max(len(cset), 1)) * 100.0
+
+        st.write(f"FK distintos no filho: **{len(cset):,}**")
+        st.write(f"FK que existem no pai: **{ok:,}** (**{pct_ok:.2f}%**)")
+        st.write(f"FK faltando no pai: **{len(missing):,}**")
+
+        if missing:
+            st.write("Exemplos (até 20):")
+            st.code(", ".join(missing[:20]))
 
 
 # =============================================================================
 # CLICK HITTEST
 # =============================================================================
-def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_col: str) -> Optional[Any]:
-    """Retorna o id_col da feição que contém/intersecta o clique."""
+def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_col: str) -> Optional[str]:
     if gdf is None or gdf.empty or not click_latlon:
         return None
     if id_col not in gdf.columns:
@@ -472,7 +586,6 @@ def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_
         pt = Point(lng, lat)
         cand = gdf
 
-        # usa sindex se existir (bem mais rápido)
         try:
             if hasattr(gdf, "sindex") and gdf.sindex is not None:
                 idx = list(gdf.sindex.intersection(pt.bounds))
@@ -486,7 +599,7 @@ def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_
             hit = cand[cand.geometry.intersects(pt)]
         if hit.empty:
             return None
-        return hit.iloc[0][id_col]
+        return _id_to_str(hit.iloc[0][id_col])
     except Exception:
         return None
 
@@ -509,7 +622,6 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
         max_zoom=20,
     ).add_to(m)
 
-    # panes: sombra (pai) abaixo; shapes; linhas por cima
     try:
         folium.map.CustomPane("parent_fill", z_index=610).add_to(m)
         folium.map.CustomPane("detail_shapes", z_index=640).add_to(m)
@@ -533,44 +645,6 @@ def _mk_tooltip(id_col: str, prefix: str) -> Optional[Any]:
     )
 
 
-def add_outline(
-    m,
-    gdf: "gpd.GeoDataFrame",
-    name: str,
-    color="#111111",
-    weight=1.2,
-    show=True,
-    simplify_tol: float = 0.0006,
-) -> None:
-    """Contorno com acabamento melhor (cap/join redondos)."""
-    if folium is None or gdf is None or gdf.empty:
-        return
-
-    line = gdf[["geometry"]].copy()
-    try:
-        line["geometry"] = line.geometry.boundary
-        line["geometry"] = line.geometry.simplify(simplify_tol, preserve_topology=True)
-    except Exception:
-        return
-    line = _drop_bad_geoms(line)
-
-    fg = folium.FeatureGroup(name=name, show=show)
-    folium.GeoJson(
-        data=line.to_json(),
-        pane="top_lines",
-        smooth_factor=SMOOTH_FACTOR,
-        style_function=lambda _f: {
-            "fillOpacity": 0,
-            "color": color,
-            "weight": weight,
-            "opacity": 0.95,
-            "lineCap": LINE_CAP,
-            "lineJoin": LINE_JOIN,
-        },
-    ).add_to(fg)
-    fg.add_to(m)
-
-
 def add_parent_fill(
     m,
     gdf: "gpd.GeoDataFrame",
@@ -584,7 +658,6 @@ def add_parent_fill(
     dash_array: str = PARENT_STROKE_DASH,
     simplify_tol: float = 0.0006,
 ) -> None:
-    """Camada do nível acima como 'sombra' (fill sutil + borda tracejada fina)."""
     if folium is None or gdf is None or gdf.empty:
         return
 
@@ -631,20 +704,18 @@ def add_polygons_selectable(
     tooltip_prefix: str = "ID: ",
     simplify_tol: Optional[float] = None,
 ) -> None:
-    """
-    Seleção mais rápida:
-      - camada base com estilo fixo
-      - overlay só com selecionados (pequeno)
-    """
     if folium is None or gdf is None or gdf.empty:
         return
     if id_col not in gdf.columns:
         return
 
     selected_ids = selected_ids or set()
+    sel = {v for v in (_id_to_str(x) for x in selected_ids) if v is not None}
 
     tol = simplify_tol if simplify_tol is not None else 0.0006
     mini = gdf[[id_col, "geometry"]].copy()
+    mini[id_col] = mini[id_col].map(_id_to_str)
+
     try:
         mini["geometry"] = mini.geometry.simplify(tol, preserve_topology=True)
     except Exception:
@@ -653,7 +724,6 @@ def add_polygons_selectable(
 
     tooltip = _mk_tooltip(id_col, tooltip_prefix)
 
-    # 1) Base (fixa)
     fg_base = folium.FeatureGroup(name=name, show=True)
     folium.GeoJson(
         data=mini.to_json(),
@@ -676,13 +746,12 @@ def add_polygons_selectable(
     ).add_to(fg_base)
     fg_base.add_to(m)
 
-    # 2) Selecionados (overlay pequeno)
-    if selected_ids:
-        sel = mini[mini[id_col].isin(list(selected_ids))]
-        if not sel.empty:
+    if sel:
+        sel_gdf = mini[mini[id_col].isin(list(sel))]
+        if not sel_gdf.empty:
             fg_sel = folium.FeatureGroup(name=f"{name} (selecionados)", show=True)
             folium.GeoJson(
-                data=sel.to_json(),
+                data=sel_gdf.to_json(),
                 pane=pane,
                 smooth_factor=SMOOTH_FACTOR,
                 style_function=lambda _f: {
@@ -702,6 +771,39 @@ def add_polygons_selectable(
 # =============================================================================
 # UI
 # =============================================================================
+def data_sources_panel() -> None:
+    st.markdown("<span class='pb-badge'>🗂️ Dados</span>", unsafe_allow_html=True)
+    st.caption("Use arquivo local (data_cache) ou cole o link/ID do Drive aqui.")
+
+    # mostra status local
+    for k in ["subpref", "dist", "iso", "quadra", "lote", "censo"]:
+        p = local_layer_path(k)
+        ok = layer_available_locally(k)
+        st.write(f"- `{p.name}`: {'✅ local' if ok else '—'}")
+
+    st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
+
+    with st.expander("Configurar links/IDs do Drive", expanded=False):
+        for k, secret_key in SECRETS_MAP.items():
+            existing = str(st.session_state.get(f"drive_{k}_raw", "")).strip()
+            hint = _get_secret(secret_key)
+            placeholder = hint if hint else "Cole aqui o ID puro ou a URL do Drive"
+            st.session_state[f"drive_{k}_raw"] = st.text_input(
+                f"{k} ({LOCAL_FILENAMES[k]})",
+                value=existing,
+                placeholder=placeholder,
+            )
+        st.caption("Dica: se já estiver em secrets, você não precisa colar aqui.")
+
+    st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='pb-note'>"
+        "Se o app não encontrar o parquet local, ele tenta baixar do Drive usando o link/ID configurado. "
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def left_panel() -> None:
     st.markdown("<span class='pb-badge'>🧭 Fluxo</span>", unsafe_allow_html=True)
     st.caption("Subprefeitura → Distrito → Isócronas → Quadras → (Lotes | Setor Censitário)")
@@ -756,14 +858,7 @@ def left_panel() -> None:
         )
 
     st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
-    st.markdown("<span class='pb-badge'>⚙️ Performance</span>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='pb-note'>"
-        "Para evitar crash: os arquivos são baixados e lidos somente quando o nível precisa. "
-        "O nível final (lotes/setor) só carrega ao clicar no botão de download."
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    data_sources_panel()
 
 
 def kpis_row() -> None:
@@ -805,12 +900,6 @@ def main() -> None:
         st.error("Este app requer `geopandas`, `folium` e `streamlit-folium`.")
         return
 
-    # IDs mínimos (não exige lote/censo no boot)
-    msg = _ensure_file_ids_configured(["subpref", "dist", "iso", "quadra"])
-    if msg:
-        st.error(msg)
-        st.stop()
-
     left, right = st.columns([1, 4], gap="large")
     with left:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
@@ -822,7 +911,6 @@ def main() -> None:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
 
         level = st.session_state["level"]
-
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
         if m is None:
             st.error("Falha ao inicializar o mapa.")
@@ -833,22 +921,20 @@ def main() -> None:
         # -------------------------
         if level == "subpref":
             st.markdown("### Subprefeituras")
-            sub_path = ensure_local_layer("subpref")
+            try:
+                sub_path = ensure_local_layer("subpref")
+            except Exception as e:
+                st.error(str(e))
+                st.stop()
+
             g_sub = read_gdf_parquet(sub_path)
             if g_sub is None or g_sub.empty:
                 st.error("Subprefeitura vazia/erro ao ler.")
                 st.stop()
-            g_sub = _drop_bad_geoms(g_sub)
 
-            if SUBPREF_ID not in g_sub.columns:
-                st.error(f"Coluna obrigatória ausente em Subprefeitura: '{SUBPREF_ID}'.")
-                st.stop()
+            g_sub = normalize_id_cols(_drop_bad_geoms(g_sub), LAYER_ID_COLS["subpref"])
+            diag_layer(g_sub, "Subpref", [SUBPREF_ID])
 
-            add_outline(
-                m, g_sub, "Subprefeituras (linha)",
-                color="#111111", weight=1.25,
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"],
-            )
             add_polygons_selectable(
                 m, g_sub, "Subprefeituras (clique)", SUBPREF_ID,
                 selected_ids=set(),
@@ -862,39 +948,38 @@ def main() -> None:
         # DISTRITO
         # -------------------------
         elif level == "distrito":
-            sp = st.session_state["selected_subpref_id"]
+            sp = _id_to_str(st.session_state["selected_subpref_id"])
             if sp is None:
                 reset_to("subpref")
                 st.rerun()
 
-            dist_path = ensure_local_layer("dist")
+            try:
+                dist_path = ensure_local_layer("dist")
+                sub_path = ensure_local_layer("subpref")
+            except Exception as e:
+                st.error(str(e))
+                st.stop()
+
             g_dist = read_gdf_parquet(dist_path)
+            g_sub = read_gdf_parquet(sub_path)
             if g_dist is None or g_dist.empty:
                 st.error("Distrito vazio/erro ao ler.")
                 st.stop()
-            g_dist = _drop_bad_geoms(g_dist)
-
-            if DIST_PARENT not in g_dist.columns or DIST_ID not in g_dist.columns:
-                st.error(f"Colunas obrigatórias ausentes em Distritos: '{DIST_PARENT}' e/ou '{DIST_ID}'.")
+            if g_sub is None or g_sub.empty:
+                st.error("Subprefeitura vazia/erro ao ler.")
                 st.stop()
 
-            # sombra: subpref selecionada
-            sub_path = ensure_local_layer("subpref")
-            g_sub = _drop_bad_geoms(read_gdf_parquet(sub_path))
+            g_dist = normalize_id_cols(_drop_bad_geoms(g_dist), LAYER_ID_COLS["dist"])
+            g_sub = normalize_id_cols(_drop_bad_geoms(g_sub), LAYER_ID_COLS["subpref"])
+
+            diag_layer(g_dist, "Distritos", [DIST_ID, DIST_PARENT])
+            diag_fk(g_sub, SUBPREF_ID, g_dist, DIST_PARENT, "Distritos.subpref_id -> Subpref.subpref_id")
+
             g_parent = subset_by_id(g_sub, SUBPREF_ID, sp)
-            add_parent_fill(
-                m, g_parent, "Subpref selecionada (sombra)",
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"],
-            )
+            add_parent_fill(m, g_parent, "Subpref selecionada (sombra)", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"])
 
             g_show = subset_by_parent(g_dist, DIST_PARENT, sp)
             st.markdown(f"### Distritos (Subpref {sp})")
-
-            add_outline(
-                m, g_show, "Distritos (linha)",
-                color="#111111", weight=1.05,
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
-            )
             add_polygons_selectable(
                 m, g_show, "Distritos (clique)", DIST_ID,
                 selected_ids=set(),
@@ -904,43 +989,42 @@ def main() -> None:
                 simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
             )
 
-            if not g_show.empty:
-                center, zoom = bounds_center_zoom(g_show)
-                st.session_state["view_center"], st.session_state["view_zoom"] = center, zoom
-                m.location, m.zoom_start = center, zoom
-
         # -------------------------
-        # ISOCRONAS (multi)
+        # ISOCRONAS
         # -------------------------
         elif level == "isocrona":
-            d = st.session_state["selected_distrito_id"]
+            d = _id_to_str(st.session_state["selected_distrito_id"])
             if d is None:
                 reset_to("distrito")
                 st.rerun()
 
-            iso_path = ensure_local_layer("iso")
+            try:
+                iso_path = ensure_local_layer("iso")
+                dist_path = ensure_local_layer("dist")
+            except Exception as e:
+                st.error(str(e))
+                st.stop()
+
             g_iso = read_gdf_parquet(iso_path)
+            g_dist = read_gdf_parquet(dist_path)
             if g_iso is None or g_iso.empty:
                 st.error("Isócronas vazias/erro ao ler.")
                 st.stop()
-            g_iso = _drop_bad_geoms(g_iso)
-
-            if ISO_PARENT not in g_iso.columns or ISO_ID not in g_iso.columns:
-                st.error(f"Colunas obrigatórias ausentes em Isócronas: '{ISO_PARENT}' e/ou '{ISO_ID}'.")
+            if g_dist is None or g_dist.empty:
+                st.error("Distritos vazios/erro ao ler.")
                 st.stop()
 
-            # sombra: distrito selecionado
-            dist_path = ensure_local_layer("dist")
-            g_dist = _drop_bad_geoms(read_gdf_parquet(dist_path))
+            g_iso = normalize_id_cols(_drop_bad_geoms(g_iso), LAYER_ID_COLS["iso"])
+            g_dist = normalize_id_cols(_drop_bad_geoms(g_dist), LAYER_ID_COLS["dist"])
+
+            diag_layer(g_iso, "Isócronas", [ISO_ID, ISO_PARENT])
+            diag_fk(g_dist, DIST_ID, g_iso, ISO_PARENT, "Isócronas.distrito_id -> Distritos.distrito_id")
+
             g_parent = subset_by_id(g_dist, DIST_ID, d)
-            add_parent_fill(
-                m, g_parent, "Distrito selecionado (sombra)",
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
-            )
+            add_parent_fill(m, g_parent, "Distrito selecionado (sombra)", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"])
 
             g_show = subset_by_parent(g_iso, ISO_PARENT, d)
             st.markdown(f"### Isócronas (Distrito {d}) — clique para selecionar (multi)")
-
             add_polygons_selectable(
                 m, g_show, "Isócronas", ISO_ID,
                 selected_ids=st.session_state["selected_iso_ids"],
@@ -950,43 +1034,42 @@ def main() -> None:
                 simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
             )
 
-            if not g_show.empty:
-                center, zoom = bounds_center_zoom(g_show)
-                st.session_state["view_center"], st.session_state["view_zoom"] = center, zoom
-                m.location, m.zoom_start = center, zoom
-
         # -------------------------
-        # QUADRAS (multi)
+        # QUADRAS
         # -------------------------
         elif level == "quadra":
-            iso_ids: Set[Any] = st.session_state["selected_iso_ids"]
+            iso_ids = {v for v in (_id_to_str(x) for x in st.session_state["selected_iso_ids"]) if v is not None}
             if not iso_ids:
                 reset_to("isocrona")
                 st.rerun()
 
-            quadra_path = ensure_local_layer("quadra")
+            try:
+                quadra_path = ensure_local_layer("quadra")
+                iso_path = ensure_local_layer("iso")
+            except Exception as e:
+                st.error(str(e))
+                st.stop()
+
             g_quad = read_gdf_parquet(quadra_path)
+            g_iso = read_gdf_parquet(iso_path)
             if g_quad is None or g_quad.empty:
                 st.error("Quadras vazias/erro ao ler.")
                 st.stop()
-            g_quad = _drop_bad_geoms(g_quad)
-
-            if QUADRA_PARENT not in g_quad.columns or QUADRA_ID not in g_quad.columns:
-                st.error(f"Colunas obrigatórias ausentes em Quadras: '{QUADRA_PARENT}' e/ou '{QUADRA_ID}'.")
+            if g_iso is None or g_iso.empty:
+                st.error("Isócronas vazias/erro ao ler.")
                 st.stop()
 
-            # sombra: isócronas selecionadas
-            iso_path = ensure_local_layer("iso")
-            g_iso = _drop_bad_geoms(read_gdf_parquet(iso_path))
+            g_quad = normalize_id_cols(_drop_bad_geoms(g_quad), LAYER_ID_COLS["quadra"])
+            g_iso = normalize_id_cols(_drop_bad_geoms(g_iso), LAYER_ID_COLS["iso"])
+
+            diag_layer(g_quad, "Quadras", [QUADRA_ID, QUADRA_PARENT])
+            diag_fk(g_iso, ISO_ID, g_quad, QUADRA_PARENT, "Quadras.iso_id -> Isócronas.iso_id")
+
             g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
-            add_parent_fill(
-                m, g_parent, "Isócronas selecionadas (sombra)",
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-            )
+            add_parent_fill(m, g_parent, "Isócronas selecionadas (sombra)", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"])
 
             g_show = subset_by_parent_multi(g_quad, QUADRA_PARENT, iso_ids)
             st.markdown("### Quadras (Isócronas selecionadas) — clique para selecionar (multi)")
-
             add_polygons_selectable(
                 m, g_show, "Quadras", QUADRA_ID,
                 selected_ids=st.session_state["selected_quadra_ids"],
@@ -996,116 +1079,93 @@ def main() -> None:
                 simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
             )
 
-            if not g_show.empty:
-                center, zoom = bounds_center_zoom(g_show)
-                st.session_state["view_center"], st.session_state["view_zoom"] = center, min(zoom + 1, 17)
-                m.location, m.zoom_start = st.session_state["view_center"], st.session_state["view_zoom"]
-
         # -------------------------
-        # FINAL (lotes OU setor censitário) — download sob demanda
+        # FINAL (lote/censo sob demanda)
         # -------------------------
         else:
-            iso_ids: Set[Any] = st.session_state["selected_iso_ids"]
-            quad_ids: Set[Any] = st.session_state["selected_quadra_ids"]
+            iso_ids = {v for v in (_id_to_str(x) for x in st.session_state["selected_iso_ids"]) if v is not None}
+            quad_ids = {v for v in (_id_to_str(x) for x in st.session_state["selected_quadra_ids"]) if v is not None}
 
             mode = st.session_state["final_mode"]
             st.markdown("### Nível final")
 
-            if mode == "lote" and not quad_ids:
-                st.info("Selecione ao menos 1 quadra para visualizar lotes.")
-                reset_to("quadra")
-                st.rerun()
-
-            if not iso_ids:
-                st.info("Selecione ao menos 1 isócrona.")
-                reset_to("isocrona")
-                st.rerun()
-
-            # sombra: mantém o nível acima bem sutil
-            if mode == "lote":
-                quadra_path = ensure_local_layer("quadra")
-                g_quad = _drop_bad_geoms(read_gdf_parquet(quadra_path))
-                g_parent = subset_by_id_multi(g_quad, QUADRA_ID, quad_ids)
-                add_parent_fill(
-                    m, g_parent, "Quadras selecionadas (sombra)",
-                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
-                )
-            else:
-                iso_path = ensure_local_layer("iso")
-                g_iso = _drop_bad_geoms(read_gdf_parquet(iso_path))
-                g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
-                add_parent_fill(
-                    m, g_parent, "Isócronas selecionadas (sombra)",
-                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-                )
-
-            # botão explícito para evitar crash em rerun automático
-            st.warning("Arquivos do nível final podem ser pesados. O download só ocorre ao clicar no botão abaixo.")
+            st.warning("Arquivos do nível final podem ser pesados. O download/leitura só ocorre ao clicar no botão abaixo.")
             go = st.button("⬇️ Carregar dados do nível final", type="primary")
 
             if go:
                 if mode == "lote":
-                    msg2 = _ensure_file_ids_configured(["lote"])
-                    if msg2:
-                        st.error(msg2)
+                    try:
+                        lote_path = ensure_local_layer("lote")
+                        quadra_path = ensure_local_layer("quadra")
+                    except Exception as e:
+                        st.error(str(e))
                         st.stop()
 
-                    lote_path = ensure_local_layer("lote")
                     g_lote = read_gdf_parquet(lote_path)
+                    g_quad = read_gdf_parquet(quadra_path)
                     if g_lote is None or g_lote.empty:
                         st.error("Lotes vazios/erro ao ler.")
                         st.stop()
-                    g_lote = _drop_bad_geoms(g_lote)
-
-                    if LOTE_PARENT not in g_lote.columns or LOTE_ID not in g_lote.columns:
-                        st.error(f"Colunas obrigatórias ausentes em Lotes: '{LOTE_PARENT}' e/ou '{LOTE_ID}'.")
+                    if g_quad is None or g_quad.empty:
+                        st.error("Quadras vazias/erro ao ler.")
                         st.stop()
 
-                    g_show = subset_by_parent_multi(g_lote, LOTE_PARENT, quad_ids)
+                    g_lote = normalize_id_cols(_drop_bad_geoms(g_lote), LAYER_ID_COLS["lote"])
+                    g_quad = normalize_id_cols(_drop_bad_geoms(g_quad), LAYER_ID_COLS["quadra"])
 
-                    st.markdown("#### Lotes (Quadras selecionadas)")
-                    add_polygons_selectable(
-                        m, g_show, "Lotes", LOTE_ID,
-                        selected_ids=set(),
-                        base_weight=0.22, fill_opacity=0.10,
-                        selected_color=PB_NAVY,
-                        tooltip_prefix="Lote: ",
-                        simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
-                    )
+                    diag_layer(g_lote, "Lotes", [LOTE_ID, LOTE_PARENT])
+                    diag_fk(g_quad, QUADRA_ID, g_lote, LOTE_PARENT, "Lotes.quadra_id -> Quadras.quadra_id")
+
+                    if not quad_ids:
+                        st.info("Selecione ao menos 1 quadra no nível anterior.")
+                    else:
+                        g_show = subset_by_parent_multi(g_lote, LOTE_PARENT, quad_ids)
+                        st.markdown("#### Lotes (Quadras selecionadas)")
+                        add_polygons_selectable(
+                            m, g_show, "Lotes", LOTE_ID,
+                            selected_ids=set(),
+                            base_weight=0.22, fill_opacity=0.10,
+                            selected_color=PB_NAVY,
+                            tooltip_prefix="Lote: ",
+                            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
+                        )
 
                 else:
-                    msg2 = _ensure_file_ids_configured(["censo"])
-                    if msg2:
-                        st.error(msg2)
+                    try:
+                        censo_path = ensure_local_layer("censo")
+                        iso_path = ensure_local_layer("iso")
+                    except Exception as e:
+                        st.error(str(e))
                         st.stop()
 
-                    censo_path = ensure_local_layer("censo")
                     g_censo = read_gdf_parquet(censo_path)
+                    g_iso = read_gdf_parquet(iso_path)
                     if g_censo is None or g_censo.empty:
                         st.error("Setores censitários vazios/erro ao ler.")
                         st.stop()
-                    g_censo = _drop_bad_geoms(g_censo)
-
-                    if CENSO_PARENT not in g_censo.columns or CENSO_ID not in g_censo.columns:
-                        st.error(f"Colunas obrigatórias ausentes em Setor censitário: '{CENSO_PARENT}' e/ou '{CENSO_ID}'.")
+                    if g_iso is None or g_iso.empty:
+                        st.error("Isócronas vazias/erro ao ler.")
                         st.stop()
 
-                    g_show = subset_by_parent_multi(g_censo, CENSO_PARENT, iso_ids)
+                    g_censo = normalize_id_cols(_drop_bad_geoms(g_censo), LAYER_ID_COLS["censo"])
+                    g_iso = normalize_id_cols(_drop_bad_geoms(g_iso), LAYER_ID_COLS["iso"])
 
-                    st.markdown("#### Setores Censitários (Isócronas selecionadas)")
-                    add_polygons_selectable(
-                        m, g_show, "Setor censitário", CENSO_ID,
-                        selected_ids=set(),
-                        base_weight=0.35, fill_opacity=0.08,
-                        selected_color=PB_NAVY,
-                        tooltip_prefix="Setor: ",
-                        simplify_tol=SIMPLIFY_TOL_BY_LEVEL["censo"],
-                    )
+                    diag_layer(g_censo, "Setor Censitário", [CENSO_ID, CENSO_PARENT])
+                    diag_fk(g_iso, ISO_ID, g_censo, CENSO_PARENT, "Censo.iso_id -> Isócronas.iso_id")
 
-                if g_show is not None and not g_show.empty:
-                    center, zoom = bounds_center_zoom(g_show)
-                    st.session_state["view_center"], st.session_state["view_zoom"] = center, min(zoom + 1, 18)
-                    m.location, m.zoom_start = st.session_state["view_center"], st.session_state["view_zoom"]
+                    if not iso_ids:
+                        st.info("Selecione ao menos 1 isócrona no nível anterior.")
+                    else:
+                        g_show = subset_by_parent_multi(g_censo, CENSO_PARENT, iso_ids)
+                        st.markdown("#### Setores Censitários (Isócronas selecionadas)")
+                        add_polygons_selectable(
+                            m, g_show, "Setor censitário", CENSO_ID,
+                            selected_ids=set(),
+                            base_weight=0.35, fill_opacity=0.08,
+                            selected_color=PB_NAVY,
+                            tooltip_prefix="Setor: ",
+                            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["censo"],
+                        )
 
         # layer control
         try:
@@ -1113,16 +1173,19 @@ def main() -> None:
         except Exception:
             pass
 
-        out = st_folium(m, height=780, use_container_width=True, key="map_view", returned_objects=[])
+        out = st_folium(
+            m,
+            height=780,
+            use_container_width=True,
+            key="map_view",
+            returned_objects=["last_clicked"],
+        )
 
-        # -------------------------
-        # CLICK ACTIONS
-        # -------------------------
         click = (out or {}).get("last_clicked")
         if click:
             if level == "subpref":
                 sub_path = ensure_local_layer("subpref")
-                g_sub = _drop_bad_geoms(read_gdf_parquet(sub_path))
+                g_sub = normalize_id_cols(_drop_bad_geoms(read_gdf_parquet(sub_path)), LAYER_ID_COLS["subpref"])
                 picked = pick_feature_id(g_sub, click, SUBPREF_ID)
                 if picked is not None:
                     st.session_state["selected_subpref_id"] = picked
@@ -1130,9 +1193,9 @@ def main() -> None:
                     st.rerun()
 
             elif level == "distrito":
-                sp = st.session_state["selected_subpref_id"]
+                sp = _id_to_str(st.session_state["selected_subpref_id"])
                 dist_path = ensure_local_layer("dist")
-                g_dist = _drop_bad_geoms(read_gdf_parquet(dist_path))
+                g_dist = normalize_id_cols(_drop_bad_geoms(read_gdf_parquet(dist_path)), LAYER_ID_COLS["dist"])
                 g_show = subset_by_parent(g_dist, DIST_PARENT, sp)
                 picked = pick_feature_id(g_show, click, DIST_ID)
                 if picked is not None:
@@ -1144,25 +1207,23 @@ def main() -> None:
                     st.rerun()
 
             elif level == "isocrona":
-                d = st.session_state["selected_distrito_id"]
+                d = _id_to_str(st.session_state["selected_distrito_id"])
                 iso_path = ensure_local_layer("iso")
-                g_iso = _drop_bad_geoms(read_gdf_parquet(iso_path))
+                g_iso = normalize_id_cols(_drop_bad_geoms(read_gdf_parquet(iso_path)), LAYER_ID_COLS["iso"])
                 g_show = subset_by_parent(g_iso, ISO_PARENT, d)
                 picked = pick_feature_id(g_show, click, ISO_ID)
                 if picked is not None:
                     _toggle_in_set("selected_iso_ids", picked)
-                    # permanece em isocrona (multi mais fluida)
                     st.rerun()
 
             elif level == "quadra":
-                iso_ids = st.session_state["selected_iso_ids"]
+                iso_ids = {v for v in (_id_to_str(x) for x in st.session_state["selected_iso_ids"]) if v is not None}
                 quadra_path = ensure_local_layer("quadra")
-                g_quad = _drop_bad_geoms(read_gdf_parquet(quadra_path))
+                g_quad = normalize_id_cols(_drop_bad_geoms(read_gdf_parquet(quadra_path)), LAYER_ID_COLS["quadra"])
                 g_show = subset_by_parent_multi(g_quad, QUADRA_PARENT, iso_ids)
                 picked = pick_feature_id(g_show, click, QUADRA_ID)
                 if picked is not None:
                     _toggle_in_set("selected_quadra_ids", picked)
-                    # permanece em quadra (multi mais fluida)
                     st.rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
