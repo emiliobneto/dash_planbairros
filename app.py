@@ -1,18 +1,11 @@
-PB_SUBPREF_FILE_ID = "https://drive.google.com/file/d/1vPY34cQLCoGfADpyOJjL9pNCYkVrmSZA/view?usp=drive_link"
-PB_DISTRITO_FILE_ID = "https://drive.google.com/file/d/1K-t2BiSHN_D8De0oCFxzGdrEMhnGnh10/view?usp=drive_link"
-PB_ISOCRONAS_FILE_ID = "https://drive.google.com/file/d/18ukyzMiYQ6vMqrU6-ctaPFbXMPX9XS9i/view?usp=drive_link"
-PB_QUADRAS_FILE_ID = "https://drive.google.com/file/d/1XKAYLNdt82ZPNAE-rseSuuaCFmjfn8IP/view?usp=drive_link"
-PB_LOTES_FILE_ID = "https://drive.google.com/file/d/1oTFAZff1mVAWD6KQTJSz45I6B6pi6ceP/view?usp=drive_link"
-PB_CENSO_FILE_ID = "https://drive.google.com/file/d/1APp7fxT2mgTpegVisVyQwjTRWOPz6Rgn/view?usp=drive_link"
-
 # app.py
 # -*- coding: utf-8 -*-
-from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, Set
-import re
 import base64
+import re
+import os
 
 import streamlit as st
 
@@ -59,6 +52,7 @@ ASSETS_DIR = REPO_ROOT / "assets"
 LOGO_PATH = ASSETS_DIR / "logo_todos.jpg"
 LOGO_HEIGHT = 46
 
+
 # =============================================================================
 # IDS DO SEU ENCADEAMENTO (VOCÊ VAI GERAR)
 # =============================================================================
@@ -77,25 +71,73 @@ CENSO_PARENT = "iso_id"
 
 LEVELS = ["subpref", "distrito", "isocrona", "quadra", "final"]
 
-# =============================================================================
-# DRIVE FILE IDS (via secrets.toml)
-# =============================================================================
-def _get_secret(key: str) -> str:
-    try:
-        return str(st.secrets.get(key, "")).strip()
-    except Exception:
-        return ""
 
-GDRIVE_FILE_IDS = {
-    "subpref": _get_secret("PB_SUBPREF_FILE_ID"),
-    "dist": _get_secret("PB_DISTRITO_FILE_ID"),
-    "iso": _get_secret("PB_ISOCRONAS_FILE_ID"),
-    "quadra": _get_secret("PB_QUADRAS_FILE_ID"),
-    "lote": _get_secret("PB_LOTES_FILE_ID"),
-    "censo": _get_secret("PB_CENSO_FILE_ID"),
+# =============================================================================
+# GOOGLE DRIVE LINKS/IDS (fallback no próprio arquivo)
+# - Você pode manter aqui (repo) OU colocar em .streamlit/secrets.toml
+# - Pode ser URL completa OU só o file_id
+# =============================================================================
+DEFAULT_DRIVE = {
+    "subpref": "https://drive.google.com/file/d/1vPY34cQLCoGfADpyOJjL9pNCYkVrmSZA/view?usp=drive_link",
+    "dist": "https://drive.google.com/file/d/1K-t2BiSHN_D8De0oCFxzGdrEMhnGnh10/view?usp=drive_link",
+    "iso": "https://drive.google.com/file/d/18ukyzMiYQ6vMqrU6-ctaPFbXMPX9XS9i/view?usp=drive_link",
+    "quadra": "https://drive.google.com/file/d/1XKAYLNdt82ZPNAE-rseSuuaCFmjfn8IP/view?usp=drive_link",
+    "lote": "https://drive.google.com/file/d/1oTFAZff1mVAWD6KQTJSz45I6B6pi6ceP/view?usp=drive_link",
+    "censo": "https://drive.google.com/file/d/1APp7fxT2mgTpegVisVyQwjTRWOPz6Rgn/view?usp=drive_link",
 }
 
-# nomes locais (cache)
+
+def extract_drive_file_id(s: str) -> str:
+    """
+    Aceita:
+    - file_id puro (ex: 1vPY34cQ...)
+    - URL /file/d/<id>/view
+    - URL com ?id=<id>
+    Retorna sempre o file_id.
+    """
+    s = (s or "").strip()
+    if not s:
+        return ""
+
+    # /file/d/<id>/
+    m = re.search(r"/file/d/([a-zA-Z0-9_-]+)", s)
+    if m:
+        return m.group(1)
+
+    # id=<id>
+    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", s)
+    if m:
+        return m.group(1)
+
+    # se já parece um file_id
+    if re.fullmatch(r"[a-zA-Z0-9_-]{20,}", s):
+        return s
+
+    return s
+
+
+def _get_cfg(secret_key: str, env_key: str, default_val: str) -> str:
+    v = ""
+    try:
+        v = str(st.secrets.get(secret_key, "")).strip()
+    except Exception:
+        v = ""
+    if not v:
+        v = os.getenv(env_key, "").strip()
+    if not v:
+        v = (default_val or "").strip()
+    return extract_drive_file_id(v)
+
+
+GDRIVE_FILE_IDS = {
+    "subpref": _get_cfg("PB_SUBPREF_FILE_ID", "PB_SUBPREF_FILE_ID", DEFAULT_DRIVE["subpref"]),
+    "dist": _get_cfg("PB_DISTRITO_FILE_ID", "PB_DISTRITO_FILE_ID", DEFAULT_DRIVE["dist"]),
+    "iso": _get_cfg("PB_ISOCRONAS_FILE_ID", "PB_ISOCRONAS_FILE_ID", DEFAULT_DRIVE["iso"]),
+    "quadra": _get_cfg("PB_QUADRAS_FILE_ID", "PB_QUADRAS_FILE_ID", DEFAULT_DRIVE["quadra"]),
+    "lote": _get_cfg("PB_LOTES_FILE_ID", "PB_LOTES_FILE_ID", DEFAULT_DRIVE["lote"]),
+    "censo": _get_cfg("PB_CENSO_FILE_ID", "PB_CENSO_FILE_ID", DEFAULT_DRIVE["censo"]),
+}
+
 LOCAL_FILENAMES = {
     "subpref": "Subprefeitura.parquet",
     "dist": "Distrito.parquet",
@@ -104,6 +146,7 @@ LOCAL_FILENAMES = {
     "lote": "Lotes.parquet",
     "censo": "Setorcensitario.parquet",
 }
+
 
 # =============================================================================
 # CSS / HEADER
@@ -118,6 +161,7 @@ def _logo_data_uri() -> str:
         "https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/"
         "logomark/streamlit-mark-color.png"
     )
+
 
 def inject_css() -> None:
     st.markdown(
@@ -160,6 +204,7 @@ def inject_css() -> None:
         unsafe_allow_html=True,
     )
 
+
 def render_header() -> None:
     st.markdown(
         f"""
@@ -176,6 +221,7 @@ def render_header() -> None:
         unsafe_allow_html=True,
     )
 
+
 # =============================================================================
 # STATE
 # =============================================================================
@@ -188,6 +234,7 @@ def init_state() -> None:
     st.session_state.setdefault("final_mode", "lote")          # "lote" | "censo"
     st.session_state.setdefault("view_center", (-23.55, -46.63))
     st.session_state.setdefault("view_zoom", 11)
+
 
 def reset_to(level: str) -> None:
     st.session_state["level"] = level
@@ -212,12 +259,14 @@ def reset_to(level: str) -> None:
         st.session_state["selected_quadra_ids"] = set()
         st.session_state["final_mode"] = "lote"
 
+
 def _back_one_level() -> None:
     cur = st.session_state["level"]
     idx = LEVELS.index(cur)
     if idx == 0:
         return
     reset_to(LEVELS[idx - 1])
+
 
 def _toggle_in_set(key: str, value: Any) -> None:
     s: Set[Any] = st.session_state.get(key, set())
@@ -227,6 +276,7 @@ def _toggle_in_set(key: str, value: Any) -> None:
         s.add(value)
     st.session_state[key] = s
 
+
 # =============================================================================
 # DOWNLOAD DRIVE (streaming) — SEM baixar “pasta toda”
 # =============================================================================
@@ -234,17 +284,16 @@ def _ensure_file_ids_configured(keys: list[str]) -> Optional[str]:
     missing = [k for k in keys if not GDRIVE_FILE_IDS.get(k)]
     if missing:
         return (
-            "Faltam FILE_IDs no secrets.toml para: "
-            + ", ".join(missing)
-            + ".\nConfigure PB_*_FILE_ID e reinicie."
+            "Faltam IDs/links para: " + ", ".join(missing) + ".\n"
+            "Configure em .streamlit/secrets.toml (PB_*_FILE_ID) ou no DEFAULT_DRIVE."
         )
     return None
+
 
 @st.cache_resource(show_spinner=False)
 def download_drive_file(file_id: str, dst: Path) -> Path:
     """
     Download robusto (streaming) via requests.
-    Evita crash por tentar manter conteúdo em memória.
     """
     import requests
 
@@ -263,7 +312,6 @@ def download_drive_file(file_id: str, dst: Path) -> Path:
 
     response = session.get(URL, params={"id": file_id}, stream=True)
     token = get_confirm_token(response)
-
     if token:
         response = session.get(URL, params={"id": file_id, "confirm": token}, stream=True)
 
@@ -273,7 +321,6 @@ def download_drive_file(file_id: str, dst: Path) -> Path:
     total = int(response.headers.get("Content-Length", 0) or 0)
     chunk = 1024 * 1024  # 1MB
 
-    # progresso no Streamlit
     prog = st.progress(0, text=f"Baixando {dst.name}…")
     downloaded = 0
 
@@ -289,18 +336,17 @@ def download_drive_file(file_id: str, dst: Path) -> Path:
     prog.empty()
     return dst
 
+
 def ensure_local_layer(layer_key: str) -> Path:
-    """
-    Garante que o arquivo local daquele nível existe (baixa sob demanda).
-    """
-    file_id = GDRIVE_FILE_IDS.get(layer_key, "").strip()
+    file_id = (GDRIVE_FILE_IDS.get(layer_key, "") or "").strip()
     if not file_id:
-        raise RuntimeError(f"FILE_ID não configurado para layer '{layer_key}'.")
+        raise RuntimeError(f"ID do Drive não configurado para layer '{layer_key}'.")
     dst = DATA_CACHE_DIR / LOCAL_FILENAMES[layer_key]
     return download_drive_file(file_id, dst)
 
+
 # =============================================================================
-# READ (cache_data)
+# READ
 # =============================================================================
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
 def read_gdf_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
@@ -318,6 +364,7 @@ def read_gdf_parquet(path: Path) -> Optional["gpd.GeoDataFrame"]:
         pass
     return gdf
 
+
 def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
     if gdf is None or gdf.empty:
         return gdf
@@ -329,6 +376,7 @@ def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
         pass
     return gdf
 
+
 def _simplify_lines(gdf: "gpd.GeoDataFrame", tol: float) -> "gpd.GeoDataFrame":
     if gdf is None or gdf.empty:
         return gdf
@@ -338,6 +386,7 @@ def _simplify_lines(gdf: "gpd.GeoDataFrame", tol: float) -> "gpd.GeoDataFrame":
     except Exception:
         pass
     return _drop_bad_geoms(gdf)
+
 
 def bounds_center_zoom(gdf: "gpd.GeoDataFrame") -> Tuple[Tuple[float, float], int]:
     minx, miny, maxx, maxy = gdf.total_bounds
@@ -355,6 +404,7 @@ def bounds_center_zoom(gdf: "gpd.GeoDataFrame") -> Tuple[Tuple[float, float], in
         z = 11
     return center, z
 
+
 def subset_by_parent(child: "gpd.GeoDataFrame", parent_col: str, parent_val: Any) -> "gpd.GeoDataFrame":
     if child is None or child.empty:
         return child
@@ -363,6 +413,7 @@ def subset_by_parent(child: "gpd.GeoDataFrame", parent_col: str, parent_val: Any
         return child.iloc[0:0].copy()
     return child[child[parent_col] == parent_val]
 
+
 def subset_by_parent_multi(child: "gpd.GeoDataFrame", parent_col: str, parent_vals: Set[Any]) -> "gpd.GeoDataFrame":
     if child is None or child.empty:
         return child
@@ -370,6 +421,7 @@ def subset_by_parent_multi(child: "gpd.GeoDataFrame", parent_col: str, parent_va
     if parent_col not in child.columns or not parent_vals:
         return child.iloc[0:0].copy()
     return child[child[parent_col].isin(list(parent_vals))]
+
 
 # =============================================================================
 # CLICK HITTEST
@@ -407,6 +459,7 @@ def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_
     except Exception:
         return None
 
+
 # =============================================================================
 # MAPA (Folium)
 # =============================================================================
@@ -433,6 +486,7 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
 
     return m
 
+
 def add_outline(m, gdf: "gpd.GeoDataFrame", name: str, color="#111111", weight=1.2, show=True) -> None:
     if folium is None or gdf is None or gdf.empty:
         return
@@ -451,6 +505,7 @@ def add_outline(m, gdf: "gpd.GeoDataFrame", name: str, color="#111111", weight=1
         style_function=lambda _f: {"fillOpacity": 0, "color": color, "weight": weight},
     ).add_to(fg)
     fg.add_to(m)
+
 
 def add_polygons_selectable(
     m,
@@ -496,6 +551,7 @@ def add_polygons_selectable(
     ).add_to(fg)
     fg.add_to(m)
 
+
 # =============================================================================
 # UI
 # =============================================================================
@@ -532,15 +588,6 @@ def left_panel() -> None:
             horizontal=True,
         )
 
-    st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
-    st.markdown("<span class='pb-badge'>⚙️ Performance</span>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='pb-note'>"
-        "Para evitar crash, arquivos são baixados só quando o nível exige. "
-        "O arquivo de lotes só baixa no nível final (e pode ser pesado)."
-        "</div>",
-        unsafe_allow_html=True,
-    )
 
 def kpis_row() -> None:
     c1, c2, c3, c4 = st.columns(4, gap="large")
@@ -562,8 +609,11 @@ def kpis_row() -> None:
     with c4:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
         st.markdown("<span class='pb-badge'>🧩 Multi</span>", unsafe_allow_html=True)
-        st.markdown(f"**Iso: {len(st.session_state['selected_iso_ids'])} | Quad: {len(st.session_state['selected_quadra_ids'])}**")
+        st.markdown(
+            f"**Iso: {len(st.session_state['selected_iso_ids'])} | Quad: {len(st.session_state['selected_quadra_ids'])}**"
+        )
         st.markdown("</div>", unsafe_allow_html=True)
+
 
 # =============================================================================
 # APP
@@ -577,7 +627,6 @@ def main() -> None:
         st.error("Este app requer `geopandas`, `folium` e `streamlit-folium`.")
         return
 
-    # Checa IDs mínimos (não precisa de lotes/censo no boot)
     msg = _ensure_file_ids_configured(["subpref", "dist", "iso", "quadra"])
     if msg:
         st.error(msg)
@@ -593,16 +642,12 @@ def main() -> None:
         kpis_row()
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
 
-        # ---- nível atual
         level = st.session_state["level"]
-
-        # ---- mapa base
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
         if m is None:
             st.error("Falha ao inicializar o mapa.")
             return
 
-        # ---- SUBPREF: baixa só subpref (leve)
         if level == "subpref":
             st.markdown("### Subprefeituras")
             sub_path = ensure_local_layer("subpref")
@@ -613,11 +658,11 @@ def main() -> None:
             g_subpref = _drop_bad_geoms(g_subpref)
             add_outline(m, g_subpref, "Subprefeituras (linha)", color="#111111", weight=1.25, show=True)
 
-        # ---- DISTRITO: baixa distrito somente quando entrar nesse nível
         elif level == "distrito":
             sp = st.session_state["selected_subpref_id"]
             if sp is None:
-                reset_to("subpref"); st.rerun()
+                reset_to("subpref")
+                st.rerun()
 
             dist_path = ensure_local_layer("dist")
             g_dist = read_gdf_parquet(dist_path)
@@ -637,11 +682,11 @@ def main() -> None:
                 st.session_state["view_center"], st.session_state["view_zoom"] = center, zoom
                 m.location, m.zoom_start = center, zoom
 
-        # ---- ISOCRONAS: baixa isócronas somente aqui
         elif level == "isocrona":
             d = st.session_state["selected_distrito_id"]
             if d is None:
-                reset_to("distrito"); st.rerun()
+                reset_to("distrito")
+                st.rerun()
 
             iso_path = ensure_local_layer("iso")
             g_iso = read_gdf_parquet(iso_path)
@@ -664,11 +709,11 @@ def main() -> None:
                 st.session_state["view_center"], st.session_state["view_zoom"] = center, zoom
                 m.location, m.zoom_start = center, zoom
 
-        # ---- QUADRAS: baixa quadras somente aqui
         elif level == "quadra":
             iso_ids: Set[Any] = st.session_state["selected_iso_ids"]
             if not iso_ids:
-                reset_to("isocrona"); st.rerun()
+                reset_to("isocrona")
+                st.rerun()
 
             quadra_path = ensure_local_layer("quadra")
             g_quadra = read_gdf_parquet(quadra_path)
@@ -691,22 +736,19 @@ def main() -> None:
                 st.session_state["view_center"], st.session_state["view_zoom"] = center, min(zoom + 1, 17)
                 m.location, m.zoom_start = st.session_state["view_center"], st.session_state["view_zoom"]
 
-        # ---- FINAL: (lotes ou censo) só baixa AGORA
         else:
             iso_ids: Set[Any] = st.session_state["selected_iso_ids"]
             quad_ids: Set[Any] = st.session_state["selected_quadra_ids"]
             if not iso_ids:
-                reset_to("isocrona"); st.rerun()
+                reset_to("isocrona")
+                st.rerun()
 
             mode = st.session_state["final_mode"]
-
-            # Proteção: não disparar download pesado automaticamente sem seleção mínima
             if mode == "lote" and not quad_ids:
-                reset_to("quadra"); st.rerun()
+                reset_to("quadra")
+                st.rerun()
 
             st.markdown("### Nível final")
-
-            # botão explícito para reduzir risco de crash em rerun automático
             st.warning("Arquivos do nível final podem ser pesados. O download só ocorre ao clicar no botão abaixo.")
             go = st.button("⬇️ Carregar dados do nível final", type="primary")
 
@@ -714,7 +756,8 @@ def main() -> None:
                 if mode == "lote":
                     msg2 = _ensure_file_ids_configured(["lote"])
                     if msg2:
-                        st.error(msg2); st.stop()
+                        st.error(msg2)
+                        st.stop()
 
                     lote_path = ensure_local_layer("lote")
                     g_lote = read_gdf_parquet(lote_path)
@@ -730,7 +773,8 @@ def main() -> None:
                 else:
                     msg2 = _ensure_file_ids_configured(["censo"])
                     if msg2:
-                        st.error(msg2); st.stop()
+                        st.error(msg2)
+                        st.stop()
 
                     censo_path = ensure_local_layer("censo")
                     g_censo = read_gdf_parquet(censo_path)
@@ -748,7 +792,6 @@ def main() -> None:
                     st.session_state["view_center"], st.session_state["view_zoom"] = center, min(zoom + 1, 18)
                     m.location, m.zoom_start = st.session_state["view_center"], st.session_state["view_zoom"]
 
-        # layer control
         try:
             folium.LayerControl(position="bottomright", collapsed=False).add_to(m)
         except Exception:
@@ -756,7 +799,6 @@ def main() -> None:
 
         out = st_folium(m, height=780, use_container_width=True, key="map_view", returned_objects=[])
 
-        # clicks
         click = (out or {}).get("last_clicked")
         if click:
             if level == "subpref":
@@ -811,4 +853,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
