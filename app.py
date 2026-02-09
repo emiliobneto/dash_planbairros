@@ -74,7 +74,6 @@ LEVELS = ["subpref", "distrito", "isocrona", "quadra", "final"]
 
 # =============================================================================
 # GOOGLE DRIVE LINKS/IDS (fallback no próprio arquivo)
-# - Você pode manter aqui (repo) OU colocar em .streamlit/secrets.toml
 # - Pode ser URL completa OU só o file_id
 # =============================================================================
 DEFAULT_DRIVE = {
@@ -88,28 +87,18 @@ DEFAULT_DRIVE = {
 
 
 def extract_drive_file_id(s: str) -> str:
-    """
-    Aceita:
-    - file_id puro (ex: 1vPY34cQ...)
-    - URL /file/d/<id>/view
-    - URL com ?id=<id>
-    Retorna sempre o file_id.
-    """
     s = (s or "").strip()
     if not s:
         return ""
 
-    # /file/d/<id>/
     m = re.search(r"/file/d/([a-zA-Z0-9_-]+)", s)
     if m:
         return m.group(1)
 
-    # id=<id>
     m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", s)
     if m:
         return m.group(1)
 
-    # se já parece um file_id
     if re.fullmatch(r"[a-zA-Z0-9_-]{20,}", s):
         return s
 
@@ -234,6 +223,8 @@ def init_state() -> None:
     st.session_state.setdefault("final_mode", "lote")          # "lote" | "censo"
     st.session_state.setdefault("view_center", (-23.55, -46.63))
     st.session_state.setdefault("view_zoom", 11)
+    # DEBUG toggle
+    st.session_state.setdefault("debug", False)
 
 
 def reset_to(level: str) -> None:
@@ -278,7 +269,7 @@ def _toggle_in_set(key: str, value: Any) -> None:
 
 
 # =============================================================================
-# DOWNLOAD DRIVE (streaming) — SEM baixar “pasta toda”
+# DOWNLOAD DRIVE (streaming)
 # =============================================================================
 def _ensure_file_ids_configured(keys: list[str]) -> Optional[str]:
     missing = [k for k in keys if not GDRIVE_FILE_IDS.get(k)]
@@ -292,9 +283,6 @@ def _ensure_file_ids_configured(keys: list[str]) -> Optional[str]:
 
 @st.cache_resource(show_spinner=False)
 def download_drive_file(file_id: str, dst: Path) -> Path:
-    """
-    Download robusto (streaming) via requests.
-    """
     import requests
 
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -578,6 +566,8 @@ def left_panel() -> None:
         }
     )
 
+    st.session_state["debug"] = st.checkbox("Debug (mostrar clique e colunas)", value=st.session_state["debug"])
+
     if st.session_state["level"] == "final":
         st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
         st.markdown("<span class='pb-badge'>🧩 Nível final</span>", unsafe_allow_html=True)
@@ -648,6 +638,9 @@ def main() -> None:
             st.error("Falha ao inicializar o mapa.")
             return
 
+        # --------------------------
+        # LOAD + RENDER POR NÍVEL
+        # --------------------------
         if level == "subpref":
             st.markdown("### Subprefeituras")
             sub_path = ensure_local_layer("subpref")
@@ -656,6 +649,14 @@ def main() -> None:
                 st.error("Subprefeitura vazia/erro ao ler.")
                 st.stop()
             g_subpref = _drop_bad_geoms(g_subpref)
+
+            # DEBUG: colunas e tipo de geometria
+            if st.session_state["debug"]:
+                st.write("SUBPREF cols:", list(g_subpref.columns))
+                st.write("SUBPREF geom_type:", g_subpref.geom_type.value_counts())
+                if SUBPREF_ID in g_subpref.columns:
+                    st.write("SUBPREF null subpref_id:", int(g_subpref[SUBPREF_ID].isna().sum()))
+
             add_outline(m, g_subpref, "Subprefeituras (linha)", color="#111111", weight=1.25, show=True)
 
         elif level == "distrito":
@@ -697,6 +698,7 @@ def main() -> None:
 
             g_show = subset_by_parent(g_iso, ISO_PARENT, d)
             st.markdown(f"### Isócronas (Distrito {d})")
+
             add_polygons_selectable(
                 m, g_show, "Isócronas (multi)", ISO_ID,
                 selected_ids=st.session_state["selected_iso_ids"],
@@ -724,6 +726,7 @@ def main() -> None:
 
             g_show = subset_by_parent_multi(g_quadra, QUADRA_PARENT, iso_ids)
             st.markdown("### Quadras (Isócronas selecionadas)")
+
             add_polygons_selectable(
                 m, g_show, "Quadras (multi)", QUADRA_ID,
                 selected_ids=st.session_state["selected_quadra_ids"],
@@ -797,14 +800,34 @@ def main() -> None:
         except Exception:
             pass
 
-        out = st_folium(m, height=780, use_container_width=True, key="map_view", returned_objects=[])
+        # ✅ AJUSTE PRINCIPAL: habilitar retorno de clique
+        out = st_folium(
+            m,
+            height=780,
+            use_container_width=True,
+            key="map_view",
+            returned_objects=["last_clicked"],  # <-- importante
+        )
 
         click = (out or {}).get("last_clicked")
+
+        # DEBUG: ver o out e o clique
+        if st.session_state["debug"]:
+            st.write("OUT:", out)
+            st.write("CLICK:", click)
+
         if click:
             if level == "subpref":
                 sub_path = ensure_local_layer("subpref")
-                g_subpref = _drop_bad_geoms(read_gdf_parquet(sub_path))
+                g_subpref = read_gdf_parquet(sub_path)
+                if g_subpref is None or g_subpref.empty:
+                    st.stop()
+                g_subpref = _drop_bad_geoms(g_subpref)
+
                 picked = pick_feature_id(g_subpref, click, SUBPREF_ID)
+                if st.session_state["debug"]:
+                    st.write("PICKED subpref_id:", picked)
+
                 if picked is not None:
                     st.session_state["selected_subpref_id"] = picked
                     st.session_state["level"] = "distrito"
@@ -813,9 +836,14 @@ def main() -> None:
             elif level == "distrito":
                 sp = st.session_state["selected_subpref_id"]
                 dist_path = ensure_local_layer("dist")
-                g_dist = _drop_bad_geoms(read_gdf_parquet(dist_path))
+                g_dist = read_gdf_parquet(dist_path)
+                if g_dist is None or g_dist.empty:
+                    st.stop()
+                g_dist = _drop_bad_geoms(g_dist)
+
                 g_show = subset_by_parent(g_dist, DIST_PARENT, sp)
                 picked = pick_feature_id(g_show, click, DIST_ID)
+
                 if picked is not None:
                     st.session_state["selected_distrito_id"] = picked
                     st.session_state["selected_iso_ids"] = set()
@@ -827,7 +855,11 @@ def main() -> None:
             elif level == "isocrona":
                 d = st.session_state["selected_distrito_id"]
                 iso_path = ensure_local_layer("iso")
-                g_iso = _drop_bad_geoms(read_gdf_parquet(iso_path))
+                g_iso = read_gdf_parquet(iso_path)
+                if g_iso is None or g_iso.empty:
+                    st.stop()
+                g_iso = _drop_bad_geoms(g_iso)
+
                 g_show = subset_by_parent(g_iso, ISO_PARENT, d)
                 picked = pick_feature_id(g_show, click, ISO_ID)
                 if picked is not None:
@@ -839,7 +871,11 @@ def main() -> None:
             elif level == "quadra":
                 iso_ids = st.session_state["selected_iso_ids"]
                 quadra_path = ensure_local_layer("quadra")
-                g_quadra = _drop_bad_geoms(read_gdf_parquet(quadra_path))
+                g_quadra = read_gdf_parquet(quadra_path)
+                if g_quadra is None or g_quadra.empty:
+                    st.stop()
+                g_quadra = _drop_bad_geoms(g_quadra)
+
                 g_show = subset_by_parent_multi(g_quadra, QUADRA_PARENT, iso_ids)
                 picked = pick_feature_id(g_show, click, QUADRA_ID)
                 if picked is not None:
