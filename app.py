@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, Set
+from typing import Optional, Dict, Any, Tuple, Set, List
 import base64
 import re
 import os
@@ -13,10 +13,12 @@ import streamlit as st
 try:
     import geopandas as gpd  # type: ignore
     import folium  # type: ignore
+    from folium.features import GeoJsonTooltip  # type: ignore
     from streamlit_folium import st_folium  # type: ignore
 except Exception:
     gpd = None  # type: ignore
     folium = None  # type: ignore
+    GeoJsonTooltip = None  # type: ignore
     st_folium = None  # type: ignore
 
 
@@ -34,11 +36,12 @@ PB_COLORS = {
     "amarelo": "#F4DD63",
     "verde": "#B1BF7C",
     "laranja": "#D58243",
-    "telha": "#C65534",
+    "telha": "#C65534",  # marrom/telha
     "teal": "#6FA097",
     "navy": "#14407D",
 }
 PB_NAVY = PB_COLORS["navy"]
+PB_BROWN = PB_COLORS["telha"]
 
 SIMPLIFY_TOL = 0.0006
 CARTO_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
@@ -54,7 +57,7 @@ LOGO_HEIGHT = 46
 
 
 # =============================================================================
-# IDS DO SEU ENCADEAMENTO (VOCÊ VAI GERAR)
+# IDS DO ENCADEAMENTO (VOCÊ VAI GERAR)
 # =============================================================================
 SUBPREF_ID = "subpref_id"
 DIST_ID = "distrito_id"
@@ -63,11 +66,11 @@ QUADRA_ID = "quadra_id"
 LOTE_ID = "lote_id"
 CENSO_ID = "censo_id"
 
-DIST_PARENT = "subpref_id"
-ISO_PARENT = "distrito_id"
-QUADRA_PARENT = "iso_id"
-LOTE_PARENT = "quadra_id"
-CENSO_PARENT = "iso_id"
+DIST_PARENT = "subpref_id"   # distritos.subpref_id
+ISO_PARENT = "distrito_id"   # isocronas.distrito_id
+QUADRA_PARENT = "iso_id"     # quadras.iso_id
+LOTE_PARENT = "quadra_id"    # lotes.quadra_id
+CENSO_PARENT = "iso_id"      # setor.iso_id
 
 LEVELS = ["subpref", "distrito", "isocrona", "quadra", "final"]
 
@@ -218,12 +221,16 @@ def init_state() -> None:
     st.session_state.setdefault("level", "subpref")
     st.session_state.setdefault("selected_subpref_id", None)
     st.session_state.setdefault("selected_distrito_id", None)
-    st.session_state.setdefault("selected_iso_ids", set())     # multi
-    st.session_state.setdefault("selected_quadra_ids", set())  # multi
-    st.session_state.setdefault("final_mode", "lote")          # "lote" | "censo"
+    st.session_state.setdefault("selected_iso_ids", set())       # multi
+    st.session_state.setdefault("selected_quadra_ids", set())    # multi
     st.session_state.setdefault("view_center", (-23.55, -46.63))
     st.session_state.setdefault("view_zoom", 11)
-    # DEBUG toggle
+
+    # Final: permitir mostrar ambos (lotes e setor)
+    st.session_state.setdefault("final_show_lotes", True)
+    st.session_state.setdefault("final_show_censo", False)
+
+    # Debug
     st.session_state.setdefault("debug", False)
 
 
@@ -234,21 +241,25 @@ def reset_to(level: str) -> None:
         st.session_state["selected_distrito_id"] = None
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
-        st.session_state["final_mode"] = "lote"
+        st.session_state["final_show_lotes"] = True
+        st.session_state["final_show_censo"] = False
         st.session_state["view_center"] = (-23.55, -46.63)
         st.session_state["view_zoom"] = 11
     elif level == "distrito":
         st.session_state["selected_distrito_id"] = None
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
-        st.session_state["final_mode"] = "lote"
+        st.session_state["final_show_lotes"] = True
+        st.session_state["final_show_censo"] = False
     elif level == "isocrona":
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
-        st.session_state["final_mode"] = "lote"
+        st.session_state["final_show_lotes"] = True
+        st.session_state["final_show_censo"] = False
     elif level == "quadra":
         st.session_state["selected_quadra_ids"] = set()
-        st.session_state["final_mode"] = "lote"
+        st.session_state["final_show_lotes"] = True
+        st.session_state["final_show_censo"] = False
 
 
 def _back_one_level() -> None:
@@ -268,10 +279,7 @@ def _toggle_in_set(key: str, value: Any) -> None:
     st.session_state[key] = s
 
 
-# =============================================================================
-# DOWNLOAD DRIVE (streaming)
-# =============================================================================
-def _ensure_file_ids_configured(keys: list[str]) -> Optional[str]:
+def _ensure_file_ids_configured(keys: List[str]) -> Optional[str]:
     missing = [k for k in keys if not GDRIVE_FILE_IDS.get(k)]
     if missing:
         return (
@@ -281,6 +289,9 @@ def _ensure_file_ids_configured(keys: list[str]) -> Optional[str]:
     return None
 
 
+# =============================================================================
+# DOWNLOAD DRIVE (streaming)
+# =============================================================================
 @st.cache_resource(show_spinner=False)
 def download_drive_file(file_id: str, dst: Path) -> Path:
     import requests
@@ -393,6 +404,24 @@ def bounds_center_zoom(gdf: "gpd.GeoDataFrame") -> Tuple[Tuple[float, float], in
     return center, z
 
 
+def subset_by_id(gdf: "gpd.GeoDataFrame", id_col: str, value: Any) -> "gpd.GeoDataFrame":
+    if gdf is None or gdf.empty:
+        return gdf
+    gdf = _drop_bad_geoms(gdf)
+    if id_col not in gdf.columns or value is None:
+        return gdf.iloc[0:0].copy()
+    return gdf[gdf[id_col] == value]
+
+
+def subset_by_id_multi(gdf: "gpd.GeoDataFrame", id_col: str, values: Set[Any]) -> "gpd.GeoDataFrame":
+    if gdf is None or gdf.empty:
+        return gdf
+    gdf = _drop_bad_geoms(gdf)
+    if id_col not in gdf.columns or not values:
+        return gdf.iloc[0:0].copy()
+    return gdf[gdf[id_col].isin(list(values))]
+
+
 def subset_by_parent(child: "gpd.GeoDataFrame", parent_col: str, parent_val: Any) -> "gpd.GeoDataFrame":
     if child is None or child.empty:
         return child
@@ -466,13 +495,54 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
         max_zoom=20,
     ).add_to(m)
 
+    # panes: pai abaixo (fill) + shapes + linhas topo
     try:
+        folium.map.CustomPane("parent_fill", z_index=630).add_to(m)
         folium.map.CustomPane("detail_shapes", z_index=640).add_to(m)
         folium.map.CustomPane("top_lines", z_index=660).add_to(m)
     except Exception:
         pass
 
     return m
+
+
+def _mk_tooltip(id_col: str, label_prefix: str) -> Optional[Any]:
+    if GeoJsonTooltip is None or not id_col:
+        return None
+    return GeoJsonTooltip(
+        fields=[id_col],
+        aliases=[label_prefix],
+        sticky=True,
+        labels=False,
+    )
+
+
+def add_parent_fill(
+    m,
+    gdf: "gpd.GeoDataFrame",
+    name: str,
+    pane: str = "parent_fill",
+    fill_color: str = PB_BROWN,
+    fill_opacity: float = 0.20,
+    stroke_color: str = PB_BROWN,
+    stroke_weight: float = 2.0,
+) -> None:
+    """Camada do 'nível acima' preenchida, ficando abaixo do nível atual."""
+    if folium is None or gdf is None or gdf.empty:
+        return
+
+    fg = folium.FeatureGroup(name=name, show=True)
+    folium.GeoJson(
+        data=gdf[["geometry"]].to_json(),
+        pane=pane,
+        style_function=lambda _f: {
+            "color": stroke_color,
+            "weight": stroke_weight,
+            "fillColor": fill_color,
+            "fillOpacity": fill_opacity,
+        },
+    ).add_to(fg)
+    fg.add_to(m)
 
 
 def add_outline(m, gdf: "gpd.GeoDataFrame", name: str, color="#111111", weight=1.2, show=True) -> None:
@@ -509,9 +579,11 @@ def add_polygons_selectable(
     selected_color: str = "#14407D",
     selected_weight: float = 2.4,
     selected_fill_opacity: float = 0.18,
+    tooltip_prefix: str = "ID: ",
 ) -> None:
     if folium is None or gdf is None or gdf.empty:
         return
+
     if id_col not in gdf.columns:
         id_col = ""
 
@@ -530,12 +602,18 @@ def add_polygons_selectable(
             "fillOpacity": (selected_fill_opacity if is_sel else fill_opacity),
         }
 
+    tooltip = _mk_tooltip(id_col, tooltip_prefix) if id_col else None
+
     fg = folium.FeatureGroup(name=name, show=True)
     folium.GeoJson(
         data=mini.to_json(),
         pane=pane,
         style_function=style_fn,
-        highlight_function=lambda _f: {"weight": base_weight + 1.2, "fillOpacity": min(fill_opacity + 0.10, 0.35)},
+        highlight_function=lambda _f: {
+            "weight": base_weight + 1.2,
+            "fillOpacity": min(fill_opacity + 0.10, 0.35),
+        },
+        tooltip=tooltip,
     ).add_to(fg)
     fg.add_to(m)
 
@@ -545,7 +623,7 @@ def add_polygons_selectable(
 # =============================================================================
 def left_panel() -> None:
     st.markdown("<span class='pb-badge'>🧭 Fluxo</span>", unsafe_allow_html=True)
-    st.caption("Subprefeitura → Distrito → Isócronas → Quadras → (Lotes | Setor)")
+    st.caption("Subprefeitura → Distrito → Isócronas → Quadras → (Lotes + Setor Censitário)")
 
     st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
     c1, c2 = st.columns(2)
@@ -566,17 +644,36 @@ def left_panel() -> None:
         }
     )
 
-    st.session_state["debug"] = st.checkbox("Debug (mostrar clique e colunas)", value=st.session_state["debug"])
+    # Ações de avanço (multi)
+    st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
+    level = st.session_state["level"]
 
-    if st.session_state["level"] == "final":
-        st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
-        st.markdown("<span class='pb-badge'>🧩 Nível final</span>", unsafe_allow_html=True)
-        st.session_state["final_mode"] = st.radio(
-            "Visualizar",
-            ["lote", "censo"],
-            index=0 if st.session_state["final_mode"] == "lote" else 1,
-            horizontal=True,
+    if level == "isocrona":
+        st.markdown("<div class='pb-note'>Clique para selecionar/remover isócronas (multi). Depois avance.</div>", unsafe_allow_html=True)
+        can = len(st.session_state["selected_iso_ids"]) > 0
+        st.button("➡️ Avançar para Quadras", use_container_width=True, disabled=not can,
+                  on_click=lambda: st.session_state.__setitem__("level", "quadra"))
+
+    if level == "quadra":
+        st.markdown("<div class='pb-note'>Clique para selecionar/remover quadras (multi). Depois avance.</div>", unsafe_allow_html=True)
+        can = len(st.session_state["selected_quadra_ids"]) > 0
+        st.button("➡️ Avançar para Nível Final", use_container_width=True, disabled=not can,
+                  on_click=lambda: st.session_state.__setitem__("level", "final"))
+
+    if level == "final":
+        st.markdown("<span class='pb-badge'>🧩 Final</span>", unsafe_allow_html=True)
+        st.caption("Lotes (por quadra) e/ou Setor Censitário (por isócrona).")
+        st.session_state["final_show_lotes"] = st.checkbox(
+            "Mostrar Lotes (depende de quadras selecionadas)",
+            value=st.session_state["final_show_lotes"],
         )
+        st.session_state["final_show_censo"] = st.checkbox(
+            "Mostrar Setor Censitário (depende de isócronas selecionadas)",
+            value=st.session_state["final_show_censo"],
+        )
+
+    st.markdown("<div class='pb-divider'></div>", unsafe_allow_html=True)
+    st.session_state["debug"] = st.checkbox("Debug (mostrar clique/cols)", value=st.session_state["debug"])
 
 
 def kpis_row() -> None:
@@ -638,9 +735,12 @@ def main() -> None:
             st.error("Falha ao inicializar o mapa.")
             return
 
-        # --------------------------
-        # LOAD + RENDER POR NÍVEL
-        # --------------------------
+        # ------------------------------------------------------------
+        # RENDER POR NÍVEL + CAMADA DO PAI (fill marrom 20% abaixo)
+        # ------------------------------------------------------------
+        g_for_click = None
+        click_id_col = None
+
         if level == "subpref":
             st.markdown("### Subprefeituras")
             sub_path = ensure_local_layer("subpref")
@@ -650,20 +750,37 @@ def main() -> None:
                 st.stop()
             g_subpref = _drop_bad_geoms(g_subpref)
 
-            # DEBUG: colunas e tipo de geometria
             if st.session_state["debug"]:
                 st.write("SUBPREF cols:", list(g_subpref.columns))
                 st.write("SUBPREF geom_type:", g_subpref.geom_type.value_counts())
                 if SUBPREF_ID in g_subpref.columns:
                     st.write("SUBPREF null subpref_id:", int(g_subpref[SUBPREF_ID].isna().sum()))
 
-            add_outline(m, g_subpref, "Subprefeituras (linha)", color="#111111", weight=1.25, show=True)
+            # linhas + polígonos com tooltip (rótulo no hover)
+            add_outline(m, g_subpref, "Subprefeituras (linha)", color="#111111", weight=1.2, show=True)
+            add_polygons_selectable(
+                m, g_subpref, "Subprefeituras (clique)", SUBPREF_ID,
+                selected_ids=set(),
+                base_weight=0.6,
+                fill_opacity=0.02,
+                selected_color=PB_NAVY,
+                tooltip_prefix="Subpref: ",
+            )
+
+            g_for_click = g_subpref
+            click_id_col = SUBPREF_ID
 
         elif level == "distrito":
             sp = st.session_state["selected_subpref_id"]
             if sp is None:
                 reset_to("subpref")
                 st.rerun()
+
+            # pai: subpref selecionada preenchida (marrom 20%)
+            sub_path = ensure_local_layer("subpref")
+            g_subpref = _drop_bad_geoms(read_gdf_parquet(sub_path))
+            g_parent = subset_by_id(g_subpref, SUBPREF_ID, sp)
+            add_parent_fill(m, g_parent, "Subpref selecionada", fill_color=PB_BROWN, fill_opacity=0.20)
 
             dist_path = ensure_local_layer("dist")
             g_dist = read_gdf_parquet(dist_path)
@@ -676,18 +793,34 @@ def main() -> None:
             st.markdown(f"### Distritos (Subpref {sp})")
 
             add_outline(m, g_show, "Distritos (linha)", color="#111111", weight=1.0, show=True)
-            add_polygons_selectable(m, g_show, "Distritos (clique)", DIST_ID, selected_ids=set(), base_weight=0.6, fill_opacity=0.06)
+            add_polygons_selectable(
+                m, g_show, "Distritos (clique)", DIST_ID,
+                selected_ids=set(),
+                base_weight=0.6,
+                fill_opacity=0.06,
+                selected_color=PB_NAVY,
+                tooltip_prefix="Distrito: ",
+            )
 
             if not g_show.empty:
                 center, zoom = bounds_center_zoom(g_show)
                 st.session_state["view_center"], st.session_state["view_zoom"] = center, zoom
                 m.location, m.zoom_start = center, zoom
 
+            g_for_click = g_show
+            click_id_col = DIST_ID
+
         elif level == "isocrona":
             d = st.session_state["selected_distrito_id"]
             if d is None:
                 reset_to("distrito")
                 st.rerun()
+
+            # pai: distrito selecionado preenchido (marrom 20%)
+            dist_path = ensure_local_layer("dist")
+            g_dist = _drop_bad_geoms(read_gdf_parquet(dist_path))
+            g_parent = subset_by_id(g_dist, DIST_ID, d)
+            add_parent_fill(m, g_parent, "Distrito selecionado", fill_color=PB_BROWN, fill_opacity=0.20)
 
             iso_path = ensure_local_layer("iso")
             g_iso = read_gdf_parquet(iso_path)
@@ -702,8 +835,12 @@ def main() -> None:
             add_polygons_selectable(
                 m, g_show, "Isócronas (multi)", ISO_ID,
                 selected_ids=st.session_state["selected_iso_ids"],
-                base_weight=0.6, fill_opacity=0.10,
-                selected_color=PB_NAVY, selected_weight=2.4, selected_fill_opacity=0.20
+                base_weight=0.6,
+                fill_opacity=0.10,
+                selected_color=PB_NAVY,
+                selected_weight=2.4,
+                selected_fill_opacity=0.20,
+                tooltip_prefix="Isócrona: ",
             )
 
             if not g_show.empty:
@@ -711,11 +848,20 @@ def main() -> None:
                 st.session_state["view_center"], st.session_state["view_zoom"] = center, zoom
                 m.location, m.zoom_start = center, zoom
 
+            g_for_click = g_show
+            click_id_col = ISO_ID
+
         elif level == "quadra":
             iso_ids: Set[Any] = st.session_state["selected_iso_ids"]
             if not iso_ids:
                 reset_to("isocrona")
                 st.rerun()
+
+            # pai: isócronas selecionadas preenchidas (marrom 20%)
+            iso_path = ensure_local_layer("iso")
+            g_iso = _drop_bad_geoms(read_gdf_parquet(iso_path))
+            g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
+            add_parent_fill(m, g_parent, "Isócronas selecionadas", fill_color=PB_BROWN, fill_opacity=0.20)
 
             quadra_path = ensure_local_layer("quadra")
             g_quadra = read_gdf_parquet(quadra_path)
@@ -730,8 +876,12 @@ def main() -> None:
             add_polygons_selectable(
                 m, g_show, "Quadras (multi)", QUADRA_ID,
                 selected_ids=st.session_state["selected_quadra_ids"],
-                base_weight=0.45, fill_opacity=0.10,
-                selected_color=PB_NAVY, selected_weight=2.2, selected_fill_opacity=0.22
+                base_weight=0.45,
+                fill_opacity=0.10,
+                selected_color=PB_NAVY,
+                selected_weight=2.2,
+                selected_fill_opacity=0.22,
+                tooltip_prefix="Quadra: ",
             )
 
             if not g_show.empty:
@@ -739,24 +889,50 @@ def main() -> None:
                 st.session_state["view_center"], st.session_state["view_zoom"] = center, min(zoom + 1, 17)
                 m.location, m.zoom_start = st.session_state["view_center"], st.session_state["view_zoom"]
 
+            g_for_click = g_show
+            click_id_col = QUADRA_ID
+
         else:
+            # FINAL: mostrar lotes e/ou setor censitário
             iso_ids: Set[Any] = st.session_state["selected_iso_ids"]
             quad_ids: Set[Any] = st.session_state["selected_quadra_ids"]
+
             if not iso_ids:
                 reset_to("isocrona")
                 st.rerun()
 
-            mode = st.session_state["final_mode"]
-            if mode == "lote" and not quad_ids:
-                reset_to("quadra")
-                st.rerun()
+            show_lotes = st.session_state["final_show_lotes"]
+            show_censo = st.session_state["final_show_censo"]
 
-            st.markdown("### Nível final")
-            st.warning("Arquivos do nível final podem ser pesados. O download só ocorre ao clicar no botão abaixo.")
-            go = st.button("⬇️ Carregar dados do nível final", type="primary")
+            st.markdown("### Nível final (Lotes + Setor Censitário)")
+            st.caption("Dica: mantenha só a camada necessária ligada para performance.")
 
-            if go:
-                if mode == "lote":
+            # pai: quadras selecionadas preenchidas (marrom 20%) como referência
+            quadra_path = ensure_local_layer("quadra")
+            g_quadra = _drop_bad_geoms(read_gdf_parquet(quadra_path))
+            g_parent_quads = subset_by_id_multi(g_quadra, QUADRA_ID, quad_ids) if quad_ids else g_quadra.iloc[0:0].copy()
+            if not g_parent_quads.empty:
+                add_parent_fill(m, g_parent_quads, "Quadras selecionadas", fill_color=PB_BROWN, fill_opacity=0.20)
+
+            # (opcional) também manter isócronas selecionadas como referência abaixo dos setores
+            iso_path = ensure_local_layer("iso")
+            g_iso = _drop_bad_geoms(read_gdf_parquet(iso_path))
+            g_parent_isos = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
+            if show_censo and not g_parent_isos.empty:
+                add_parent_fill(m, g_parent_isos, "Isócronas selecionadas", fill_color=PB_BROWN, fill_opacity=0.20)
+
+            # Botões de carga sob demanda (evita download pesado automático)
+            cA, cB = st.columns(2)
+            with cA:
+                load_lotes = st.button("⬇️ Carregar Lotes", type="primary", disabled=(not show_lotes or not quad_ids))
+            with cB:
+                load_censo = st.button("⬇️ Carregar Setor Censitário", type="primary", disabled=(not show_censo or not iso_ids))
+
+            # Camada Lotes (por quadra)
+            if show_lotes:
+                if not quad_ids:
+                    st.info("Selecione ao menos 1 quadra para habilitar Lotes.")
+                elif load_lotes:
                     msg2 = _ensure_file_ids_configured(["lote"])
                     if msg2:
                         st.error(msg2)
@@ -769,11 +945,28 @@ def main() -> None:
                         st.stop()
                     g_lote = _drop_bad_geoms(g_lote)
 
-                    g_show = subset_by_parent_multi(g_lote, LOTE_PARENT, quad_ids)
-                    st.markdown("#### Lotes (Quadras selecionadas)")
-                    add_polygons_selectable(m, g_show, "Lotes", LOTE_ID, selected_ids=set(), base_weight=0.25, fill_opacity=0.10)
+                    g_show_lotes = subset_by_parent_multi(g_lote, LOTE_PARENT, quad_ids)
+                    st.success(f"Lotes carregados: {len(g_show_lotes):,}".replace(",", "."))
 
-                else:
+                    add_polygons_selectable(
+                        m, g_show_lotes, "Lotes", LOTE_ID,
+                        selected_ids=set(),
+                        base_weight=0.25,
+                        fill_opacity=0.10,
+                        selected_color=PB_NAVY,
+                        tooltip_prefix="Lote: ",
+                    )
+
+                    if not g_show_lotes.empty:
+                        center, zoom = bounds_center_zoom(g_show_lotes)
+                        st.session_state["view_center"], st.session_state["view_zoom"] = center, min(zoom + 1, 18)
+                        m.location, m.zoom_start = st.session_state["view_center"], st.session_state["view_zoom"]
+
+            # Camada Setor Censitário (por isócrona)
+            if show_censo:
+                if not iso_ids:
+                    st.info("Selecione ao menos 1 isócrona para habilitar Setor Censitário.")
+                elif load_censo:
                     msg2 = _ensure_file_ids_configured(["censo"])
                     if msg2:
                         st.error(msg2)
@@ -786,102 +979,76 @@ def main() -> None:
                         st.stop()
                     g_censo = _drop_bad_geoms(g_censo)
 
-                    g_show = subset_by_parent_multi(g_censo, CENSO_PARENT, iso_ids)
-                    st.markdown("#### Setores Censitários (Isócronas selecionadas)")
-                    add_polygons_selectable(m, g_show, "Setor censitário", CENSO_ID, selected_ids=set(), base_weight=0.35, fill_opacity=0.08)
+                    g_show_censo = subset_by_parent_multi(g_censo, CENSO_PARENT, iso_ids)
+                    st.success(f"Setores carregados: {len(g_show_censo):,}".replace(",", "."))
 
-                if g_show is not None and not g_show.empty:
-                    center, zoom = bounds_center_zoom(g_show)
-                    st.session_state["view_center"], st.session_state["view_zoom"] = center, min(zoom + 1, 18)
-                    m.location, m.zoom_start = st.session_state["view_center"], st.session_state["view_zoom"]
+                    add_polygons_selectable(
+                        m, g_show_censo, "Setor Censitário", CENSO_ID,
+                        selected_ids=set(),
+                        base_weight=0.35,
+                        fill_opacity=0.08,
+                        selected_color=PB_NAVY,
+                        tooltip_prefix="Setor: ",
+                    )
 
+                    if not g_show_censo.empty:
+                        center, zoom = bounds_center_zoom(g_show_censo)
+                        st.session_state["view_center"], st.session_state["view_zoom"] = center, min(zoom + 1, 18)
+                        m.location, m.zoom_start = st.session_state["view_center"], st.session_state["view_zoom"]
+
+            # no nível final, não há clique de avanço (por enquanto)
+            g_for_click = None
+            click_id_col = None
+
+        # layer control
         try:
             folium.LayerControl(position="bottomright", collapsed=False).add_to(m)
         except Exception:
             pass
 
-        # ✅ AJUSTE PRINCIPAL: habilitar retorno de clique
+        # ✅ retorno de clique habilitado
         out = st_folium(
             m,
             height=780,
             use_container_width=True,
             key="map_view",
-            returned_objects=["last_clicked"],  # <-- importante
+            returned_objects=["last_clicked"],
         )
-
         click = (out or {}).get("last_clicked")
 
-        # DEBUG: ver o out e o clique
         if st.session_state["debug"]:
             st.write("OUT:", out)
             st.write("CLICK:", click)
 
-        if click:
-            if level == "subpref":
-                sub_path = ensure_local_layer("subpref")
-                g_subpref = read_gdf_parquet(sub_path)
-                if g_subpref is None or g_subpref.empty:
-                    st.stop()
-                g_subpref = _drop_bad_geoms(g_subpref)
+        # ------------------------------------------------------------
+        # CLIQUE (seleção) — somente níveis de seleção
+        # ------------------------------------------------------------
+        if click and g_for_click is not None and click_id_col:
+            picked = pick_feature_id(g_for_click, click, click_id_col)
+            if st.session_state["debug"]:
+                st.write("PICKED:", picked, " (col:", click_id_col, ")")
 
-                picked = pick_feature_id(g_subpref, click, SUBPREF_ID)
-                if st.session_state["debug"]:
-                    st.write("PICKED subpref_id:", picked)
-
-                if picked is not None:
+            if picked is not None:
+                if level == "subpref":
                     st.session_state["selected_subpref_id"] = picked
                     st.session_state["level"] = "distrito"
                     st.rerun()
 
-            elif level == "distrito":
-                sp = st.session_state["selected_subpref_id"]
-                dist_path = ensure_local_layer("dist")
-                g_dist = read_gdf_parquet(dist_path)
-                if g_dist is None or g_dist.empty:
-                    st.stop()
-                g_dist = _drop_bad_geoms(g_dist)
-
-                g_show = subset_by_parent(g_dist, DIST_PARENT, sp)
-                picked = pick_feature_id(g_show, click, DIST_ID)
-
-                if picked is not None:
+                elif level == "distrito":
                     st.session_state["selected_distrito_id"] = picked
                     st.session_state["selected_iso_ids"] = set()
                     st.session_state["selected_quadra_ids"] = set()
-                    st.session_state["final_mode"] = "lote"
                     st.session_state["level"] = "isocrona"
                     st.rerun()
 
-            elif level == "isocrona":
-                d = st.session_state["selected_distrito_id"]
-                iso_path = ensure_local_layer("iso")
-                g_iso = read_gdf_parquet(iso_path)
-                if g_iso is None or g_iso.empty:
-                    st.stop()
-                g_iso = _drop_bad_geoms(g_iso)
-
-                g_show = subset_by_parent(g_iso, ISO_PARENT, d)
-                picked = pick_feature_id(g_show, click, ISO_ID)
-                if picked is not None:
+                elif level == "isocrona":
                     _toggle_in_set("selected_iso_ids", picked)
-                    st.session_state["selected_quadra_ids"] = set()
-                    st.session_state["level"] = "quadra"
+                    # não avança automaticamente: permite multi
                     st.rerun()
 
-            elif level == "quadra":
-                iso_ids = st.session_state["selected_iso_ids"]
-                quadra_path = ensure_local_layer("quadra")
-                g_quadra = read_gdf_parquet(quadra_path)
-                if g_quadra is None or g_quadra.empty:
-                    st.stop()
-                g_quadra = _drop_bad_geoms(g_quadra)
-
-                g_show = subset_by_parent_multi(g_quadra, QUADRA_PARENT, iso_ids)
-                picked = pick_feature_id(g_show, click, QUADRA_ID)
-                if picked is not None:
+                elif level == "quadra":
                     _toggle_in_set("selected_quadra_ids", picked)
-                    if len(st.session_state["selected_quadra_ids"]) >= 1:
-                        st.session_state["level"] = "final"
+                    # não avança automaticamente: permite multi
                     st.rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
