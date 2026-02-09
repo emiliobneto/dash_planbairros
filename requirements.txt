@@ -1,14 +1,8 @@
-streamlit>=1.33.0
-numpy==1.26.4
-pandas==2.1.4
-pyarrow==14.0.2
-geopandas==0.14.3
-shapely==2.0.4
-pyproj==3.6.1
-fiona>=1.9.6
-folium==0.15.1
-branca==0.7.2
-streamlit-folium==0.18.0
-
-
+streamlit
+geopandas
+pyarrow
+shapely
+folium
+streamlit-folium
+gdown
 
