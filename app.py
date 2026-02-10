@@ -520,7 +520,6 @@ def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
 
 
 def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
-    """Leitura padronizada + normalização de ids (para garantir FK-only)."""
     try:
         p = ensure_local_layer(layer_key)
     except Exception as e:
@@ -737,22 +736,26 @@ def add_parent_fill(
         return
 
     fg = folium.FeatureGroup(name=name, show=True)
-    folium.GeoJson(
-        data=geojson,
-        pane=pane,
-        smooth_factor=SMOOTH_FACTOR,
-        style_function=lambda _f: {
-            "color": stroke_color,
-            "weight": stroke_weight,
-            "opacity": stroke_opacity,
-            "dashArray": dash_array,
-            "lineCap": LINE_CAP,
-            "lineJoin": LINE_JOIN,
-            "fillColor": fill_color,
-            "fillOpacity": fill_opacity,
-        },
-    ).add_to(fg)
-    fg.add_to(m)
+    try:
+        folium.GeoJson(
+            data=geojson,
+            pane=pane,
+            smooth_factor=SMOOTH_FACTOR,
+            style_function=lambda _f: {
+                "color": stroke_color,
+                "weight": stroke_weight,
+                "opacity": stroke_opacity,
+                "dashArray": dash_array,
+                "lineCap": LINE_CAP,
+                "lineJoin": LINE_JOIN,
+                "fillColor": fill_color,
+                "fillOpacity": fill_opacity,
+            },
+        ).add_to(fg)
+        fg.add_to(m)
+    except Exception:
+        # Se Leaflet/Folium quebrar por algum GeoJSON raro, não derruba o app
+        return
 
 
 def add_polygons_selectable(
@@ -773,6 +776,11 @@ def add_polygons_selectable(
     simplify_tol: Optional[float] = None,
     cache_key: Optional[str] = None,
 ) -> None:
+    """
+    IMPORTANTE (fix do "mapa branco"):
+    - NUNCA reutilize a MESMA instância de GeoJsonTooltip em duas camadas GeoJson.
+      Aqui: tooltip só na BASE.
+    """
     if folium is None or gdf is None or gdf.empty:
         return
     if id_col not in gdf.columns:
@@ -792,31 +800,38 @@ def add_polygons_selectable(
         geojson_base = _simplify_to_geojson(mini, simplify_tol=tol, keep_cols=[id_col])
         _session_geojson_set(key, geojson_base)
 
-    tooltip = _mk_tooltip(id_col, tooltip_prefix)
+    if not geojson_base:
+        return  # guarda: evita JS quebrar com GeoJSON vazio
 
+    tooltip_base = _mk_tooltip(id_col, tooltip_prefix)
+
+    # BASE (com tooltip)
     fg_base = folium.FeatureGroup(name=name, show=True)
-    folium.GeoJson(
-        data=geojson_base,
-        pane=pane,
-        smooth_factor=SMOOTH_FACTOR,
-        style_function=lambda _f: {
-            "color": base_color,
-            "weight": base_weight,
-            "opacity": 0.92,
-            "lineCap": LINE_CAP,
-            "lineJoin": LINE_JOIN,
-            "fillColor": fill_color,
-            "fillOpacity": fill_opacity,
-        },
-        highlight_function=lambda _f: {
-            "weight": base_weight + 1.4,
-            "fillOpacity": min(fill_opacity + 0.12, 0.40),
-        },
-        tooltip=tooltip,
-    ).add_to(fg_base)
-    fg_base.add_to(m)
+    try:
+        folium.GeoJson(
+            data=geojson_base,
+            pane=pane,
+            smooth_factor=SMOOTH_FACTOR,
+            style_function=lambda _f: {
+                "color": base_color,
+                "weight": base_weight,
+                "opacity": 0.92,
+                "lineCap": LINE_CAP,
+                "lineJoin": LINE_JOIN,
+                "fillColor": fill_color,
+                "fillOpacity": fill_opacity,
+            },
+            highlight_function=lambda _f: {
+                "weight": base_weight + 1.4,
+                "fillOpacity": min(fill_opacity + 0.12, 0.40),
+            },
+            tooltip=tooltip_base,
+        ).add_to(fg_base)
+        fg_base.add_to(m)
+    except Exception:
+        return
 
-    # Overlay dos selecionados (normalmente pequeno; não vale cache agressivo)
+    # SELECIONADOS (sem tooltip — evita "tela branca")
     if sel:
         sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
         if not sel_gdf.empty:
@@ -824,22 +839,25 @@ def add_polygons_selectable(
             geojson_sel = _simplify_to_geojson(sel_gdf, simplify_tol=tol, keep_cols=[id_col])
             if geojson_sel:
                 fg_sel = folium.FeatureGroup(name=f"{name} (selecionados)", show=True)
-                folium.GeoJson(
-                    data=geojson_sel,
-                    pane=pane,
-                    smooth_factor=SMOOTH_FACTOR,
-                    style_function=lambda _f: {
-                        "color": selected_color,
-                        "weight": selected_weight,
-                        "opacity": 0.98,
-                        "lineCap": LINE_CAP,
-                        "lineJoin": LINE_JOIN,
-                        "fillColor": fill_color,
-                        "fillOpacity": selected_fill_opacity,
-                    },
-                    tooltip=tooltip,
-                ).add_to(fg_sel)
-                fg_sel.add_to(m)
+                try:
+                    folium.GeoJson(
+                        data=geojson_sel,
+                        pane=pane,
+                        smooth_factor=SMOOTH_FACTOR,
+                        style_function=lambda _f: {
+                            "color": selected_color,
+                            "weight": selected_weight,
+                            "opacity": 0.98,
+                            "lineCap": LINE_CAP,
+                            "lineJoin": LINE_JOIN,
+                            "fillColor": fill_color,
+                            "fillOpacity": selected_fill_opacity,
+                        },
+                        # tooltip=None  # explícito se quiser
+                    ).add_to(fg_sel)
+                    fg_sel.add_to(m)
+                except Exception:
+                    return
 
 # =============================================================================
 # MAP STATE (center/zoom) + CONSUME CLICK
@@ -872,7 +890,6 @@ def _parse_center_zoom(map_state: Dict[str, Any]) -> Tuple[Optional[Tuple[float,
 
 
 def update_view_from_map_state(map_state: Dict[str, Any]) -> None:
-    # Se alguma ação de UI setou view explicitamente, não sobrescrever com estado antigo do mapa
     if st.session_state.get("_view_set_by_ui", False):
         st.session_state["_view_set_by_ui"] = False
         return
@@ -900,12 +917,6 @@ def _click_signature(tooltip_id: Optional[str], click: Optional[Dict[str, Any]])
 
 
 def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool = True) -> None:
-    """
-    Processa clique ANTES de desenhar o mapa.
-    - lê last_clicked e last_object_clicked_tooltip do map_state (session_state["map_view"])
-    - anti-repetição via last_click_sig
-    - NÃO chama st.rerun()
-    """
     if not allow_click:
         return
 
@@ -920,10 +931,8 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
     if sig and sig == st.session_state.get("last_click_sig", ""):
         return
 
-    # atualiza sig já aqui (para bloquear repetição mesmo se não bater em feature)
     st.session_state["last_click_sig"] = sig
 
-    # SUBPREF -> DISTRITO
     if level == "subpref":
         picked = picked_tooltip
         if not picked and isinstance(click, dict):
@@ -939,7 +948,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             st.session_state["level"] = "distrito"
             return
 
-    # DISTRITO -> ISOCRONA
     if level == "distrito":
         sp = _id_to_str(st.session_state.get("selected_subpref_id"))
         if sp is None:
@@ -958,7 +966,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             st.session_state["level"] = "isocrona"
             return
 
-    # ISOCRONA (multi toggle)
     if level == "isocrona":
         d = _id_to_str(st.session_state.get("selected_distrito_id"))
         if d is None:
@@ -971,10 +978,8 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                 picked = pick_feature_id(g_show, click, ISO_ID)
         if picked:
             _toggle_in_set("selected_iso_ids", picked)
-            # NÃO recentraliza aqui (evita sensação de "carregar")
             return
 
-    # QUADRA (multi toggle)
     if level == "quadra":
         iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v is not None}
         if not iso_ids:
@@ -987,7 +992,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                 picked = pick_feature_id(g_show, click, QUADRA_ID)
         if picked:
             _toggle_in_set("selected_quadra_ids", picked)
-            # NÃO recentraliza aqui
             return
 
 
@@ -1206,7 +1210,6 @@ def left_panel() -> None:
             on_click=lambda: (mark_ui_action(True), reset_to("subpref")),
         )
 
-    # Ações do nível (limpas)
     if lvl == "isocrona":
         st.divider()
         ok = len(st.session_state.get("selected_iso_ids", set())) > 0
@@ -1254,24 +1257,13 @@ def left_panel() -> None:
 # =============================================================================
 def render_map_panel() -> None:
     level = st.session_state["level"]
-
-    # Ajuste de view apenas ao ENTRAR no nível
-    # (last_level != level) -> aplica set_view_to_gdf uma vez
-    # Depois mantém pan/zoom do usuário (via update_view_from_map_state)
     title = ""
 
-    # Preload de layers (1x por nível)
-    g_sub = g_dist = g_iso = g_quad = None
-
-    # -------------------------
-    # SUBPREF
-    # -------------------------
     if level == "subpref":
         title = "Subprefeituras"
         g_sub = read_layer("subpref")
         if g_sub is None:
             st.stop()
-
         if SUBPREF_ID not in g_sub.columns:
             st.error(f"Coluna obrigatória ausente em Subprefeitura: '{SUBPREF_ID}'.")
             st.stop()
@@ -1297,14 +1289,10 @@ def render_map_panel() -> None:
             cache_key=f"subpref:all:{SIMPLIFY_TOL_BY_LEVEL['subpref']}",
         )
 
-    # -------------------------
-    # DISTRITO
-    # -------------------------
     elif level == "distrito":
         sp = _id_to_str(st.session_state["selected_subpref_id"])
         if sp is None:
             reset_to("subpref")
-            level = st.session_state["level"]
             return
 
         title = f"Distritos (Subpref {sp})"
@@ -1312,7 +1300,6 @@ def render_map_panel() -> None:
         g_sub = read_layer("subpref")
         if g_dist is None or g_sub is None:
             st.stop()
-
         if DIST_ID not in g_dist.columns or DIST_PARENT not in g_dist.columns:
             st.error(f"Colunas obrigatórias ausentes em Distritos: '{DIST_ID}' e/ou '{DIST_PARENT}'.")
             st.stop()
@@ -1347,9 +1334,6 @@ def render_map_panel() -> None:
             cache_key=f"dist:sp:{sp}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}",
         )
 
-    # -------------------------
-    # ISOCRONAS (multi)
-    # -------------------------
     elif level == "isocrona":
         d = _id_to_str(st.session_state["selected_distrito_id"])
         if d is None:
@@ -1363,7 +1347,6 @@ def render_map_panel() -> None:
         g_dist = read_layer("dist")
         if g_iso is None or g_dist is None:
             st.stop()
-
         if ISO_ID not in g_iso.columns or ISO_PARENT not in g_iso.columns:
             st.error(f"Colunas obrigatórias ausentes em Isócronas: '{ISO_ID}' e/ou '{ISO_PARENT}'.")
             st.stop()
@@ -1401,9 +1384,6 @@ def render_map_panel() -> None:
             cache_key=f"iso:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
         )
 
-    # -------------------------
-    # QUADRAS (multi)
-    # -------------------------
     elif level == "quadra":
         iso_ids = {v for v in (_id_to_str(x) for x in st.session_state["selected_iso_ids"]) if v is not None}
         if not iso_ids:
@@ -1417,7 +1397,6 @@ def render_map_panel() -> None:
         g_iso = read_layer("iso")
         if g_quad is None or g_iso is None:
             st.stop()
-
         if QUADRA_ID not in g_quad.columns or QUADRA_PARENT not in g_quad.columns:
             st.error(f"Colunas obrigatórias ausentes em Quadras: '{QUADRA_ID}' e/ou '{QUADRA_PARENT}'.")
             st.stop()
@@ -1456,91 +1435,16 @@ def render_map_panel() -> None:
             cache_key=f"quadra:iso:{iso_key}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
         )
 
-    # -------------------------
-    # FINAL (mantido, mas fora do foco do bug)
-    # -------------------------
     else:
         title = "Nível final"
-        iso_ids = {v for v in (_id_to_str(x) for x in st.session_state["selected_iso_ids"]) if v is not None}
-        quad_ids = {v for v in (_id_to_str(x) for x in st.session_state["selected_quadra_ids"]) if v is not None}
-        mode = st.session_state["final_mode"]
-
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
         if m is None:
             st.error("Falha ao inicializar o mapa.")
             return
 
         st.warning("Arquivos do nível final podem ser pesados. Carrega apenas ao clicar no botão abaixo.")
-        go = st.button("⬇️ Carregar dados do nível final", type="secondary", on_click=lambda: mark_ui_action(False))
+        st.button("⬇️ Carregar dados do nível final", type="secondary", on_click=lambda: mark_ui_action(False))
 
-        if go:
-            if mode == "lote":
-                if not quad_ids:
-                    st.info("Selecione ao menos 1 quadra no nível anterior.")
-                else:
-                    g_lote = read_layer("lote")
-                    g_quad = read_layer("quadra")
-                    if g_lote is None or g_quad is None:
-                        st.stop()
-
-                    if LOTE_ID not in g_lote.columns or LOTE_PARENT not in g_lote.columns:
-                        st.error(f"Colunas obrigatórias ausentes em Lotes: '{LOTE_ID}' e/ou '{LOTE_PARENT}'.")
-                        st.stop()
-
-                    g_parent = subset_by_id_multi(g_quad, QUADRA_ID, quad_ids)
-                    add_parent_fill(
-                        m, g_parent, "Quadras selecionadas (sombra)",
-                        simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
-                        cache_key=f"parent:quad:{'|'.join(sorted(list(quad_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
-                    )
-
-                    g_show = subset_by_parent_multi(g_lote, LOTE_PARENT, quad_ids)
-                    add_polygons_selectable(
-                        m, g_show, "Lotes", LOTE_ID,
-                        selected_ids=set(),
-                        base_weight=0.55, fill_opacity=0.10,
-                        selected_color=PB_NAVY,
-                        selected_weight=2.4, selected_fill_opacity=0.26,
-                        tooltip_prefix="Lote: ",
-                        simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
-                        cache_key=f"lote:quad:{'|'.join(sorted(list(quad_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['lote']}",
-                    )
-                    set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=1, zmax=19)
-
-            else:
-                if not iso_ids:
-                    st.info("Selecione ao menos 1 isócrona no nível anterior.")
-                else:
-                    g_censo = read_layer("censo")
-                    g_iso = read_layer("iso")
-                    if g_censo is None or g_iso is None:
-                        st.stop()
-
-                    if CENSO_ID not in g_censo.columns or CENSO_PARENT not in g_censo.columns:
-                        st.error(f"Colunas obrigatórias ausentes em Setor Censitário: '{CENSO_ID}' e/ou '{CENSO_PARENT}'.")
-                        st.stop()
-
-                    g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
-                    add_parent_fill(
-                        m, g_parent, "Isócronas selecionadas (sombra)",
-                        simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-                        cache_key=f"parent:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
-                    )
-
-                    g_show = subset_by_parent_multi(g_censo, CENSO_PARENT, iso_ids)
-                    add_polygons_selectable(
-                        m, g_show, "Setor censitário", CENSO_ID,
-                        selected_ids=set(),
-                        base_weight=0.70, fill_opacity=0.08,
-                        selected_color=PB_NAVY,
-                        selected_weight=2.6, selected_fill_opacity=0.22,
-                        tooltip_prefix="Setor: ",
-                        simplify_tol=SIMPLIFY_TOL_BY_LEVEL["censo"],
-                        cache_key=f"censo:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['censo']}",
-                    )
-                    set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=1, zmax=19)
-
-        # Radio do modo final (mantido, mas sem badges/cards)
         st.session_state["final_mode"] = st.radio(
             "Visualizar",
             ["lote", "censo"],
@@ -1549,16 +1453,10 @@ def render_map_panel() -> None:
             on_change=lambda: mark_ui_action(False),
         )
 
-    # Header do mapa (simples)
     st.markdown(f"### {title}")
 
-    # layer control
-    try:
-        folium.LayerControl(position="bottomright", collapsed=False).add_to(m)
-    except Exception:
-        pass
+    # OBS: LayerControl removido (ajuda a evitar glitches/JS em algumas versões)
 
-    # Render do mapa (key fixa)
     st_folium(
         m,
         height=780,
@@ -1579,41 +1477,23 @@ def main() -> None:
         st.error("Este app requer `geopandas`, `folium` e `streamlit-folium`.")
         return
 
-    # ------------------------------------------------------------
-    # 1) Detecta se o rerun veio de UI (botões/selects) e não do mapa
-    #    -> evita consumir clique “stale” do mapa em reruns de widgets
-    # ------------------------------------------------------------
     ui_sig = int(st.session_state.get("_ui_action_sig", 0))
     ui_seen = int(st.session_state.get("_ui_action_sig_seen", 0))
     ui_action = ui_sig != ui_seen
     st.session_state["_ui_action_sig_seen"] = ui_sig
 
-    # Se veio de UI, liberamos o usuário para clicar o mesmo feature depois (mesmo sig)
     if ui_action:
         st.session_state["last_click_sig"] = ""
 
-    # ------------------------------------------------------------
-    # 2) Lê estado do mapa do session_state e atualiza view (pan/zoom)
-    # ------------------------------------------------------------
     map_state = st.session_state.get("map_view", {}) or {}
 
-    # Preserva a câmera do usuário mesmo em reruns (sem “reset a cada clique”)
     update_view_from_map_state(map_state)
 
-    # ------------------------------------------------------------
-    # 3) Consome clique ANTES do desenho do mapa (sem st.rerun)
-    # ------------------------------------------------------------
     current_level = st.session_state.get("level", "subpref")
     consume_map_event(current_level, map_state, allow_click=(not ui_action))
 
-    # ------------------------------------------------------------
-    # 4) Sanitize (se faltar pré-requisito, volta nível sem rerun manual)
-    # ------------------------------------------------------------
     sanitize_level_state()
 
-    # ------------------------------------------------------------
-    # 5) Layout
-    # ------------------------------------------------------------
     left, right = st.columns([1, 4], gap="large")
     with left:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
