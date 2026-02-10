@@ -41,13 +41,11 @@ PB_COLORS = {
     "telha": "#C65534",
     "teal": "#6FA097",
     "navy": "#14407D",
-    "marrom": "#C65534",  # telha como marrom
+    "marrom": "#C65534",
 }
 PB_NAVY = PB_COLORS["navy"]
 PB_BROWN = PB_COLORS["telha"]
-
-# Botões (Reset/Voltar)
-PB_BTN = "#1C6880"
+PB_BTN = "#1C6880"  # Reset/Voltar
 
 # Carto tiles explícito
 CARTO_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
@@ -58,13 +56,13 @@ SMOOTH_FACTOR = 0.9
 LINE_CAP = "round"
 LINE_JOIN = "round"
 
-# “Sombra” do nível acima (bem sutil, tracejada e fina)
+# “Sombra” do nível acima (sutil)
 PARENT_FILL_OPACITY = 0.16
 PARENT_STROKE_OPACITY = 0.35
 PARENT_STROKE_WEIGHT = 0.7
 PARENT_STROKE_DASH = "2,6"
 
-# Simplificação por nível (somente para VISUAL, não para análise)
+# Simplificação por nível (VISUAL)
 SIMPLIFY_TOL_BY_LEVEL = {
     "subpref": 0.0010,
     "distrito": 0.0008,
@@ -86,7 +84,7 @@ LOGO_PATH = ASSETS_DIR / "logo_todos.jpg"
 LOGO_HEIGHT = 46
 
 # =============================================================================
-# IDS DO ENCADEAMENTO (FK-only)
+# IDS DO ENCADEAMENTO (FK-only) - Nomes CANÔNICOS usados no app
 # =============================================================================
 SUBPREF_ID = "subpref_id"
 DIST_ID = "distrito_id"
@@ -103,6 +101,7 @@ CENSO_PARENT = ISO_ID        # setor censitário -> isócrona
 
 LEVELS = ["subpref", "distrito", "isocrona", "quadra", "final"]
 
+# colunas a normalizar por layer (ID + FKs)
 LAYER_ID_COLS = {
     "subpref": [SUBPREF_ID],
     "dist": [DIST_ID, DIST_PARENT],
@@ -143,6 +142,35 @@ FALLBACK_URLS = {
 }
 
 # =============================================================================
+# COLUMN ALIASES (auto-rename) - para casar seu parquet com os nomes canônicos
+# =============================================================================
+COL_ALIASES_BY_LAYER: Dict[str, Dict[str, list[str]]] = {
+    "subpref": {
+        SUBPREF_ID: ["SUBPREF_ID", "SUBPREFEITURA_ID", "subprefeitura_id", "ID_SUBPREF", "id_subpref"],
+    },
+    "dist": {
+        DIST_ID: ["DIST_ID", "DISTRITO_ID", "ID_DISTRITO", "id_distrito"],
+        DIST_PARENT: ["DIST_PARENT", "SUBPREF_ID", "SUBPREFEITURA_ID", "subpref_id", "subprefeitura_id"],
+    },
+    "iso": {
+        ISO_ID: ["ISO_ID", "ISOCRONA_ID", "ISOCRO_ID", "id_iso", "ID_ISO"],
+        ISO_PARENT: ["ISO_PARENT", "DIST_ID", "DISTRITO_ID", "distrito_id", "id_distrito", "ID_DISTRITO"],
+    },
+    "quadra": {
+        QUADRA_ID: ["QUADRA_ID", "ID_QUADRA", "id_quadra", "cod_quadra", "COD_QUADRA", "quadra"],
+        QUADRA_PARENT: ["QUADRA_PARENT", "ISO_ID", "iso_id", "ISOCRONA_ID", "isocrona_id", "id_iso", "ID_ISO", "iso_parent"],
+    },
+    "lote": {
+        LOTE_ID: ["LOTE_ID", "ID_LOTE", "id_lote", "cod_lote", "COD_LOTE"],
+        LOTE_PARENT: ["LOTE_PARENT", "QUADRA_ID", "quadra_id", "id_quadra", "ID_QUADRA"],
+    },
+    "censo": {
+        CENSO_ID: ["CENSO_ID", "SETOR_ID", "setor_id", "ID_SETOR", "id_setor"],
+        CENSO_PARENT: ["CENSO_PARENT", "ISO_ID", "iso_id", "ISOCRONA_ID", "isocrona_id", "ID_ISO"],
+    },
+}
+
+# =============================================================================
 # CSS / HEADER
 # =============================================================================
 def _logo_data_uri() -> str:
@@ -180,7 +208,7 @@ def inject_css() -> None:
         .pb-title {{ font-size:2.25rem; font-weight:900; line-height:1.05; letter-spacing:.2px; }}
         .pb-subtitle {{ font-size:1.05rem; opacity:.95; margin-top:5px; }}
 
-        /* Minimal "card" */
+        /* Minimal card wrapper */
         .pb-card {{
             background:#fff;
             border:1px solid rgba(20,64,125,.10);
@@ -203,7 +231,6 @@ def inject_css() -> None:
             opacity:.55;
         }}
 
-        /* Reduce extra spacing inside left panel widgets */
         .pb-left .stButton, .pb-left .stSelectbox {{
             margin-bottom: .2rem;
         }}
@@ -249,7 +276,7 @@ def init_state() -> None:
     # anti-repetição de clique
     st.session_state.setdefault("last_click_sig", "")
 
-    # "geojson cache" em sessão (para evitar simplify+to_json pesado por rerun)
+    # cache geojson (por sessão) para acelerar simplify+to_json
     st.session_state.setdefault("_geojson_cache", {})  # type: ignore
 
     # debug
@@ -260,11 +287,11 @@ def init_state() -> None:
     st.session_state.setdefault("metric_factor", None)
     st.session_state.setdefault("metric_indicator", None)
 
-    # "UI action" signature (para evitar consumir clique do mapa em reruns de widgets)
+    # assinatura de ações de UI (para não consumir clique “stale” do mapa)
     st.session_state.setdefault("_ui_action_sig", 0)
     st.session_state.setdefault("_ui_action_sig_seen", 0)
 
-    # flag: alguma ação de UI setou a câmera explicitamente (ex.: Fit)
+    # se alguma ação setou view explicitamente, não sobrescreve com center/zoom antigo do mapa
     st.session_state.setdefault("_view_set_by_ui", False)
 
 
@@ -276,6 +303,9 @@ def mark_ui_action(view_override: bool = False) -> None:
 
 def reset_to(level: str) -> None:
     st.session_state["level"] = level
+    st.session_state["last_click_sig"] = ""
+    st.session_state["_geojson_cache"] = {}  # type: ignore
+
     if level == "subpref":
         st.session_state["selected_subpref_id"] = None
         st.session_state["selected_distrito_id"] = None
@@ -285,26 +315,22 @@ def reset_to(level: str) -> None:
         st.session_state["view_center"] = (-23.55, -46.63)
         st.session_state["view_zoom"] = 11
         st.session_state["last_level"] = None
-        st.session_state["last_click_sig"] = ""
-        st.session_state["_geojson_cache"] = {}  # type: ignore
+        st.session_state["_view_set_by_ui"] = True
+
     elif level == "distrito":
         st.session_state["selected_distrito_id"] = None
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
         st.session_state["final_mode"] = "lote"
-        st.session_state["last_click_sig"] = ""
-        st.session_state["_geojson_cache"] = {}  # type: ignore
+
     elif level == "isocrona":
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
         st.session_state["final_mode"] = "lote"
-        st.session_state["last_click_sig"] = ""
-        st.session_state["_geojson_cache"] = {}  # type: ignore
+
     elif level == "quadra":
         st.session_state["selected_quadra_ids"] = set()
         st.session_state["final_mode"] = "lote"
-        st.session_state["last_click_sig"] = ""
-        st.session_state["_geojson_cache"] = {}  # type: ignore
 
 
 def _back_one_level() -> None:
@@ -370,6 +396,46 @@ def parse_tooltip_id(tooltip: Any) -> Optional[str]:
         return _id_to_str(m.group(1))
     m2 = re.search(r"([A-Za-z0-9_-]+)\s*$", s)
     return _id_to_str(m2.group(1)) if m2 else None
+
+
+def _harmonize_columns(layer_key: str, gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
+    """Renomeia colunas para o schema canônico (quadra_id, iso_id etc.), tolerando casing e aliases."""
+    if gdf is None or gdf.empty:
+        return gdf
+
+    aliases = COL_ALIASES_BY_LAYER.get(layer_key, {})
+    if not aliases:
+        return gdf
+
+    cols = list(gdf.columns)
+    cf_map = {c.casefold(): c for c in cols}
+
+    rename: Dict[str, str] = {}
+    for canonical, candidates in aliases.items():
+        if canonical in gdf.columns:
+            continue
+
+        c0 = cf_map.get(canonical.casefold())
+        if c0:
+            rename[c0] = canonical
+            continue
+
+        found = None
+        for cand in candidates:
+            if cand in gdf.columns:
+                found = cand
+                break
+            c1 = cf_map.get(cand.casefold())
+            if c1:
+                found = c1
+                break
+        if found:
+            rename[found] = canonical
+
+    if rename:
+        gdf = gdf.rename(columns=rename)
+
+    return gdf
 
 # =============================================================================
 # DRIVE / LOCAL IO
@@ -519,48 +585,42 @@ def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
     return gdf
 
 
+def _missing_required_cols(layer_key: str, gdf: "gpd.GeoDataFrame") -> list[str]:
+    required = LAYER_ID_COLS.get(layer_key, [])
+    return [c for c in required if c not in gdf.columns]
+
+
 def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
+    """Leitura padronizada + harmonização de colunas + normalização de ids (FK-only)."""
     try:
         p = ensure_local_layer(layer_key)
     except Exception as e:
         st.error(str(e))
         return None
+
     g = read_gdf_parquet(str(p))
     if g is None or g.empty:
         st.error(f"Layer '{layer_key}' vazia/erro ao ler ({p.name}).")
         return None
+
     g = _drop_bad_geoms(g)
+
+    # harmoniza colunas (QUADRA_PARENT -> iso_id, etc.)
+    g = _harmonize_columns(layer_key, g)
+
+    # normaliza ids
     g = normalize_id_cols(g, LAYER_ID_COLS.get(layer_key, []))
+
+    # check mínimo: colunas do contrato existem
+    miss = _missing_required_cols(layer_key, g)
+    if miss:
+        st.error(
+            f"Layer '{layer_key}' não atende o contrato de colunas. Faltando: {miss}. "
+            f"Colunas disponíveis: {list(g.columns)}"
+        )
+        return None
+
     return g
-
-
-def bounds_center_zoom(gdf: "gpd.GeoDataFrame") -> Tuple[Tuple[float, float], int]:
-    minx, miny, maxx, maxy = gdf.total_bounds
-    center = ((miny + maxy) / 2, (minx + maxx) / 2)
-    dx = maxx - minx
-    if dx < 0.03:
-        z = 15
-    elif dx < 0.08:
-        z = 14
-    elif dx < 0.15:
-        z = 13
-    elif dx < 0.30:
-        z = 12
-    else:
-        z = 11
-    return center, z
-
-
-def set_view_to_gdf(gdf: "gpd.GeoDataFrame", bump: int = 0, zmax: int = 18) -> None:
-    if gdf is None or gdf.empty:
-        return
-    try:
-        center, zoom = bounds_center_zoom(gdf)
-        st.session_state["view_center"] = center
-        st.session_state["view_zoom"] = min(zoom + bump, zmax)
-        st.session_state["_view_set_by_ui"] = True
-    except Exception:
-        pass
 
 
 def subset_by_parent(child: "gpd.GeoDataFrame", parent_col: str, parent_val: Any) -> "gpd.GeoDataFrame":
@@ -605,6 +665,86 @@ def subset_by_id_multi(gdf: "gpd.GeoDataFrame", id_col: str, ids: Set[Any]) -> "
     if not iset:
         return gdf.iloc[0:0].copy()
     return gdf[gdf[id_col].isin(list(iset))]
+
+# =============================================================================
+# VALIDATION (unicidade + não-nulos + FK)
+# =============================================================================
+LAYER_SPECS = {
+    "subpref": {"id": SUBPREF_ID, "parent": None,         "parent_layer": None,    "parent_id": None},
+    "dist":    {"id": DIST_ID,    "parent": DIST_PARENT,  "parent_layer": "subpref","parent_id": SUBPREF_ID},
+    "iso":     {"id": ISO_ID,     "parent": ISO_PARENT,   "parent_layer": "dist",   "parent_id": DIST_ID},
+    "quadra":  {"id": QUADRA_ID,  "parent": QUADRA_PARENT,"parent_layer": "iso",    "parent_id": ISO_ID},
+    "lote":    {"id": LOTE_ID,    "parent": LOTE_PARENT,  "parent_layer": "quadra", "parent_id": QUADRA_ID},
+    "censo":   {"id": CENSO_ID,   "parent": CENSO_PARENT, "parent_layer": "iso",    "parent_id": ISO_ID},
+}
+MAX_FK_UNIQUES = 200_000
+
+
+def validate_layer_contract(
+    layer_key: str,
+    gdf: "gpd.GeoDataFrame",
+    parent_gdf: Optional["gpd.GeoDataFrame"] = None,
+    strict_fk_integrity: bool = False,
+) -> bool:
+    spec = LAYER_SPECS.get(layer_key)
+    if spec is None:
+        return True
+
+    id_col = spec["id"]
+    parent_col = spec["parent"]
+    parent_layer = spec["parent_layer"]
+    parent_id_col = spec["parent_id"]
+
+    if id_col not in gdf.columns:
+        st.error(f"[{layer_key}] Coluna obrigatória ausente: '{id_col}'")
+        return False
+
+    s_id = gdf[id_col]
+    n_null_id = int(s_id.isna().sum())
+    if n_null_id > 0:
+        st.error(f"[{layer_key}] '{id_col}' tem {n_null_id:,} nulos. ID deve ser não-nulo.")
+        return False
+
+    dup_mask = s_id.duplicated(keep=False)
+    if int(dup_mask.sum()) > 0:
+        n_dup_ids = int(s_id[dup_mask].nunique())
+        examples = s_id[dup_mask].astype(str).head(5).tolist()
+        st.error(f"[{layer_key}] '{id_col}' NÃO é único: {n_dup_ids:,} IDs repetidos. Ex: {examples}")
+        return False
+
+    if parent_col:
+        if parent_col not in gdf.columns:
+            st.error(f"[{layer_key}] Coluna FK obrigatória ausente: '{parent_col}'")
+            return False
+
+        s_fk = gdf[parent_col]
+        n_null_fk = int(s_fk.isna().sum())
+        if n_null_fk > 0:
+            st.error(f"[{layer_key}] FK '{parent_col}' tem {n_null_fk:,} nulos. Camada filha precisa de pai.")
+            return False
+
+        if strict_fk_integrity and parent_gdf is not None and parent_layer and parent_id_col:
+            if parent_id_col not in parent_gdf.columns:
+                st.error(f"[{parent_layer}] Coluna obrigatória ausente: '{parent_id_col}'")
+                return False
+
+            child_uni = pd.unique(s_fk.dropna())
+            if len(child_uni) <= MAX_FK_UNIQUES:
+                parent_set = set(pd.unique(parent_gdf[parent_id_col].dropna()).tolist())
+                missing = [v for v in child_uni.tolist() if v not in parent_set]
+                if missing:
+                    st.error(
+                        f"[{layer_key}] FK inválida: '{parent_col}' contém valores que não existem em "
+                        f"'{parent_layer}.{parent_id_col}'. Ex: {missing[:10]}"
+                    )
+                    return False
+            else:
+                st.warning(
+                    f"[{layer_key}] FK integrity skip: muitos valores únicos em '{parent_col}' "
+                    f"({len(child_uni):,} > {MAX_FK_UNIQUES:,})."
+                )
+
+    return True
 
 # =============================================================================
 # CLICK HITTEST (fallback)
@@ -662,7 +802,6 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
     try:
         folium.map.CustomPane("parent_fill", z_index=610).add_to(m)
         folium.map.CustomPane("detail_shapes", z_index=640).add_to(m)
-        folium.map.CustomPane("top_lines", z_index=670).add_to(m)
     except Exception:
         pass
 
@@ -731,31 +870,26 @@ def add_parent_fill(
     if not geojson:
         geojson = _simplify_to_geojson(gdf, simplify_tol=simplify_tol, keep_cols=[])
         _session_geojson_set(key, geojson)
-
     if not geojson:
         return
 
     fg = folium.FeatureGroup(name=name, show=True)
-    try:
-        folium.GeoJson(
-            data=geojson,
-            pane=pane,
-            smooth_factor=SMOOTH_FACTOR,
-            style_function=lambda _f: {
-                "color": stroke_color,
-                "weight": stroke_weight,
-                "opacity": stroke_opacity,
-                "dashArray": dash_array,
-                "lineCap": LINE_CAP,
-                "lineJoin": LINE_JOIN,
-                "fillColor": fill_color,
-                "fillOpacity": fill_opacity,
-            },
-        ).add_to(fg)
-        fg.add_to(m)
-    except Exception:
-        # Se Leaflet/Folium quebrar por algum GeoJSON raro, não derruba o app
-        return
+    folium.GeoJson(
+        data=geojson,
+        pane=pane,
+        smooth_factor=SMOOTH_FACTOR,
+        style_function=lambda _f: {
+            "color": stroke_color,
+            "weight": stroke_weight,
+            "opacity": stroke_opacity,
+            "dashArray": dash_array,
+            "lineCap": LINE_CAP,
+            "lineJoin": LINE_JOIN,
+            "fillColor": fill_color,
+            "fillOpacity": fill_opacity,
+        },
+    ).add_to(fg)
+    fg.add_to(m)
 
 
 def add_polygons_selectable(
@@ -769,7 +903,7 @@ def add_polygons_selectable(
     base_weight: float = 0.8,
     fill_color: str = "#ffffff",
     fill_opacity: float = 0.10,
-    selected_color: str = "#14407D",
+    selected_color: str = PB_NAVY,
     selected_weight: float = 2.6,
     selected_fill_opacity: float = 0.26,
     tooltip_prefix: str = "ID: ",
@@ -777,9 +911,9 @@ def add_polygons_selectable(
     cache_key: Optional[str] = None,
 ) -> None:
     """
-    IMPORTANTE (fix do "mapa branco"):
-    - NUNCA reutilize a MESMA instância de GeoJsonTooltip em duas camadas GeoJson.
-      Aqui: tooltip só na BASE.
+    FIX do “tela branca”:
+    - tooltip só na camada BASE.
+    - NÃO reutiliza tooltip na camada de selecionados.
     """
     if folium is None or gdf is None or gdf.empty:
         return
@@ -788,10 +922,9 @@ def add_polygons_selectable(
 
     selected_ids = selected_ids or set()
     sel = {v for v in (_id_to_str(x) for x in selected_ids) if v is not None}
-
     tol = simplify_tol if simplify_tol is not None else 0.0006
 
-    # Cache do "base layer" (pesado): simplify + to_json
+    # cache do base geojson (pesado)
     key = cache_key or f"base:{name}:{id_col}:{tol}:{len(gdf)}"
     geojson_base = _session_geojson_get(key)
     if not geojson_base:
@@ -801,37 +934,33 @@ def add_polygons_selectable(
         _session_geojson_set(key, geojson_base)
 
     if not geojson_base:
-        return  # guarda: evita JS quebrar com GeoJSON vazio
+        return
 
     tooltip_base = _mk_tooltip(id_col, tooltip_prefix)
 
-    # BASE (com tooltip)
     fg_base = folium.FeatureGroup(name=name, show=True)
-    try:
-        folium.GeoJson(
-            data=geojson_base,
-            pane=pane,
-            smooth_factor=SMOOTH_FACTOR,
-            style_function=lambda _f: {
-                "color": base_color,
-                "weight": base_weight,
-                "opacity": 0.92,
-                "lineCap": LINE_CAP,
-                "lineJoin": LINE_JOIN,
-                "fillColor": fill_color,
-                "fillOpacity": fill_opacity,
-            },
-            highlight_function=lambda _f: {
-                "weight": base_weight + 1.4,
-                "fillOpacity": min(fill_opacity + 0.12, 0.40),
-            },
-            tooltip=tooltip_base,
-        ).add_to(fg_base)
-        fg_base.add_to(m)
-    except Exception:
-        return
+    folium.GeoJson(
+        data=geojson_base,
+        pane=pane,
+        smooth_factor=SMOOTH_FACTOR,
+        style_function=lambda _f: {
+            "color": base_color,
+            "weight": base_weight,
+            "opacity": 0.92,
+            "lineCap": LINE_CAP,
+            "lineJoin": LINE_JOIN,
+            "fillColor": fill_color,
+            "fillOpacity": fill_opacity,
+        },
+        highlight_function=lambda _f: {
+            "weight": base_weight + 1.4,
+            "fillOpacity": min(fill_opacity + 0.12, 0.40),
+        },
+        tooltip=tooltip_base,
+    ).add_to(fg_base)
+    fg_base.add_to(m)
 
-    # SELECIONADOS (sem tooltip — evita "tela branca")
+    # selecionados (sem tooltip)
     if sel:
         sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
         if not sel_gdf.empty:
@@ -839,29 +968,54 @@ def add_polygons_selectable(
             geojson_sel = _simplify_to_geojson(sel_gdf, simplify_tol=tol, keep_cols=[id_col])
             if geojson_sel:
                 fg_sel = folium.FeatureGroup(name=f"{name} (selecionados)", show=True)
-                try:
-                    folium.GeoJson(
-                        data=geojson_sel,
-                        pane=pane,
-                        smooth_factor=SMOOTH_FACTOR,
-                        style_function=lambda _f: {
-                            "color": selected_color,
-                            "weight": selected_weight,
-                            "opacity": 0.98,
-                            "lineCap": LINE_CAP,
-                            "lineJoin": LINE_JOIN,
-                            "fillColor": fill_color,
-                            "fillOpacity": selected_fill_opacity,
-                        },
-                        # tooltip=None  # explícito se quiser
-                    ).add_to(fg_sel)
-                    fg_sel.add_to(m)
-                except Exception:
-                    return
+                folium.GeoJson(
+                    data=geojson_sel,
+                    pane=pane,
+                    smooth_factor=SMOOTH_FACTOR,
+                    style_function=lambda _f: {
+                        "color": selected_color,
+                        "weight": selected_weight,
+                        "opacity": 0.98,
+                        "lineCap": LINE_CAP,
+                        "lineJoin": LINE_JOIN,
+                        "fillColor": fill_color,
+                        "fillOpacity": selected_fill_opacity,
+                    },
+                ).add_to(fg_sel)
+                fg_sel.add_to(m)
 
 # =============================================================================
-# MAP STATE (center/zoom) + CONSUME CLICK
+# MAP VIEW HELPERS
 # =============================================================================
+def bounds_center_zoom(gdf: "gpd.GeoDataFrame") -> Tuple[Tuple[float, float], int]:
+    minx, miny, maxx, maxy = gdf.total_bounds
+    center = ((miny + maxy) / 2, (minx + maxx) / 2)
+    dx = maxx - minx
+    if dx < 0.03:
+        z = 15
+    elif dx < 0.08:
+        z = 14
+    elif dx < 0.15:
+        z = 13
+    elif dx < 0.30:
+        z = 12
+    else:
+        z = 11
+    return center, z
+
+
+def set_view_to_gdf(gdf: "gpd.GeoDataFrame", bump: int = 0, zmax: int = 18) -> None:
+    if gdf is None or gdf.empty:
+        return
+    try:
+        center, zoom = bounds_center_zoom(gdf)
+        st.session_state["view_center"] = center
+        st.session_state["view_zoom"] = min(zoom + bump, zmax)
+        st.session_state["_view_set_by_ui"] = True
+    except Exception:
+        pass
+
+
 def _parse_center_zoom(map_state: Dict[str, Any]) -> Tuple[Optional[Tuple[float, float]], Optional[int]]:
     c = map_state.get("center")
     z = map_state.get("zoom")
@@ -900,7 +1054,9 @@ def update_view_from_map_state(map_state: Dict[str, Any]) -> None:
     if zoom is not None:
         st.session_state["view_zoom"] = zoom
 
-
+# =============================================================================
+# CONSUME CLICK (ANTES DO MAPA)
+# =============================================================================
 def _click_signature(tooltip_id: Optional[str], click: Optional[Dict[str, Any]]) -> str:
     tip = tooltip_id or ""
     lat = None
@@ -916,7 +1072,13 @@ def _click_signature(tooltip_id: Optional[str], click: Optional[Dict[str, Any]])
     return f"{tip}|"
 
 
-def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool = True) -> None:
+def consume_map_event(
+    level: str,
+    map_state: Dict[str, Any],
+    get_layer: callable,
+    allow_click: bool = True,
+) -> None:
+    """Processa clique antes do mapa. Sem st.rerun()."""
     if not allow_click:
         return
 
@@ -930,13 +1092,13 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
     sig = _click_signature(picked_tooltip, click)
     if sig and sig == st.session_state.get("last_click_sig", ""):
         return
-
     st.session_state["last_click_sig"] = sig
 
+    # SUBPREF -> DISTRITO
     if level == "subpref":
         picked = picked_tooltip
         if not picked and isinstance(click, dict):
-            g_sub = read_layer("subpref")
+            g_sub = get_layer("subpref")
             if g_sub is not None:
                 picked = pick_feature_id(g_sub, click, SUBPREF_ID)
         if picked:
@@ -946,15 +1108,16 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             st.session_state["selected_quadra_ids"] = set()
             st.session_state["final_mode"] = "lote"
             st.session_state["level"] = "distrito"
-            return
+        return
 
+    # DISTRITO -> ISOCRONA
     if level == "distrito":
         sp = _id_to_str(st.session_state.get("selected_subpref_id"))
         if sp is None:
             return
         picked = picked_tooltip
         if not picked and isinstance(click, dict):
-            g_dist = read_layer("dist")
+            g_dist = get_layer("dist")
             if g_dist is not None:
                 g_show = subset_by_parent(g_dist, DIST_PARENT, sp)
                 picked = pick_feature_id(g_show, click, DIST_ID)
@@ -964,35 +1127,37 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             st.session_state["selected_quadra_ids"] = set()
             st.session_state["final_mode"] = "lote"
             st.session_state["level"] = "isocrona"
-            return
+        return
 
+    # ISOCRONA (multi toggle)
     if level == "isocrona":
         d = _id_to_str(st.session_state.get("selected_distrito_id"))
         if d is None:
             return
         picked = picked_tooltip
         if not picked and isinstance(click, dict):
-            g_iso = read_layer("iso")
+            g_iso = get_layer("iso")
             if g_iso is not None:
                 g_show = subset_by_parent(g_iso, ISO_PARENT, d)
                 picked = pick_feature_id(g_show, click, ISO_ID)
         if picked:
             _toggle_in_set("selected_iso_ids", picked)
-            return
+        return
 
+    # QUADRA (multi toggle)
     if level == "quadra":
         iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v is not None}
         if not iso_ids:
             return
         picked = picked_tooltip
         if not picked and isinstance(click, dict):
-            g_quad = read_layer("quadra")
+            g_quad = get_layer("quadra")
             if g_quad is not None:
                 g_show = subset_by_parent_multi(g_quad, QUADRA_PARENT, iso_ids)
                 picked = pick_feature_id(g_show, click, QUADRA_ID)
         if picked:
             _toggle_in_set("selected_quadra_ids", picked)
-            return
+        return
 
 
 def sanitize_level_state() -> None:
@@ -1082,6 +1247,7 @@ def ensure_metric_state() -> None:
 
 def metrics_panel() -> None:
     ensure_metric_state()
+
     theme = st.selectbox(
         "Temática",
         options=list(METRICS_TREE.keys()),
@@ -1090,14 +1256,15 @@ def metrics_panel() -> None:
     )
 
     factors = list(METRICS_TREE.get(theme, {}).keys())
-    factor = st.selectbox(
+    st.selectbox(
         "Fator",
         options=factors,
         key="metric_factor",
         on_change=lambda: mark_ui_action(False),
     )
 
-    indicators = METRICS_TREE.get(theme, {}).get(factor, [])
+    factor = st.session_state.get("metric_factor")
+    indicators = METRICS_TREE.get(theme, {}).get(factor, []) if factor else []
     st.selectbox(
         "Indicador",
         options=indicators,
@@ -1131,11 +1298,6 @@ def data_sources_panel() -> None:
     st.divider()
     st.checkbox("Modo diagnóstico (FK/colunas)", key="debug_fk", on_change=lambda: mark_ui_action(False))
 
-    st.caption(
-        "Obs: se não achar localmente, o app baixa do Drive (pode demorar na primeira vez). "
-        "Depois fica cacheado em `data_cache`."
-    )
-
 
 def _level_label(level: str) -> str:
     return {
@@ -1156,15 +1318,23 @@ def _prev_level(level: str) -> Optional[str]:
     return LEVELS[idx - 1]
 
 
-def _go_to_quadras() -> None:
+def on_back_click() -> None:
+    mark_ui_action(False)
+    _back_one_level()
+
+
+def on_reset_click() -> None:
+    mark_ui_action(True)
+    reset_to("subpref")
+
+
+def on_go_quadras() -> None:
+    mark_ui_action(False)
     st.session_state["level"] = "quadra"
 
 
-def _go_to_final() -> None:
-    st.session_state["level"] = "final"
-
-
-def _fit_selected_isos() -> None:
+def on_fit_isos() -> None:
+    mark_ui_action(True)
     iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v is not None}
     if not iso_ids:
         return
@@ -1174,7 +1344,8 @@ def _fit_selected_isos() -> None:
     set_view_to_gdf(subset_by_id_multi(g_iso, ISO_ID, iso_ids), bump=0, zmax=18)
 
 
-def _fit_selected_quadras() -> None:
+def on_fit_quadras() -> None:
+    mark_ui_action(True)
     quad_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_quadra_ids", set())) if v is not None}
     if not quad_ids:
         return
@@ -1193,54 +1364,23 @@ def left_panel() -> None:
     c1, c2 = st.columns(2)
     with c1:
         if prev is None:
-            st.button(_level_label("subpref"), disabled=True, use_container_width=True)
+            st.button("Voltar", disabled=True, use_container_width=True)
         else:
-            st.button(
-                _level_label(prev),
-                type="primary",
-                use_container_width=True,
-                on_click=lambda: (mark_ui_action(False), _back_one_level()),
-            )
+            st.button(_level_label(prev), type="primary", use_container_width=True, on_click=on_back_click)
 
     with c2:
-        st.button(
-            "Reset",
-            type="primary",
-            use_container_width=True,
-            on_click=lambda: (mark_ui_action(True), reset_to("subpref")),
-        )
+        st.button("Reset", type="primary", use_container_width=True, on_click=on_reset_click)
 
     if lvl == "isocrona":
         st.divider()
         ok = len(st.session_state.get("selected_iso_ids", set())) > 0
-        st.button(
-            "➡️ Ir para Quadras",
-            use_container_width=True,
-            disabled=not ok,
-            on_click=lambda: (mark_ui_action(False), _go_to_quadras()),
-        )
-        st.button(
-            "Ajustar ao selecionado",
-            use_container_width=True,
-            disabled=not ok,
-            on_click=lambda: (mark_ui_action(True), _fit_selected_isos()),
-        )
+        st.button("➡️ Ir para Quadras", use_container_width=True, disabled=not ok, on_click=on_go_quadras)
+        st.button("Ajustar ao selecionado", use_container_width=True, disabled=not ok, on_click=on_fit_isos)
 
     if lvl == "quadra":
         st.divider()
         okq = len(st.session_state.get("selected_quadra_ids", set())) > 0
-        st.button(
-            "Ajustar ao selecionado",
-            use_container_width=True,
-            disabled=not okq,
-            on_click=lambda: (mark_ui_action(True), _fit_selected_quadras()),
-        )
-        st.button(
-            "➡️ Ir para nível final",
-            use_container_width=True,
-            disabled=not okq,
-            on_click=lambda: (mark_ui_action(False), _go_to_final()),
-        )
+        st.button("Ajustar ao selecionado", use_container_width=True, disabled=not okq, on_click=on_fit_quadras)
 
     st.divider()
     st.subheader("Métricas", anchor=False)
@@ -1253,22 +1393,23 @@ def left_panel() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 # =============================================================================
-# MAP RENDER
+# MAP RENDER (sem rerun manual; view só ao entrar no nível)
 # =============================================================================
-def render_map_panel() -> None:
+def render_map_panel(get_layer: callable) -> None:
     level = st.session_state["level"]
     title = ""
 
+    # =========================
+    # SUBPREF
+    # =========================
     if level == "subpref":
         title = "Subprefeituras"
-        g_sub = read_layer("subpref")
+        g_sub = get_layer("subpref")
         if g_sub is None:
             st.stop()
-        if SUBPREF_ID not in g_sub.columns:
-            st.error(f"Coluna obrigatória ausente em Subprefeitura: '{SUBPREF_ID}'.")
-            st.stop()
 
-        diag_layer(g_sub, "Subprefeitura", [SUBPREF_ID])
+        if not validate_layer_contract("subpref", g_sub):
+            st.stop()
 
         if st.session_state.get("last_level") != "subpref":
             set_view_to_gdf(g_sub, bump=0)
@@ -1283,31 +1424,34 @@ def render_map_panel() -> None:
             m, g_sub, "Subprefeituras", SUBPREF_ID,
             selected_ids=set(),
             base_weight=0.9, fill_opacity=0.04,
-            selected_color=PB_NAVY,
             tooltip_prefix="Subpref: ",
             simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"],
             cache_key=f"subpref:all:{SIMPLIFY_TOL_BY_LEVEL['subpref']}",
         )
 
+    # =========================
+    # DISTRITO
+    # =========================
     elif level == "distrito":
-        sp = _id_to_str(st.session_state["selected_subpref_id"])
+        sp = _id_to_str(st.session_state.get("selected_subpref_id"))
         if sp is None:
             reset_to("subpref")
             return
 
         title = f"Distritos (Subpref {sp})"
-        g_dist = read_layer("dist")
-        g_sub = read_layer("subpref")
+
+        g_dist = get_layer("dist")
+        g_sub = get_layer("subpref")
         if g_dist is None or g_sub is None:
             st.stop()
-        if DIST_ID not in g_dist.columns or DIST_PARENT not in g_dist.columns:
-            st.error(f"Colunas obrigatórias ausentes em Distritos: '{DIST_ID}' e/ou '{DIST_PARENT}'.")
+
+        if not validate_layer_contract("subpref", g_sub):
+            st.stop()
+        if not validate_layer_contract("dist", g_dist, parent_gdf=g_sub, strict_fk_integrity=True):
             st.stop()
 
         g_parent = subset_by_id(g_sub, SUBPREF_ID, sp)
         g_show = subset_by_parent(g_dist, DIST_PARENT, sp)
-
-        diag_layer(g_show, "Distritos (subset)", [DIST_ID, DIST_PARENT])
 
         if st.session_state.get("last_level") != "distrito":
             set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=0)
@@ -1328,14 +1472,16 @@ def render_map_panel() -> None:
             m, g_show, "Distritos", DIST_ID,
             selected_ids=set(),
             base_weight=0.75, fill_opacity=0.06,
-            selected_color=PB_NAVY,
             tooltip_prefix="Distrito: ",
             simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
             cache_key=f"dist:sp:{sp}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}",
         )
 
+    # =========================
+    # ISOCRONAS (multi)
+    # =========================
     elif level == "isocrona":
-        d = _id_to_str(st.session_state["selected_distrito_id"])
+        d = _id_to_str(st.session_state.get("selected_distrito_id"))
         if d is None:
             reset_to("distrito")
             return
@@ -1343,18 +1489,18 @@ def render_map_panel() -> None:
         sel_n = len(st.session_state.get("selected_iso_ids", set()))
         title = f"Isócronas (Distrito {d}) — selecionadas: {sel_n}"
 
-        g_iso = read_layer("iso")
-        g_dist = read_layer("dist")
+        g_iso = get_layer("iso")
+        g_dist = get_layer("dist")
         if g_iso is None or g_dist is None:
             st.stop()
-        if ISO_ID not in g_iso.columns or ISO_PARENT not in g_iso.columns:
-            st.error(f"Colunas obrigatórias ausentes em Isócronas: '{ISO_ID}' e/ou '{ISO_PARENT}'.")
+
+        if not validate_layer_contract("dist", g_dist):
+            st.stop()
+        if not validate_layer_contract("iso", g_iso, parent_gdf=g_dist, strict_fk_integrity=True):
             st.stop()
 
         g_parent = subset_by_id(g_dist, DIST_ID, d)
         g_show = subset_by_parent(g_iso, ISO_PARENT, d)
-
-        diag_layer(g_show, "Isócronas (subset)", [ISO_ID, ISO_PARENT])
 
         if st.session_state.get("last_level") != "isocrona":
             set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=0)
@@ -1376,7 +1522,6 @@ def render_map_panel() -> None:
             selected_ids=st.session_state["selected_iso_ids"],
             base_weight=0.95,
             fill_opacity=0.14,
-            selected_color=PB_NAVY,
             selected_weight=3.0,
             selected_fill_opacity=0.30,
             tooltip_prefix="Isócrona: ",
@@ -1384,8 +1529,11 @@ def render_map_panel() -> None:
             cache_key=f"iso:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
         )
 
+    # =========================
+    # QUADRAS (multi)
+    # =========================
     elif level == "quadra":
-        iso_ids = {v for v in (_id_to_str(x) for x in st.session_state["selected_iso_ids"]) if v is not None}
+        iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v is not None}
         if not iso_ids:
             reset_to("isocrona")
             return
@@ -1393,18 +1541,19 @@ def render_map_panel() -> None:
         sel_nq = len(st.session_state.get("selected_quadra_ids", set()))
         title = f"Quadras — selecionadas: {sel_nq}"
 
-        g_quad = read_layer("quadra")
-        g_iso = read_layer("iso")
+        g_quad = get_layer("quadra")
+        g_iso = get_layer("iso")
         if g_quad is None or g_iso is None:
             st.stop()
-        if QUADRA_ID not in g_quad.columns or QUADRA_PARENT not in g_quad.columns:
-            st.error(f"Colunas obrigatórias ausentes em Quadras: '{QUADRA_ID}' e/ou '{QUADRA_PARENT}'.")
+
+        # aqui é exatamente a regra: quadra_id único e iso_id (FK) sem nulos e existindo no pai
+        if not validate_layer_contract("iso", g_iso):
+            st.stop()
+        if not validate_layer_contract("quadra", g_quad, parent_gdf=g_iso, strict_fk_integrity=True):
             st.stop()
 
         g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
         g_show = subset_by_parent_multi(g_quad, QUADRA_PARENT, iso_ids)
-
-        diag_layer(g_show, "Quadras (subset)", [QUADRA_ID, QUADRA_PARENT])
 
         if st.session_state.get("last_level") != "quadra":
             set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=1)
@@ -1427,7 +1576,6 @@ def render_map_panel() -> None:
             selected_ids=st.session_state["selected_quadra_ids"],
             base_weight=0.80,
             fill_opacity=0.12,
-            selected_color=PB_NAVY,
             selected_weight=2.6,
             selected_fill_opacity=0.28,
             tooltip_prefix="Quadra: ",
@@ -1436,27 +1584,17 @@ def render_map_panel() -> None:
         )
 
     else:
-        title = "Nível final"
+        title = "Nível final (placeholder)"
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
         if m is None:
             st.error("Falha ao inicializar o mapa.")
             return
+        st.info("Nível final não é foco aqui. Mantido como placeholder.")
 
-        st.warning("Arquivos do nível final podem ser pesados. Carrega apenas ao clicar no botão abaixo.")
-        st.button("⬇️ Carregar dados do nível final", type="secondary", on_click=lambda: mark_ui_action(False))
-
-        st.session_state["final_mode"] = st.radio(
-            "Visualizar",
-            ["lote", "censo"],
-            index=0 if st.session_state["final_mode"] == "lote" else 1,
-            horizontal=True,
-            on_change=lambda: mark_ui_action(False),
-        )
-
+    # título simples do painel do mapa
     st.markdown(f"### {title}")
 
-    # OBS: LayerControl removido (ajuda a evitar glitches/JS em algumas versões)
-
+    # render do mapa
     st_folium(
         m,
         height=780,
@@ -1477,24 +1615,40 @@ def main() -> None:
         st.error("Este app requer `geopandas`, `folium` e `streamlit-folium`.")
         return
 
+    # 1) detecta se rerun veio de UI (botões/selects) e não do mapa
     ui_sig = int(st.session_state.get("_ui_action_sig", 0))
     ui_seen = int(st.session_state.get("_ui_action_sig_seen", 0))
     ui_action = ui_sig != ui_seen
     st.session_state["_ui_action_sig_seen"] = ui_sig
 
+    # se veio de UI, libera clique antigo e não consome clique do mapa nesse rerun
     if ui_action:
         st.session_state["last_click_sig"] = ""
 
+    # 2) lê estado do mapa do session_state e atualiza view (pan/zoom)
     map_state = st.session_state.get("map_view", {}) or {}
-
     update_view_from_map_state(map_state)
 
-    current_level = st.session_state.get("level", "subpref")
-    consume_map_event(current_level, map_state, allow_click=(not ui_action))
+    # 3) per-rerun layer cache (evita read_layer múltiplas vezes no mesmo ciclo)
+    _run_layers: Dict[str, Optional["gpd.GeoDataFrame"]] = {}
 
+    def get_layer_cached(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
+        if layer_key in _run_layers:
+            return _run_layers[layer_key]
+        g = read_layer(layer_key)
+        _run_layers[layer_key] = g
+        return g
+
+    # 4) consome clique ANTES do mapa (sem st.rerun)
+    current_level = st.session_state.get("level", "subpref")
+    consume_map_event(current_level, map_state, get_layer_cached, allow_click=(not ui_action))
+
+    # 5) sanity do fluxo
     sanitize_level_state()
 
+    # 6) layout
     left, right = st.columns([1, 4], gap="large")
+
     with left:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
         left_panel()
@@ -1502,7 +1656,7 @@ def main() -> None:
 
     with right:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
-        render_map_panel()
+        render_map_panel(get_layer_cached)
         st.markdown("</div>", unsafe_allow_html=True)
 
 
