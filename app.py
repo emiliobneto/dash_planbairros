@@ -1612,6 +1612,13 @@ def left_panel() -> None:
     st.subheader("Variável", anchor=False)
     variable_panel()
 
+    # Legendas (abaixo da seleção de variável)
+    var = st.session_state.get("variable")
+    if lvl == "isocrona" and var == "Isócronas (classes)":
+
+    if lvl == "quadra" and var == "Cluster":
+
+
     st.divider()
     with st.expander("Dados / Config", expanded=False):
         data_sources_panel()
