@@ -89,6 +89,8 @@ LOGO_HEIGHT = 46
 # VISUALIZAÇÕES (Clusters / Isócronas)
 # =============================================================================
 QUADRAS_CSV_FILENAME = "quadras.csv"  # esperado no REPO_ROOT ou data_cache
+QUADRAS_CSV_SECRET_KEY = "PB_QUADRAS_CSV_FILE_ID"
+QUADRAS_CSV_FALLBACK_URL = "https://drive.google.com/file/d/1xv-Ql-uZfi4r59I8_3pjU48D_tGDwMwi/view?usp=drive_link"
 CLUSTER_COL = "Cluster"
 ISO_CLASS_COL = "nova_class"
 
@@ -464,6 +466,50 @@ def get_drive_raw(layer_key: str) -> str:
     return str(FALLBACK_URLS.get(layer_key, "")).strip()
 
 
+
+def get_quadras_csv_raw() -> str:
+    """
+    Fonte do quadras.csv:
+    1) input no painel (drive_quadras_csv_raw)
+    2) secrets (PB_QUADRAS_CSV_FILE_ID)
+    3) fallback URL (Drive)
+    """
+    raw_ui = str(st.session_state.get("drive_quadras_csv_raw", "")).strip()
+    if raw_ui:
+        return raw_ui
+
+    raw_secret = _get_secret(QUADRAS_CSV_SECRET_KEY) if QUADRAS_CSV_SECRET_KEY else ""
+    if raw_secret:
+        return raw_secret
+
+    return str(QUADRAS_CSV_FALLBACK_URL or "").strip()
+
+
+def quadras_csv_local_path() -> Path:
+    # prioridade: repo root, depois cache
+    p1 = REPO_ROOT / QUADRAS_CSV_FILENAME
+    if p1.exists() and p1.stat().st_size > 0:
+        return p1
+    return DATA_CACHE_DIR / QUADRAS_CSV_FILENAME
+
+
+def ensure_local_quadras_csv() -> Path:
+    p = quadras_csv_local_path()
+    if p.exists() and p.stat().st_size > 0:
+        return p
+
+    raw = get_quadras_csv_raw()
+    if not raw:
+        return p  # sem fonte configurada
+
+    # baixa para cache
+    dst = DATA_CACHE_DIR / QUADRAS_CSV_FILENAME
+    try:
+        return download_drive_file(raw, dst, label=dst.name)
+    except Exception as e:
+        st.warning(f"Não foi possível baixar {QUADRAS_CSV_FILENAME} do Drive: {e}")
+        return dst
+
 def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path:
     import requests
 
@@ -699,14 +745,21 @@ def _coerce_int(v: Any) -> Optional[int]:
 
 
 def get_quadras_csv_df() -> Optional[pd.DataFrame]:
-    # tenta no repo root e depois em data_cache
-    p1 = REPO_ROOT / QUADRAS_CSV_FILENAME
-    p2 = DATA_CACHE_DIR / QUADRAS_CSV_FILENAME
-    df = read_df_csv(str(p1)) or read_df_csv(str(p2))
+    # tenta local; se não houver, baixa do Drive para cache
+    p = ensure_local_quadras_csv()
+    df = read_df_csv(str(p))
     if df is None or df.empty:
         return None
 
     df = df.copy()
+    # normaliza nomes de colunas (case-insensitive) para evitar falhas
+    cols_lower = {str(c).strip().lower(): c for c in df.columns}
+    if QUADRA_ID not in df.columns and "quadra_id" in cols_lower:
+        df = df.rename(columns={cols_lower["quadra_id"]: QUADRA_ID})
+    if ISO_ID not in df.columns and "iso_id" in cols_lower:
+        df = df.rename(columns={cols_lower["iso_id"]: ISO_ID})
+    if CLUSTER_COL not in df.columns and "cluster" in cols_lower:
+        df = df.rename(columns={cols_lower["cluster"]: CLUSTER_COL})
     if QUADRA_ID in df.columns:
         df[QUADRA_ID] = df[QUADRA_ID].map(_id_to_str)
 
@@ -1162,7 +1215,7 @@ def add_polygons_selectable_colored(
             pane=pane,
             smooth_factor=SMOOTH_FACTOR,
             style_function=_style,
-            highlight_function=lambda _f: {"weight": base_weight + 1.4, "fillOpacity": min(fill_opacity + 0.12, 0.40)},
+            highlight_function=lambda _f: {"weight": base_weight + 1.4, "fillOpacity": min(fill_opacity + 0.12, 1.0)},
             tooltip=tooltip_base,
         ).add_to(fg_base)
         fg_base.add_to(m)
@@ -1405,6 +1458,11 @@ def variable_panel() -> None:
 def data_sources_panel() -> None:
     st.caption("Local (data_cache) ou Drive (secrets / input).")
 
+    # quadras.csv (clusters)
+    p_csv = quadras_csv_local_path()
+    ok_csv = p_csv.exists() and p_csv.stat().st_size > 0
+    st.write(f"- `{p_csv.name}` (clusters): {'✅ local' if ok_csv else '—'}")
+
     for k in ["subpref", "dist", "iso", "quadra", "lote", "censo"]:
         p = local_layer_path(k)
         ok = layer_available_locally(k)
@@ -1414,6 +1472,15 @@ def data_sources_panel() -> None:
 
     with st.expander("Configurar links/IDs do Drive (opcional)", expanded=False):
         st.caption("Se tiver secrets.toml, não precisa colar aqui. Se colar aqui, tem prioridade.")
+        # quadras.csv (clusters)
+        st.text_input(
+            "quadras.csv (clusters)",
+            key="drive_quadras_csv_raw",
+            value=str(st.session_state.get("drive_quadras_csv_raw", "")).strip(),
+            placeholder=_get_secret(QUADRAS_CSV_SECRET_KEY) or QUADRAS_CSV_FALLBACK_URL or "Cole aqui o link/ID",
+            on_change=lambda: mark_ui_action(False),
+        )
+
         for k in ["subpref", "dist", "iso", "quadra", "lote", "censo"]:
             placeholder = _get_secret(SECRETS_KEYS.get(k, "")) or FALLBACK_URLS.get(k, "") or "Cole aqui o link/ID"
             st.text_input(
@@ -1697,10 +1764,10 @@ def render_map_panel() -> None:
                 selected_ids=st.session_state["selected_iso_ids"],
                 tooltip_col=ISO_ID,
                 base_weight=0.95,
-                fill_opacity=0.18,
+                fill_opacity=1.0,
                 selected_color=PB_NAVY,
                 selected_weight=3.0,
-                selected_fill_opacity=0.30,
+                selected_fill_opacity=0.0,
                 tooltip_prefix="Isócrona: ",
                 simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
                 cache_key=f"isoVIZ:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
@@ -1717,7 +1784,7 @@ def render_map_panel() -> None:
                 fill_opacity=0.14,
                 selected_color=PB_NAVY,
                 selected_weight=3.0,
-                selected_fill_opacity=0.30,
+                selected_fill_opacity=0.0,
                 tooltip_prefix="Isócrona: ",
                 simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
                 cache_key=f"iso:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
@@ -1787,10 +1854,10 @@ def render_map_panel() -> None:
                 selected_ids=st.session_state["selected_quadra_ids"],
                 tooltip_col=QUADRA_ID,
                 base_weight=0.80,
-                fill_opacity=0.20,
+                fill_opacity=1.0,
                 selected_color=PB_NAVY,
                 selected_weight=2.6,
-                selected_fill_opacity=0.28,
+                selected_fill_opacity=0.0,
                 tooltip_prefix="Quadra: ",
                 simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
                 cache_key=f"quadVIZ:iso:{iso_key}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
@@ -1808,7 +1875,7 @@ def render_map_panel() -> None:
                 fill_opacity=0.12,
                 selected_color=PB_NAVY,
                 selected_weight=2.6,
-                selected_fill_opacity=0.28,
+                selected_fill_opacity=0.0,
                 tooltip_prefix="Quadra: ",
                 simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
                 cache_key=f"quadra:iso:{iso_key}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
