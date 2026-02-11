@@ -92,7 +92,7 @@ QUADRAS_CSV_FILENAME = "quadras.csv"  # esperado no REPO_ROOT ou data_cache
 CLUSTER_COL = "Cluster"
 ISO_CLASS_COL = "nova_class"
 
-# Quadras: cores + rótulos
+# Quadras: cores + rótulos (pedido)
 CLUSTER_COLOR_MAP = {
     0: "#bf7db2",  # Alta Densidade Periférica
     1: "#f7bd6a",  # Uso Misto Intermediário
@@ -298,12 +298,8 @@ def init_state() -> None:
     # debug
     st.session_state.setdefault("debug_fk", False)
 
+    # VISUALIZAÇÃO (substitui "métricas")
     st.session_state.setdefault("variable", None)
-
-    # Métricas (dropdowns)
-    st.session_state.setdefault("metric_theme", None)
-    st.session_state.setdefault("metric_factor", None)
-    st.session_state.setdefault("metric_indicator", None)
 
     # "UI action" signature (para evitar consumir clique do mapa em reruns de widgets)
     st.session_state.setdefault("_ui_action_sig", 0)
@@ -733,10 +729,9 @@ def attach_quadras_csv(g_quad: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
 
     # preferir UID quando disponível em ambos
     if QUADRA_UID in g_quad.columns and QUADRA_UID in df.columns:
-        out = g_quad.merge(df, on=QUADRA_UID, how="left", suffixes=("", "_csv"))
-        return out
+        return g_quad.merge(df, on=QUADRA_UID, how="left", suffixes=("", "_csv"))
 
-    # fallback: merge só por quadra_id (pode colidir se houver múltiplas isócronas)
+    # fallback: merge só por quadra_id
     if QUADRA_ID not in df.columns:
         if not st.session_state.get("_warn_no_quadra_id_in_csv", False):
             st.warning(f"'{QUADRA_ID}' não encontrado em {QUADRAS_CSV_FILENAME}. Cluster não será aplicado.")
@@ -750,8 +745,7 @@ def attach_quadras_csv(g_quad: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
         )
         st.session_state["_warn_csv_no_iso"] = True
 
-    out = g_quad.merge(df, on=QUADRA_ID, how="left", suffixes=("", "_csv"))
-    return out
+    return g_quad.merge(df, on=QUADRA_ID, how="left", suffixes=("", "_csv"))
 
 
 def cluster_label(code: Optional[int]) -> str:
@@ -994,7 +988,6 @@ def add_polygons_selectable(
 
     tol = simplify_tol if simplify_tol is not None else 0.0006
 
-    # Cache do "base layer" (pesado): simplify + to_json
     key = cache_key or f"base:{name}:{id_col}:{tooltip_col}:{tol}:{len(gdf)}"
     geojson_base = _session_geojson_get(key)
     if not geojson_base:
@@ -1007,11 +1000,10 @@ def add_polygons_selectable(
         _session_geojson_set(key, geojson_base)
 
     if not geojson_base:
-        return  # guarda: evita JS quebrar com GeoJSON vazio
+        return
 
     tooltip_base = _mk_tooltip(tooltip_col, tooltip_prefix)
 
-    # BASE (com tooltip)
     fg_base = folium.FeatureGroup(name=name, show=True)
     try:
         folium.GeoJson(
@@ -1037,7 +1029,6 @@ def add_polygons_selectable(
     except Exception:
         return
 
-    # SELECIONADOS (sem tooltip — evita "tela branca")
     if sel:
         sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
         if not sel_gdf.empty:
@@ -1178,7 +1169,6 @@ def add_polygons_selectable_colored(
     except Exception:
         return
 
-    # selecionados (sem tooltip)
     if sel:
         sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
         if not sel_gdf.empty:
@@ -1377,74 +1367,37 @@ def diag_layer(gdf: "gpd.GeoDataFrame", title: str, cols: list[str]) -> None:
             st.write(f"- **{c}** | dtype={s.dtype} | nulos={n_null} | únicos={n_unique} | ex={ex}")
 
 # =============================================================================
-# UI: Métricas + Dados/Config
+# UI: Variável (substitui "Métricas") + Dados/Config
 # =============================================================================
-METRICS_TREE: Dict[str, Dict[str, list[str]]] = {
-    "Demografia": {
-        "População": ["Pop total", "Pop 0-14", "Pop 60+"],
-        "Densidade": ["Hab/km²", "Domicílios/km²"],
-    },
-    "Mobilidade": {
-        "Transporte": ["Acesso ônibus", "Acesso metrô", "Tempo ao emprego"],
-        "Caminhabilidade": ["Índice walk", "Sinuosidade viária"],
-    },
-    "Infraestrutura": {
-        "Saneamento": ["Água", "Esgoto", "Coleta lixo"],
-        "Equipamentos": ["Escolas", "UBS", "Parques"],
-    },
-}
+def _variables_for_level(level: str) -> list[str]:
+    if level == "subpref":
+        return ["Subprefeituras"]
+    if level == "distrito":
+        return ["Distritos"]
+    if level == "isocrona":
+        # padrão + classes (nova_class)
+        return ["Isócronas", "Isócronas (classes)"]
+    if level == "quadra":
+        # padrão + cluster
+        return ["Quadras", "Cluster"]
+    return ["Nível final"]
 
 
-def ensure_metric_state() -> None:
-    themes = list(METRICS_TREE.keys())
-    if not themes:
-        return
-
-    if st.session_state.get("metric_theme") not in themes:
-        st.session_state["metric_theme"] = themes[0]
-
-    theme = st.session_state["metric_theme"]
-    factors = list(METRICS_TREE.get(theme, {}).keys())
-    if not factors:
-        st.session_state["metric_factor"] = None
-        st.session_state["metric_indicator"] = None
-        return
-
-    if st.session_state.get("metric_factor") not in factors:
-        st.session_state["metric_factor"] = factors[0]
-
-    factor = st.session_state["metric_factor"]
-    indicators = METRICS_TREE.get(theme, {}).get(factor, [])
-    if not indicators:
-        st.session_state["metric_indicator"] = None
-        return
-
-    if st.session_state.get("metric_indicator") not in indicators:
-        st.session_state["metric_indicator"] = indicators[0]
+def ensure_variable_for_level(level: str) -> None:
+    opts = _variables_for_level(level)
+    cur = st.session_state.get("variable")
+    if cur not in opts:
+        st.session_state["variable"] = opts[0]
 
 
-def metrics_panel() -> None:
-    ensure_metric_state()
-    theme = st.selectbox(
-        "Temática",
-        options=list(METRICS_TREE.keys()),
-        key="metric_theme",
-        on_change=lambda: mark_ui_action(False),
-    )
-
-    factors = list(METRICS_TREE.get(theme, {}).keys())
+def variable_panel() -> None:
+    lvl = st.session_state.get("level", "subpref")
+    ensure_variable_for_level(lvl)
+    opts = _variables_for_level(lvl)
     st.selectbox(
-        "Fator",
-        options=factors,
-        key="metric_factor",
-        on_change=lambda: mark_ui_action(False),
-    )
-
-    indicators = METRICS_TREE.get(theme, {}).get(st.session_state["metric_factor"], [])
-    st.selectbox(
-        "Indicador",
-        options=indicators,
-        key="metric_indicator",
+        "Variável",
+        options=opts,
+        key="variable",
         on_change=lambda: mark_ui_action(False),
     )
 
@@ -1515,6 +1468,7 @@ def _fit_selected_isos() -> None:
     if g_iso is None:
         return
     set_view_to_gdf(subset_by_id_multi(g_iso, ISO_ID, iso_ids), bump=0, zmax=18)
+    st.session_state["_view_set_by_ui"] = True
 
 
 def _fit_selected_quadras() -> None:
@@ -1526,6 +1480,7 @@ def _fit_selected_quadras() -> None:
         return
     id_col = QUADRA_UID if (QUADRA_UID in g_quad.columns) else QUADRA_ID
     set_view_to_gdf(subset_by_id_multi(g_quad, id_col, quad_ids), bump=1, zmax=19)
+    st.session_state["_view_set_by_ui"] = True
 
 
 def left_panel() -> None:
@@ -1587,8 +1542,8 @@ def left_panel() -> None:
         )
 
     st.divider()
-    st.subheader("Métricas", anchor=False)
-    metrics_panel()
+    st.subheader("Variável", anchor=False)
+    variable_panel()
 
     st.divider()
     with st.expander("Dados / Config", expanded=False):
@@ -1602,6 +1557,9 @@ def left_panel() -> None:
 def render_map_panel() -> None:
     level = st.session_state["level"]
     title = ""
+
+    # garante que a variável esteja compatível com o nível atual
+    ensure_variable_for_level(level)
 
     if level == "subpref":
         title = "Subprefeituras"
@@ -1717,7 +1675,7 @@ def render_map_panel() -> None:
             cache_key=f"parent:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}",
         )
 
-        # Visualização por classes (nova_class) — opcional
+        # Visualização por classes (nova_class)
         g_show_viz = g_show.copy()
         if ISO_CLASS_COL in g_show_viz.columns:
             tmp = g_show_viz[ISO_CLASS_COL].apply(
@@ -1779,7 +1737,6 @@ def render_map_panel() -> None:
         if g_quad is None or g_iso is None:
             st.stop()
 
-        # Aqui exigimos ao menos iso_id e quadra_id (para criar quadra_uid)
         if QUADRA_ID not in g_quad.columns or QUADRA_PARENT not in g_quad.columns:
             st.error(f"Colunas obrigatórias ausentes em Quadras: '{QUADRA_ID}' e/ou '{QUADRA_PARENT}'.")
             st.stop()
@@ -1808,8 +1765,7 @@ def render_map_panel() -> None:
             cache_key=f"parent:iso:{iso_key}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
         )
 
-        # Base: usa QUADRA_UID como id interno (seleção) e tooltip mostra QUADRA_ID
-        # Visualização por cluster (quadras.csv) — opcional
+        # Visualização por cluster (quadras.csv)
         g_show_viz = attach_quadras_csv(g_show)
 
         if CLUSTER_COL in g_show_viz.columns:
