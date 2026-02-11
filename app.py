@@ -92,6 +92,7 @@ SUBPREF_ID = "subpref_id"
 DIST_ID = "distrito_id"
 ISO_ID = "iso_id"
 QUADRA_ID = "quadra_id"
+QUADRA_UID = "quadra_uid"  # CHAVE ÚNICA: iso_id + quadra_id (evita colisão)
 LOTE_ID = "lote_id"
 CENSO_ID = "censo_id"
 
@@ -107,7 +108,7 @@ LAYER_ID_COLS = {
     "subpref": [SUBPREF_ID],
     "dist": [DIST_ID, DIST_PARENT],
     "iso": [ISO_ID, ISO_PARENT],
-    "quadra": [QUADRA_ID, QUADRA_PARENT],
+    "quadra": [QUADRA_ID, QUADRA_PARENT, QUADRA_UID],
     "lote": [LOTE_ID, LOTE_PARENT],
     "censo": [CENSO_ID, CENSO_PARENT],
 }
@@ -239,7 +240,7 @@ def init_state() -> None:
     st.session_state.setdefault("selected_subpref_id", None)
     st.session_state.setdefault("selected_distrito_id", None)
     st.session_state.setdefault("selected_iso_ids", set())     # multi
-    st.session_state.setdefault("selected_quadra_ids", set())  # multi
+    st.session_state.setdefault("selected_quadra_ids", set())  # multi (AGORA: quadra_uid)
 
     st.session_state.setdefault("final_mode", "lote")          # "lote" | "censo"
 
@@ -346,6 +347,14 @@ def _id_to_str(v: Any) -> Optional[str]:
         if core.isdigit():
             return core
     return s
+
+
+def make_quadra_uid(iso_id: Any, quadra_id: Any) -> Optional[str]:
+    iso = _id_to_str(iso_id)
+    qid = _id_to_str(quadra_id)
+    if iso is None or qid is None or iso == "" or qid == "":
+        return None
+    return f"{iso}__{qid}"
 
 
 def normalize_id_cols(gdf: "gpd.GeoDataFrame", cols: Iterable[str]) -> "gpd.GeoDataFrame":
@@ -531,6 +540,18 @@ def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
         return None
     g = _drop_bad_geoms(g)
     g = normalize_id_cols(g, LAYER_ID_COLS.get(layer_key, []))
+
+    # FIX: quadra_id pode se repetir em isócronas diferentes; cria chave composta
+    if layer_key == "quadra":
+        if ISO_ID in g.columns and QUADRA_ID in g.columns:
+            iso_s = g[ISO_ID].map(_id_to_str)
+            qid_s = g[QUADRA_ID].map(_id_to_str)
+            g[QUADRA_UID] = [
+                f"{i}__{q}" if (i is not None and q is not None and i != "" and q != "") else None
+                for i, q in zip(iso_s, qid_s)
+            ]
+        else:
+            st.warning(f"Quadras.parquet sem colunas '{ISO_ID}' e/ou '{QUADRA_ID}'.")
     return g
 
 
@@ -754,7 +775,6 @@ def add_parent_fill(
         ).add_to(fg)
         fg.add_to(m)
     except Exception:
-        # Se Leaflet/Folium quebrar por algum GeoJSON raro, não derruba o app
         return
 
 
@@ -763,6 +783,7 @@ def add_polygons_selectable(
     gdf: "gpd.GeoDataFrame",
     name: str,
     id_col: str,
+    tooltip_col: Optional[str] = None,
     selected_ids: Optional[Set[Any]] = None,
     pane: str = "detail_shapes",
     base_color: str = "#111111",
@@ -785,6 +806,9 @@ def add_polygons_selectable(
         return
     if id_col not in gdf.columns:
         return
+    tooltip_col = tooltip_col or id_col
+    if tooltip_col not in gdf.columns:
+        return
 
     selected_ids = selected_ids or set()
     sel = {v for v in (_id_to_str(x) for x in selected_ids) if v is not None}
@@ -792,18 +816,21 @@ def add_polygons_selectable(
     tol = simplify_tol if simplify_tol is not None else 0.0006
 
     # Cache do "base layer" (pesado): simplify + to_json
-    key = cache_key or f"base:{name}:{id_col}:{tol}:{len(gdf)}"
+    key = cache_key or f"base:{name}:{id_col}:{tooltip_col}:{tol}:{len(gdf)}"
     geojson_base = _session_geojson_get(key)
     if not geojson_base:
-        mini = gdf[[id_col, "geometry"]].copy()
+        keep = [id_col] if tooltip_col == id_col else [id_col, tooltip_col]
+        mini = gdf[keep + ["geometry"]].copy()
         mini[id_col] = mini[id_col].map(_id_to_str)
-        geojson_base = _simplify_to_geojson(mini, simplify_tol=tol, keep_cols=[id_col])
+        if tooltip_col != id_col:
+            mini[tooltip_col] = mini[tooltip_col].map(_id_to_str)
+        geojson_base = _simplify_to_geojson(mini, simplify_tol=tol, keep_cols=keep)
         _session_geojson_set(key, geojson_base)
 
     if not geojson_base:
         return  # guarda: evita JS quebrar com GeoJSON vazio
 
-    tooltip_base = _mk_tooltip(id_col, tooltip_prefix)
+    tooltip_base = _mk_tooltip(tooltip_col, tooltip_prefix)
 
     # BASE (com tooltip)
     fg_base = folium.FeatureGroup(name=name, show=True)
@@ -853,7 +880,6 @@ def add_polygons_selectable(
                             "fillColor": fill_color,
                             "fillOpacity": selected_fill_opacity,
                         },
-                        # tooltip=None  # explícito se quiser
                     ).add_to(fg_sel)
                     fg_sel.add_to(m)
                 except Exception:
@@ -984,14 +1010,35 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
         iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v is not None}
         if not iso_ids:
             return
-        picked = picked_tooltip
-        if not picked and isinstance(click, dict):
+
+        picked_uid: Optional[str] = None
+
+        # 1) Preferir objeto clicado (properties => iso_id + quadra_id)
+        obj = (map_state or {}).get("last_object_clicked") or None
+        if isinstance(obj, dict):
+            props = obj.get("properties") if isinstance(obj.get("properties"), dict) else obj
+            if isinstance(props, dict):
+                picked_uid = make_quadra_uid(props.get(ISO_ID), props.get(QUADRA_ID))
+
+        # 2) Fallback: hit-test geométrico no subset => retorna quadra_uid
+        g_show = None
+        if not picked_uid and isinstance(click, dict):
             g_quad = read_layer("quadra")
             if g_quad is not None:
                 g_show = subset_by_parent_multi(g_quad, QUADRA_PARENT, iso_ids)
-                picked = pick_feature_id(g_show, click, QUADRA_ID)
-        if picked:
-            _toggle_in_set("selected_quadra_ids", picked)
+                if QUADRA_UID in g_show.columns:
+                    picked_uid = pick_feature_id(g_show, click, QUADRA_UID)
+
+        # 3) Último fallback: tooltip (quadra_id) se for único dentro do subset
+        if not picked_uid and picked_tooltip and g_show is not None and not g_show.empty:
+            qid = _id_to_str(picked_tooltip)
+            if qid is not None and QUADRA_UID in g_show.columns and QUADRA_ID in g_show.columns:
+                cand = g_show[g_show[QUADRA_ID] == qid]
+                if len(cand) == 1:
+                    picked_uid = _id_to_str(cand.iloc[0][QUADRA_UID])
+
+        if picked_uid:
+            _toggle_in_set("selected_quadra_ids", picked_uid)
             return
 
 
@@ -1011,6 +1058,11 @@ def sanitize_level_state() -> None:
         if not iso_ids:
             reset_to("isocrona")
             return
+
+        # Migração simples: se ainda tiver quadra_id antigo (sem "__"), limpa
+        qset = st.session_state.get("selected_quadra_ids", set()) or set()
+        if any(isinstance(x, str) and "__" not in x for x in qset):
+            st.session_state["selected_quadra_ids"] = set()
 
 # =============================================================================
 # (Opcional) diagnóstico leve
@@ -1181,7 +1233,8 @@ def _fit_selected_quadras() -> None:
     g_quad = read_layer("quadra")
     if g_quad is None:
         return
-    set_view_to_gdf(subset_by_id_multi(g_quad, QUADRA_ID, quad_ids), bump=1, zmax=19)
+    id_col = QUADRA_UID if (QUADRA_UID in g_quad.columns) else QUADRA_ID
+    set_view_to_gdf(subset_by_id_multi(g_quad, id_col, quad_ids), bump=1, zmax=19)
 
 
 def left_panel() -> None:
@@ -1281,6 +1334,7 @@ def render_map_panel() -> None:
 
         add_polygons_selectable(
             m, g_sub, "Subprefeituras", SUBPREF_ID,
+            tooltip_col=SUBPREF_ID,
             selected_ids=set(),
             base_weight=0.9, fill_opacity=0.04,
             selected_color=PB_NAVY,
@@ -1326,6 +1380,7 @@ def render_map_panel() -> None:
 
         add_polygons_selectable(
             m, g_show, "Distritos", DIST_ID,
+            tooltip_col=DIST_ID,
             selected_ids=set(),
             base_weight=0.75, fill_opacity=0.06,
             selected_color=PB_NAVY,
@@ -1373,6 +1428,7 @@ def render_map_panel() -> None:
 
         add_polygons_selectable(
             m, g_show, "Isócronas", ISO_ID,
+            tooltip_col=ISO_ID,
             selected_ids=st.session_state["selected_iso_ids"],
             base_weight=0.95,
             fill_opacity=0.14,
@@ -1397,14 +1453,19 @@ def render_map_panel() -> None:
         g_iso = read_layer("iso")
         if g_quad is None or g_iso is None:
             st.stop()
+
+        # Aqui exigimos ao menos iso_id e quadra_id (para criar quadra_uid)
         if QUADRA_ID not in g_quad.columns or QUADRA_PARENT not in g_quad.columns:
             st.error(f"Colunas obrigatórias ausentes em Quadras: '{QUADRA_ID}' e/ou '{QUADRA_PARENT}'.")
+            st.stop()
+        if QUADRA_UID not in g_quad.columns:
+            st.error(f"Não foi possível criar '{QUADRA_UID}' (verifique se há '{ISO_ID}' e '{QUADRA_ID}' no parquet).")
             st.stop()
 
         g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
         g_show = subset_by_parent_multi(g_quad, QUADRA_PARENT, iso_ids)
 
-        diag_layer(g_show, "Quadras (subset)", [QUADRA_ID, QUADRA_PARENT])
+        diag_layer(g_show, "Quadras (subset)", [QUADRA_ID, QUADRA_PARENT, QUADRA_UID])
 
         if st.session_state.get("last_level") != "quadra":
             set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=1)
@@ -1422,8 +1483,10 @@ def render_map_panel() -> None:
             cache_key=f"parent:iso:{iso_key}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
         )
 
+        # Base: usa QUADRA_UID como id interno (seleção) e tooltip mostra QUADRA_ID
         add_polygons_selectable(
-            m, g_show, "Quadras", QUADRA_ID,
+            m, g_show, "Quadras", QUADRA_UID,
+            tooltip_col=QUADRA_ID,
             selected_ids=st.session_state["selected_quadra_ids"],
             base_weight=0.80,
             fill_opacity=0.12,
@@ -1462,7 +1525,13 @@ def render_map_panel() -> None:
         height=780,
         use_container_width=True,
         key="map_view",
-        returned_objects=["last_clicked", "last_object_clicked_tooltip", "center", "zoom"],
+        returned_objects=[
+            "last_clicked",
+            "last_object_clicked",
+            "last_object_clicked_tooltip",
+            "center",
+            "zoom",
+        ],
     )
 
 # =============================================================================
