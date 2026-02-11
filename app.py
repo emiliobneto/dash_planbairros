@@ -85,7 +85,6 @@ ASSETS_DIR = REPO_ROOT / "assets"
 LOGO_PATH = ASSETS_DIR / "logo_todos.jpg"
 LOGO_HEIGHT = 46
 
-
 # =============================================================================
 # VISUALIZAÇÕES (Clusters / Isócronas)
 # =============================================================================
@@ -127,7 +126,6 @@ ISO_CLASSNUM_TO_COLOR = {
     7: "#542788",
 }
 ISO_DEFAULT_COLOR = "#ffffff"
-
 
 # =============================================================================
 # IDS DO ENCADEAMENTO (FK-only)
@@ -482,7 +480,7 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
         return dst
 
     session = requests.Session()
-    URL = "https://drive.google.com/uc?export=download"
+    url = "https://drive.google.com/uc?export=download"
 
     def get_confirm_token(resp) -> Optional[str]:
         for k, v in resp.cookies.items():
@@ -490,10 +488,10 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
                 return v
         return None
 
-    response = session.get(URL, params={"id": file_id}, stream=True)
+    response = session.get(url, params={"id": file_id}, stream=True)
     token = get_confirm_token(response)
     if token:
-        response = session.get(URL, params={"id": file_id, "confirm": token}, stream=True)
+        response = session.get(url, params={"id": file_id, "confirm": token}, stream=True)
 
     if response.status_code != 200:
         raise RuntimeError(f"Download falhou (status={response.status_code}).")
@@ -808,7 +806,6 @@ def render_legend(title: str, items: list[Tuple[str, str]]) -> None:
     html += "</div></div>"
     st.markdown(html, unsafe_allow_html=True)
 
-
 # =============================================================================
 # CLICK HITTEST (fallback)
 # =============================================================================
@@ -1097,7 +1094,6 @@ def _parse_center_zoom(map_state: Dict[str, Any]) -> Tuple[Optional[Tuple[float,
     return center, zoom
 
 
-
 def add_polygons_selectable_colored(
     m,
     gdf: "gpd.GeoDataFrame",
@@ -1208,7 +1204,6 @@ def add_polygons_selectable_colored(
                     fg_sel.add_to(m)
                 except Exception:
                     return
-
 
 
 def update_view_from_map_state(map_state: Dict[str, Any]) -> None:
@@ -1337,36 +1332,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             _toggle_in_set("selected_quadra_ids", picked_uid)
             return
 
-        picked_uid: Optional[str] = None
-
-        # 1) Preferir objeto clicado (properties => iso_id + quadra_id)
-        obj = (map_state or {}).get("last_object_clicked") or None
-        if isinstance(obj, dict):
-            props = obj.get("properties") if isinstance(obj.get("properties"), dict) else obj
-            if isinstance(props, dict):
-                picked_uid = make_quadra_uid(props.get(ISO_ID), props.get(QUADRA_ID))
-
-        # 2) Fallback: hit-test geométrico no subset => retorna quadra_uid
-        g_show = None
-        if not picked_uid and isinstance(click, dict):
-            g_quad = read_layer("quadra")
-            if g_quad is not None:
-                g_show = subset_by_parent_multi(g_quad, QUADRA_PARENT, iso_ids)
-                if QUADRA_UID in g_show.columns:
-                    picked_uid = pick_feature_id(g_show, click, QUADRA_UID)
-
-        # 3) Último fallback: tooltip (quadra_id) se for único dentro do subset
-        if not picked_uid and picked_tooltip and g_show is not None and not g_show.empty:
-            qid = _id_to_str(picked_tooltip)
-            if qid is not None and QUADRA_UID in g_show.columns and QUADRA_ID in g_show.columns:
-                cand = g_show[g_show[QUADRA_ID] == qid]
-                if len(cand) == 1:
-                    picked_uid = _id_to_str(cand.iloc[0][QUADRA_UID])
-
-        if picked_uid:
-            _toggle_in_set("selected_quadra_ids", picked_uid)
-            return
-
 
 def sanitize_level_state() -> None:
     lvl = st.session_state.get("level", "subpref")
@@ -1468,14 +1433,14 @@ def metrics_panel() -> None:
     )
 
     factors = list(METRICS_TREE.get(theme, {}).keys())
-    factor = st.selectbox(
+    st.selectbox(
         "Fator",
         options=factors,
         key="metric_factor",
         on_change=lambda: mark_ui_action(False),
     )
 
-    indicators = METRICS_TREE.get(theme, {}).get(factor, [])
+    indicators = METRICS_TREE.get(theme, {}).get(st.session_state["metric_factor"], [])
     st.selectbox(
         "Indicador",
         options=indicators,
@@ -1752,7 +1717,7 @@ def render_map_panel() -> None:
             cache_key=f"parent:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}",
         )
 
-                # Visualização por classes (nova_class) — opcional
+        # Visualização por classes (nova_class) — opcional
         g_show_viz = g_show.copy()
         if ISO_CLASS_COL in g_show_viz.columns:
             tmp = g_show_viz[ISO_CLASS_COL].apply(
@@ -1844,7 +1809,7 @@ def render_map_panel() -> None:
         )
 
         # Base: usa QUADRA_UID como id interno (seleção) e tooltip mostra QUADRA_ID
-                # Visualização por cluster (quadras.csv) — opcional
+        # Visualização por cluster (quadras.csv) — opcional
         g_show_viz = attach_quadras_csv(g_show)
 
         if CLUSTER_COL in g_show_viz.columns:
@@ -1912,8 +1877,6 @@ def render_map_panel() -> None:
         )
 
     st.markdown(f"### {title}")
-
-    # OBS: LayerControl removido (ajuda a evitar glitches/JS em algumas versões)
 
     st_folium(
         m,
@@ -2024,7 +1987,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
