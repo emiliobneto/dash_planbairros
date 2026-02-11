@@ -85,6 +85,50 @@ ASSETS_DIR = REPO_ROOT / "assets"
 LOGO_PATH = ASSETS_DIR / "logo_todos.jpg"
 LOGO_HEIGHT = 46
 
+
+# =============================================================================
+# VISUALIZAÇÕES (Clusters / Isócronas)
+# =============================================================================
+QUADRAS_CSV_FILENAME = "quadras.csv"  # esperado no REPO_ROOT ou data_cache
+CLUSTER_COL = "Cluster"
+ISO_CLASS_COL = "nova_class"
+
+# Quadras: cores + rótulos
+CLUSTER_COLOR_MAP = {
+    0: "#bf7db2",  # Alta Densidade Periférica
+    1: "#f7bd6a",  # Uso Misto Intermediário
+    2: "#cf651f",  # Média Densidade Periférica
+    3: "#cf651f",  # Uso Misto Verticalizado Central (mesma cor)
+    4: "#793393",  # Predominância Comercial e de Serviços
+}
+CLUSTER_LABEL_MAP = {
+    0: "Alta Densidade Periférica",
+    1: "Uso Misto Intermediário",
+    2: "Média Densidade Periférica",
+    3: "Uso Misto Verticalizado Central",
+    4: "Predominância Comercial e de Serviços",
+}
+CLUSTER_NULL_COLOR = "#c8c8c8"
+
+# Isócronas: regra especial + classes (mapeamento pedido)
+ISO_TRANSITION_SET = {1, 3, 6}
+ISO_TRANSITION_LABEL = "Área de transição"
+ISO_TRANSITION_COLOR = "#7f6a5c"
+
+# “renomear” classes: nova_class -> Classe (1..7) + cor
+ISO_VALUE_TO_CLASSNUM = {0: 1, 2: 2, 4: 3, 5: 4, 7: 5, 8: 6, 9: 7}
+ISO_CLASSNUM_TO_COLOR = {
+    1: "#f7f7f7",
+    2: "#d8daeb",
+    3: "#8073ac",
+    4: "#b2abd2",
+    5: "#b35806",
+    6: "#e08214",
+    7: "#542788",
+}
+ISO_DEFAULT_COLOR = "#ffffff"
+
+
 # =============================================================================
 # IDS DO ENCADEAMENTO (FK-only)
 # =============================================================================
@@ -255,6 +299,8 @@ def init_state() -> None:
 
     # debug
     st.session_state.setdefault("debug_fk", False)
+
+    st.session_state.setdefault("variable", None)
 
     # Métricas (dropdowns)
     st.session_state.setdefault("metric_theme", None)
@@ -627,6 +673,142 @@ def subset_by_id_multi(gdf: "gpd.GeoDataFrame", id_col: str, ids: Set[Any]) -> "
         return gdf.iloc[0:0].copy()
     return gdf[gdf[id_col].isin(list(iset))]
 
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
+def read_df_csv(path: str) -> Optional[pd.DataFrame]:
+    p = Path(path)
+    if not p.exists() or p.stat().st_size <= 0:
+        return None
+    try:
+        return pd.read_csv(p)
+    except Exception:
+        return None
+
+
+def _coerce_int(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    try:
+        if isinstance(v, str):
+            v = v.strip()
+            if v == "":
+                return None
+        fv = float(v)
+        return int(fv)
+    except Exception:
+        return None
+
+
+def get_quadras_csv_df() -> Optional[pd.DataFrame]:
+    # tenta no repo root e depois em data_cache
+    p1 = REPO_ROOT / QUADRAS_CSV_FILENAME
+    p2 = DATA_CACHE_DIR / QUADRAS_CSV_FILENAME
+    df = read_df_csv(str(p1)) or read_df_csv(str(p2))
+    if df is None or df.empty:
+        return None
+
+    df = df.copy()
+    if QUADRA_ID in df.columns:
+        df[QUADRA_ID] = df[QUADRA_ID].map(_id_to_str)
+
+    # se tiver iso_id no CSV, cria UID e usa ele para merge (evita colisões)
+    if ISO_ID in df.columns:
+        df[ISO_ID] = df[ISO_ID].map(_id_to_str)
+        df[QUADRA_UID] = [
+            make_quadra_uid(i, q) for i, q in zip(df.get(ISO_ID, []), df.get(QUADRA_ID, []))
+        ]
+
+    return df
+
+
+def attach_quadras_csv(g_quad: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
+    if g_quad is None or g_quad.empty:
+        return g_quad
+    df = get_quadras_csv_df()
+    if df is None:
+        return g_quad
+
+    # preferir UID quando disponível em ambos
+    if QUADRA_UID in g_quad.columns and QUADRA_UID in df.columns:
+        out = g_quad.merge(df, on=QUADRA_UID, how="left", suffixes=("", "_csv"))
+        return out
+
+    # fallback: merge só por quadra_id (pode colidir se houver múltiplas isócronas)
+    if QUADRA_ID not in df.columns:
+        if not st.session_state.get("_warn_no_quadra_id_in_csv", False):
+            st.warning(f"'{QUADRA_ID}' não encontrado em {QUADRAS_CSV_FILENAME}. Cluster não será aplicado.")
+            st.session_state["_warn_no_quadra_id_in_csv"] = True
+        return g_quad
+
+    if len(st.session_state.get("selected_iso_ids", set()) or set()) > 1 and not st.session_state.get("_warn_csv_no_iso", False):
+        st.warning(
+            f"{QUADRAS_CSV_FILENAME} não tem '{ISO_ID}'. Como há múltiplas isócronas selecionadas, "
+            "o merge por quadra_id pode misturar classes entre isócronas diferentes."
+        )
+        st.session_state["_warn_csv_no_iso"] = True
+
+    out = g_quad.merge(df, on=QUADRA_ID, how="left", suffixes=("", "_csv"))
+    return out
+
+
+def cluster_label(code: Optional[int]) -> str:
+    if code is None:
+        return "Sem classe"
+    return CLUSTER_LABEL_MAP.get(code, f"Cluster {code}")
+
+
+def cluster_color(code: Optional[int]) -> str:
+    if code is None:
+        return CLUSTER_NULL_COLOR
+    return CLUSTER_COLOR_MAP.get(code, CLUSTER_NULL_COLOR)
+
+
+def iso_label_color(nova_class: Any) -> Tuple[str, str]:
+    nc = _coerce_int(nova_class)
+    if nc is None:
+        return ("Sem classe", ISO_DEFAULT_COLOR)
+    if nc in ISO_TRANSITION_SET:
+        return (ISO_TRANSITION_LABEL, ISO_TRANSITION_COLOR)
+    if nc in ISO_VALUE_TO_CLASSNUM:
+        k = ISO_VALUE_TO_CLASSNUM[nc]
+        return (f"Classe {k}", ISO_CLASSNUM_TO_COLOR.get(k, ISO_DEFAULT_COLOR))
+    return ("Outros", ISO_DEFAULT_COLOR)
+
+
+def _numeric_medians_by_group(df: pd.DataFrame, group_col: str, round_digits: int = 2) -> pd.DataFrame:
+    if df is None or df.empty or group_col not in df.columns:
+        return pd.DataFrame()
+    g = df.copy()
+    cols = [c for c in g.columns if c != group_col]
+    for c in cols:
+        g[c] = pd.to_numeric(g[c], errors="coerce")
+    counts = g.groupby(group_col).size().rename("n")
+    med = g.groupby(group_col).median(numeric_only=True)
+    out = pd.concat([counts, med], axis=1).reset_index()
+    for c in out.columns:
+        if c != group_col and pd.api.types.is_numeric_dtype(out[c]):
+            out[c] = out[c].round(round_digits)
+    return out
+
+
+def render_legend(title: str, items: list[Tuple[str, str]]) -> None:
+    html = f"<div style='margin-top:10px'><b>{title}</b><div style='margin-top:6px'>"
+    for lab, col in items:
+        html += (
+            "<div style='display:flex;align-items:center;gap:8px;margin:3px 0'>"
+            f"<span style='display:inline-block;width:14px;height:14px;border-radius:3px;background:{col};border:1px solid rgba(0,0,0,.15)'></span>"
+            f"<span style='font-size:0.92rem'>{lab}</span>"
+            "</div>"
+        )
+    html += "</div></div>"
+    st.markdown(html, unsafe_allow_html=True)
+
+
 # =============================================================================
 # CLICK HITTEST (fallback)
 # =============================================================================
@@ -915,6 +1097,120 @@ def _parse_center_zoom(map_state: Dict[str, Any]) -> Tuple[Optional[Tuple[float,
     return center, zoom
 
 
+
+def add_polygons_selectable_colored(
+    m,
+    gdf: "gpd.GeoDataFrame",
+    name: str,
+    id_col: str,
+    fill_color_col: str,
+    selected_ids: Optional[Set[Any]] = None,
+    tooltip_col: Optional[str] = None,
+    pane: str = "detail_shapes",
+    base_color: str = "#111111",
+    base_weight: float = 0.8,
+    fill_opacity: float = 0.14,
+    selected_color: str = "#14407D",
+    selected_weight: float = 2.6,
+    selected_fill_opacity: float = 0.28,
+    tooltip_prefix: str = "ID: ",
+    simplify_tol: Optional[float] = None,
+    cache_key: Optional[str] = None,
+    default_fill: str = "#ffffff",
+) -> None:
+    """
+    Choropleth leve por coluna (já pré-calculada) mantendo o fix do “mapa branco”
+    (tooltip só na BASE) e permitindo tooltip_col diferente de id_col.
+    """
+    if folium is None or gdf is None or gdf.empty:
+        return
+    if id_col not in gdf.columns or fill_color_col not in gdf.columns:
+        return
+
+    tooltip_col = tooltip_col or id_col
+    if tooltip_col not in gdf.columns:
+        tooltip_col = id_col
+
+    selected_ids = selected_ids or set()
+    sel = {v for v in (_id_to_str(x) for x in selected_ids) if v is not None}
+    tol = simplify_tol if simplify_tol is not None else 0.0006
+
+    keep = [id_col, fill_color_col]
+    if tooltip_col not in keep:
+        keep.append(tooltip_col)
+
+    key = cache_key or f"baseC:{name}:{id_col}:{tooltip_col}:{fill_color_col}:{tol}:{len(gdf)}"
+    geojson_base = _session_geojson_get(key)
+    if not geojson_base:
+        mini = gdf[keep + ["geometry"]].copy()
+        mini[id_col] = mini[id_col].map(_id_to_str)
+        mini[tooltip_col] = mini[tooltip_col].map(_id_to_str)
+        mini[fill_color_col] = mini[fill_color_col].astype(str)
+        geojson_base = _simplify_to_geojson(mini, simplify_tol=tol, keep_cols=keep)
+        _session_geojson_set(key, geojson_base)
+    if not geojson_base:
+        return
+
+    tooltip_base = _mk_tooltip(tooltip_col, tooltip_prefix)
+
+    fg_base = folium.FeatureGroup(name=name, show=True)
+    try:
+        def _style(f):
+            props = (f or {}).get("properties", {}) or {}
+            fc = props.get(fill_color_col, default_fill)
+            if not fc or str(fc).lower() in ("nan", "none"):
+                fc = default_fill
+            return {
+                "color": base_color,
+                "weight": base_weight,
+                "opacity": 0.92,
+                "lineCap": LINE_CAP,
+                "lineJoin": LINE_JOIN,
+                "fillColor": fc,
+                "fillOpacity": fill_opacity,
+            }
+
+        folium.GeoJson(
+            data=geojson_base,
+            pane=pane,
+            smooth_factor=SMOOTH_FACTOR,
+            style_function=_style,
+            highlight_function=lambda _f: {"weight": base_weight + 1.4, "fillOpacity": min(fill_opacity + 0.12, 0.40)},
+            tooltip=tooltip_base,
+        ).add_to(fg_base)
+        fg_base.add_to(m)
+    except Exception:
+        return
+
+    # selecionados (sem tooltip)
+    if sel:
+        sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
+        if not sel_gdf.empty:
+            sel_gdf[id_col] = sel_gdf[id_col].map(_id_to_str)
+            geojson_sel = _simplify_to_geojson(sel_gdf, simplify_tol=tol, keep_cols=[id_col])
+            if geojson_sel:
+                fg_sel = folium.FeatureGroup(name=f"{name} (selecionados)", show=True)
+                try:
+                    folium.GeoJson(
+                        data=geojson_sel,
+                        pane=pane,
+                        smooth_factor=SMOOTH_FACTOR,
+                        style_function=lambda _f: {
+                            "color": selected_color,
+                            "weight": selected_weight,
+                            "opacity": 0.98,
+                            "lineCap": LINE_CAP,
+                            "lineJoin": LINE_JOIN,
+                            "fillColor": "#ffffff",
+                            "fillOpacity": selected_fill_opacity,
+                        },
+                    ).add_to(fg_sel)
+                    fg_sel.add_to(m)
+                except Exception:
+                    return
+
+
+
 def update_view_from_map_state(map_state: Dict[str, Any]) -> None:
     if st.session_state.get("_view_set_by_ui", False):
         st.session_state["_view_set_by_ui"] = False
@@ -1009,6 +1305,36 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
     if level == "quadra":
         iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v is not None}
         if not iso_ids:
+            return
+
+        picked_uid: Optional[str] = None
+
+        # Preferir o UID direto (quando o GeoJSON traz a coluna)
+        obj = (map_state or {}).get("last_object_clicked") or None
+        if isinstance(obj, dict):
+            props = obj.get("properties") if isinstance(obj.get("properties"), dict) else obj
+            if isinstance(props, dict):
+                picked_uid = _id_to_str(props.get(QUADRA_UID)) or make_quadra_uid(props.get(ISO_ID), props.get(QUADRA_ID))
+
+        # Fallback: hit-test geométrico no subset => retorna quadra_uid
+        g_show = None
+        if not picked_uid and isinstance(click, dict):
+            g_quad = read_layer("quadra")
+            if g_quad is not None:
+                g_show = subset_by_parent_multi(g_quad, QUADRA_PARENT, iso_ids)
+                if QUADRA_UID in g_show.columns:
+                    picked_uid = pick_feature_id(g_show, click, QUADRA_UID)
+
+        # Último fallback: tooltip (quadra_id) se for único dentro do subset
+        if not picked_uid and picked_tooltip and g_show is not None and not g_show.empty:
+            qid = _id_to_str(picked_tooltip)
+            if qid is not None and QUADRA_UID in g_show.columns and QUADRA_ID in g_show.columns:
+                cand = g_show[g_show[QUADRA_ID] == qid]
+                if len(cand) == 1:
+                    picked_uid = _id_to_str(cand.iloc[0][QUADRA_UID])
+
+        if picked_uid:
+            _toggle_in_set("selected_quadra_ids", picked_uid)
             return
 
         picked_uid: Optional[str] = None
@@ -1426,19 +1752,53 @@ def render_map_panel() -> None:
             cache_key=f"parent:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}",
         )
 
-        add_polygons_selectable(
-            m, g_show, "Isócronas", ISO_ID,
-            tooltip_col=ISO_ID,
-            selected_ids=st.session_state["selected_iso_ids"],
-            base_weight=0.95,
-            fill_opacity=0.14,
-            selected_color=PB_NAVY,
-            selected_weight=3.0,
-            selected_fill_opacity=0.30,
-            tooltip_prefix="Isócrona: ",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-            cache_key=f"iso:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
-        )
+                # Visualização por classes (nova_class) — opcional
+        g_show_viz = g_show.copy()
+        if ISO_CLASS_COL in g_show_viz.columns:
+            tmp = g_show_viz[ISO_CLASS_COL].apply(
+                lambda v: pd.Series(iso_label_color(v), index=["__iso_label", "__iso_color"])
+            )
+            g_show_viz["__iso_label"] = tmp["__iso_label"]
+            g_show_viz["__iso_color"] = tmp["__iso_color"]
+        else:
+            g_show_viz["__iso_label"] = "Outros"
+            g_show_viz["__iso_color"] = ISO_DEFAULT_COLOR
+
+        if st.session_state.get("variable") == "Isócronas (classes)":
+            add_polygons_selectable_colored(
+                m,
+                g_show_viz,
+                "Isócronas",
+                ISO_ID,
+                fill_color_col="__iso_color",
+                selected_ids=st.session_state["selected_iso_ids"],
+                tooltip_col=ISO_ID,
+                base_weight=0.95,
+                fill_opacity=0.18,
+                selected_color=PB_NAVY,
+                selected_weight=3.0,
+                selected_fill_opacity=0.30,
+                tooltip_prefix="Isócrona: ",
+                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
+                cache_key=f"isoVIZ:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
+                default_fill=ISO_DEFAULT_COLOR,
+            )
+        else:
+            add_polygons_selectable(
+                m,
+                g_show,
+                "Isócronas",
+                ISO_ID,
+                selected_ids=st.session_state["selected_iso_ids"],
+                base_weight=0.95,
+                fill_opacity=0.14,
+                selected_color=PB_NAVY,
+                selected_weight=3.0,
+                selected_fill_opacity=0.30,
+                tooltip_prefix="Isócrona: ",
+                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
+                cache_key=f"iso:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
+            )
 
     elif level == "quadra":
         iso_ids = {v for v in (_id_to_str(x) for x in st.session_state["selected_iso_ids"]) if v is not None}
@@ -1484,19 +1844,54 @@ def render_map_panel() -> None:
         )
 
         # Base: usa QUADRA_UID como id interno (seleção) e tooltip mostra QUADRA_ID
-        add_polygons_selectable(
-            m, g_show, "Quadras", QUADRA_UID,
-            tooltip_col=QUADRA_ID,
-            selected_ids=st.session_state["selected_quadra_ids"],
-            base_weight=0.80,
-            fill_opacity=0.12,
-            selected_color=PB_NAVY,
-            selected_weight=2.6,
-            selected_fill_opacity=0.28,
-            tooltip_prefix="Quadra: ",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
-            cache_key=f"quadra:iso:{iso_key}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
-        )
+                # Visualização por cluster (quadras.csv) — opcional
+        g_show_viz = attach_quadras_csv(g_show)
+
+        if CLUSTER_COL in g_show_viz.columns:
+            g_show_viz["__cluster_code"] = g_show_viz[CLUSTER_COL].apply(_coerce_int)
+            g_show_viz["__cluster_label"] = g_show_viz["__cluster_code"].apply(cluster_label)
+            g_show_viz["__cluster_color"] = g_show_viz["__cluster_code"].apply(cluster_color)
+        else:
+            g_show_viz["__cluster_code"] = None
+            g_show_viz["__cluster_label"] = "Sem classe"
+            g_show_viz["__cluster_color"] = CLUSTER_NULL_COLOR
+
+        if st.session_state.get("variable") == "Cluster":
+            add_polygons_selectable_colored(
+                m,
+                g_show_viz,
+                "Quadras",
+                QUADRA_UID,
+                fill_color_col="__cluster_color",
+                selected_ids=st.session_state["selected_quadra_ids"],
+                tooltip_col=QUADRA_ID,
+                base_weight=0.80,
+                fill_opacity=0.20,
+                selected_color=PB_NAVY,
+                selected_weight=2.6,
+                selected_fill_opacity=0.28,
+                tooltip_prefix="Quadra: ",
+                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
+                cache_key=f"quadVIZ:iso:{iso_key}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
+                default_fill=CLUSTER_NULL_COLOR,
+            )
+        else:
+            add_polygons_selectable(
+                m,
+                g_show,
+                "Quadras",
+                QUADRA_UID,
+                tooltip_col=QUADRA_ID,
+                selected_ids=st.session_state["selected_quadra_ids"],
+                base_weight=0.80,
+                fill_opacity=0.12,
+                selected_color=PB_NAVY,
+                selected_weight=2.6,
+                selected_fill_opacity=0.28,
+                tooltip_prefix="Quadra: ",
+                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
+                cache_key=f"quadra:iso:{iso_key}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
+            )
 
     else:
         title = "Nível final"
@@ -1533,6 +1928,58 @@ def render_map_panel() -> None:
             "zoom",
         ],
     )
+
+    # -------------------------------------------------------------------------
+    # Pós-mapa: legendas + medianas (somente quando a visualização estiver ativa)
+    # -------------------------------------------------------------------------
+    if level == "isocrona" and st.session_state.get("variable") == "Isócronas (classes)":
+        st.divider()
+        render_legend(
+            "Legenda — Isócronas (nova_class)",
+            [
+                (f"{ISO_TRANSITION_LABEL} (nova_class ∈ {sorted(list(ISO_TRANSITION_SET))})", ISO_TRANSITION_COLOR),
+                ("Classe 1 (nova_class=0)", ISO_CLASSNUM_TO_COLOR[1]),
+                ("Classe 2 (nova_class=2)", ISO_CLASSNUM_TO_COLOR[2]),
+                ("Classe 3 (nova_class=4)", ISO_CLASSNUM_TO_COLOR[3]),
+                ("Classe 4 (nova_class=5)", ISO_CLASSNUM_TO_COLOR[4]),
+                ("Classe 5 (nova_class=7)", ISO_CLASSNUM_TO_COLOR[5]),
+                ("Classe 6 (nova_class=8)", ISO_CLASSNUM_TO_COLOR[6]),
+                ("Classe 7 (nova_class=9)", ISO_CLASSNUM_TO_COLOR[7]),
+                ("Outros (branco)", ISO_DEFAULT_COLOR),
+            ],
+        )
+        try:
+            df_iso = pd.DataFrame(g_show_viz.drop(columns="geometry", errors="ignore"))  # type: ignore[name-defined]
+            if "__iso_label" in df_iso.columns:
+                med = _numeric_medians_by_group(df_iso, "__iso_label", round_digits=2)
+                if not med.empty:
+                    st.subheader("Medianas por classe (Isócronas)", anchor=False)
+                    st.dataframe(med, use_container_width=True)
+        except Exception:
+            pass
+
+    if level == "quadra" and st.session_state.get("variable") == "Cluster":
+        st.divider()
+        render_legend(
+            "Legenda — Quadras (Cluster)",
+            [
+                ("0 — Alta Densidade Periférica", CLUSTER_COLOR_MAP[0]),
+                ("1 — Uso Misto Intermediário", CLUSTER_COLOR_MAP[1]),
+                ("2 — Média Densidade Periférica", CLUSTER_COLOR_MAP[2]),
+                ("3 — Uso Misto Verticalizado Central", CLUSTER_COLOR_MAP[3]),
+                ("4 — Predominância Comercial e de Serviços", CLUSTER_COLOR_MAP[4]),
+                ("Sem classe (null)", CLUSTER_NULL_COLOR),
+            ],
+        )
+        try:
+            df_q = pd.DataFrame(g_show_viz.drop(columns="geometry", errors="ignore"))  # type: ignore[name-defined]
+            if "__cluster_label" in df_q.columns:
+                medq = _numeric_medians_by_group(df_q, "__cluster_label", round_digits=2)
+                if not medq.empty:
+                    st.subheader("Medianas por cluster (Quadras)", anchor=False)
+                    st.dataframe(medq, use_container_width=True)
+        except Exception:
+            pass
 
 # =============================================================================
 # APP
