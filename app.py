@@ -720,7 +720,10 @@ def read_df_csv(path: str) -> Optional[pd.DataFrame]:
     if not p.exists() or p.stat().st_size <= 0:
         return None
     try:
-        return pd.read_csv(p)
+        return pd.read_csv(
+            p,
+            dtype={QUADRA_ID: "string", ISO_ID: "string", CLUSTER_COL: "string"},
+        )
     except Exception:
         return None
 
@@ -2043,4 +2046,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
