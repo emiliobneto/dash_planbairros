@@ -90,7 +90,7 @@ LOGO_HEIGHT = 46
 # =============================================================================
 QUADRAS_CSV_FILENAME = "quadras.csv"  # esperado no REPO_ROOT ou data_cache
 QUADRAS_CSV_SECRET_KEY = "PB_QUADRAS_CSV_FILE_ID"
-QUADRAS_CSV_FALLBACK_URL = "https://drive.google.com/file/d/1xv-Ql-uZfi4r59I8_3pjU48D_tGDwMwi/view?usp=drive_link"
+QUADRAS_CSV_FALLBACK_URL = "https://drive.google.com/file/d/1_WKryQlu_jZL1xsgAmQDrI81aSdzKYsc/view?usp=drive_link"
 CLUSTER_COL = "Cluster"
 ISO_CLASS_COL = "nova_class"
 
@@ -1614,16 +1614,42 @@ def left_panel() -> None:
 
     # Legendas (abaixo da seleção de variável)
     var = st.session_state.get("variable")
+
     if lvl == "isocrona" and var == "Isócronas (classes)":
+        render_legend(
+            "Legenda — Isócronas (nova_class)",
+            [
+                (f"{ISO_TRANSITION_LABEL} (nova_class ∈ {sorted(list(ISO_TRANSITION_SET))})", ISO_TRANSITION_COLOR),
+                ("Classe 1 (nova_class=0)", ISO_CLASSNUM_TO_COLOR[1]),
+                ("Classe 2 (nova_class=2)", ISO_CLASSNUM_TO_COLOR[2]),
+                ("Classe 3 (nova_class=4)", ISO_CLASSNUM_TO_COLOR[3]),
+                ("Classe 4 (nova_class=5)", ISO_CLASSNUM_TO_COLOR[4]),
+                ("Classe 5 (nova_class=7)", ISO_CLASSNUM_TO_COLOR[5]),
+                ("Classe 6 (nova_class=8)", ISO_CLASSNUM_TO_COLOR[6]),
+                ("Classe 7 (nova_class=9)", ISO_CLASSNUM_TO_COLOR[7]),
+                ("Outros (branco)", ISO_DEFAULT_COLOR),
+            ],
+        )
 
     if lvl == "quadra" and var == "Cluster":
-
+        render_legend(
+            "Legenda — Quadras (Cluster)",
+            [
+                ("0 — Alta Densidade Periférica", CLUSTER_COLOR_MAP[0]),
+                ("1 — Uso Misto Intermediário", CLUSTER_COLOR_MAP[1]),
+                ("2 — Média Densidade Periférica", CLUSTER_COLOR_MAP[2]),
+                ("3 — Uso Misto Verticalizado Central", CLUSTER_COLOR_MAP[3]),
+                ("4 — Predominância Comercial e de Serviços", CLUSTER_COLOR_MAP[4]),
+                ("Sem classe (null)", CLUSTER_NULL_COLOR),
+            ],
+        )
 
     st.divider()
     with st.expander("Dados / Config", expanded=False):
         data_sources_panel()
 
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 # =============================================================================
 # MAP RENDER
@@ -2017,3 +2043,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
