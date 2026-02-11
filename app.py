@@ -58,20 +58,21 @@ SMOOTH_FACTOR = 0.9
 LINE_CAP = "round"
 LINE_JOIN = "round"
 
-# “Sombra” do nível acima (bem sutil, tracejada e fina)
-PARENT_FILL_OPACITY = 0.16
-PARENT_STROKE_OPACITY = 0.35
-PARENT_STROKE_WEIGHT = 0.7
-PARENT_STROKE_DASH = "2,6"
+# “Sombra” do nível acima (sutil, tracejada e fina)
+PARENT_FILL_OPACITY = 0.12
+PARENT_STROKE_OPACITY = 0.45
+PARENT_STROKE_WEIGHT = 1.0
+PARENT_STROKE_DASH = "3,6"
 
 # Simplificação por nível (somente para VISUAL, não para análise)
+# AJUSTE: menos agressivo para melhorar coincidência visual de divisas
 SIMPLIFY_TOL_BY_LEVEL = {
-    "subpref": 0.0010,
-    "distrito": 0.0008,
-    "isocrona": 0.0006,
-    "quadra": 0.00025,
-    "lote": 0.00015,
-    "censo": 0.00025,
+    "subpref": 0.00035,
+    "distrito": 0.00030,
+    "isocrona": 0.00022,
+    "quadra": 0.00010,
+    "lote": 0.00006,
+    "censo": 0.00010,
 }
 
 # =============================================================================
@@ -203,7 +204,7 @@ def inject_css() -> None:
         html, body, .stApp {{
             font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
         }}
-        .main .block-container {{
+        seection, .main .block-container {{
             padding-top: .15rem !important;
             padding-bottom: .6rem !important;
         }}
@@ -293,6 +294,9 @@ def init_state() -> None:
     # debug
     st.session_state.setdefault("debug_fk", False)
 
+    # limpeza de órfãos
+    st.session_state.setdefault("drop_orphans", False)
+
     # Métricas (dropdowns)
     st.session_state.setdefault("metric_theme", None)
     st.session_state.setdefault("metric_factor", None)
@@ -361,24 +365,45 @@ def _toggle_in_set(key: str, value: Any) -> None:
 # HELPERS: ids / normalize
 # =============================================================================
 def _id_to_str(v: Any) -> Optional[str]:
+    """
+    Normaliza IDs/FKs para string canônica.
+
+    Correções:
+    - string vazia/whitespace vira None (para validações pegarem nulos corretamente)
+    - 'nan', 'none', 'null' (case-insensitive) viram None
+    - float inteiro (1.0) vira "1"
+    """
     if v is None:
         return None
+
     try:
         if pd.isna(v):
             return None
     except Exception:
         pass
+
     if isinstance(v, float):
         if v.is_integer():
             return str(int(v))
-        return str(v).strip()
+        s = str(v).strip()
+        return s if s else None
+
     if isinstance(v, int):
         return str(v)
+
     s = str(v).strip()
+    if not s:
+        return None
+
+    low = s.casefold()
+    if low in {"nan", "none", "null"}:
+        return None
+
     if s.endswith(".0"):
         core = s[:-2]
         if core.isdigit():
             return core
+
     return s
 
 
@@ -442,6 +467,37 @@ def _harmonize_columns(layer_key: str, gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataF
     if rename:
         gdf = gdf.rename(columns=rename)
     return gdf
+
+# =============================================================================
+# VALIDATION SPEC + ORPHANS
+# =============================================================================
+LAYER_SPECS = {
+    "subpref": {"id": SUBPREF_ID, "parent": None,          "parent_layer": None,     "parent_id": None},
+    "dist":    {"id": DIST_ID,    "parent": DIST_PARENT,   "parent_layer": "subpref","parent_id": SUBPREF_ID},
+    "iso":     {"id": ISO_ID,     "parent": ISO_PARENT,    "parent_layer": "dist",   "parent_id": DIST_ID},
+    "quadra":  {"id": QUADRA_ID,  "parent": QUADRA_PARENT, "parent_layer": "iso",    "parent_id": ISO_ID},
+    "lote":    {"id": LOTE_ID,    "parent": LOTE_PARENT,   "parent_layer": "quadra", "parent_id": QUADRA_ID},
+    "censo":   {"id": CENSO_ID,   "parent": CENSO_PARENT,  "parent_layer": "iso",    "parent_id": ISO_ID},
+}
+MAX_FK_UNIQUES = 200_000
+
+
+def drop_orphans(layer_key: str, gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
+    """Remove linhas onde ID e/ou FK obrigatórios são nulos (órfãos)."""
+    spec = LAYER_SPECS.get(layer_key)
+    if gdf is None or gdf.empty or not spec:
+        return gdf
+
+    req_cols = [spec["id"]]
+    if spec.get("parent"):
+        req_cols.append(spec["parent"])
+
+    out = gdf.copy()
+    for c in req_cols:
+        if c in out.columns:
+            out = out[out[c].notna()]
+
+    return out
 
 # =============================================================================
 # DRIVE / LOCAL IO
@@ -608,6 +664,14 @@ def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
     g = _harmonize_columns(layer_key, g)
     g = normalize_id_cols(g, LAYER_ID_COLS.get(layer_key, []))
 
+    # (opcional) remove órfãos para o app não parar em bases "sujas"
+    if st.session_state.get("drop_orphans", False):
+        before = len(g)
+        g = drop_orphans(layer_key, g)
+        removed = before - len(g)
+        if removed > 0:
+            st.warning(f"[{layer_key}] removidos {removed:,} registros órfãos (ID/FK nulos).")
+
     # check mínimo: colunas canônicas existem
     missing = [c for c in LAYER_ID_COLS.get(layer_key, []) if c not in g.columns]
     if missing:
@@ -619,7 +683,9 @@ def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
 
     return g
 
-
+# =============================================================================
+# SUBSETS / VIEW
+# =============================================================================
 def bounds_center_zoom(gdf: "gpd.GeoDataFrame") -> Tuple[Tuple[float, float], int]:
     minx, miny, maxx, maxy = gdf.total_bounds
     center = ((miny + maxy) / 2, (minx + maxx) / 2)
@@ -693,19 +759,8 @@ def subset_by_id_multi(gdf: "gpd.GeoDataFrame", id_col: str, ids: Set[Any]) -> "
     return gdf[gdf[id_col].isin(list(iset))]
 
 # =============================================================================
-# VALIDATION (regras rápidas: ID único + FK do pai sem nulos + integridade opcional)
+# VALIDATION
 # =============================================================================
-LAYER_SPECS = {
-    "subpref": {"id": SUBPREF_ID, "parent": None,         "parent_layer": None,     "parent_id": None},
-    "dist":    {"id": DIST_ID,    "parent": DIST_PARENT,  "parent_layer": "subpref","parent_id": SUBPREF_ID},
-    "iso":     {"id": ISO_ID,     "parent": ISO_PARENT,   "parent_layer": "dist",   "parent_id": DIST_ID},
-    "quadra":  {"id": QUADRA_ID,  "parent": QUADRA_PARENT,"parent_layer": "iso",    "parent_id": ISO_ID},
-    "lote":    {"id": LOTE_ID,    "parent": LOTE_PARENT,  "parent_layer": "quadra", "parent_id": QUADRA_ID},
-    "censo":   {"id": CENSO_ID,   "parent": CENSO_PARENT, "parent_layer": "iso",    "parent_id": ISO_ID},
-}
-MAX_FK_UNIQUES = 200_000
-
-
 def validate_layer_contract(
     layer_key: str,
     gdf: "gpd.GeoDataFrame",
@@ -725,10 +780,22 @@ def validate_layer_contract(
         st.error(f"[{layer_key}] Coluna obrigatória ausente: '{id_col}'")
         return False
 
+    # reforço local (caso alguém chame sem passar por read_layer)
+    try:
+        gdf = gdf.copy()
+        gdf[id_col] = gdf[id_col].map(_id_to_str)
+        if parent_col and parent_col in gdf.columns:
+            gdf[parent_col] = gdf[parent_col].map(_id_to_str)
+    except Exception:
+        pass
+
     s_id = gdf[id_col]
     n_null_id = int(s_id.isna().sum())
     if n_null_id > 0:
         st.error(f"[{layer_key}] '{id_col}' tem {n_null_id:,} nulos. ID deve ser não-nulo.")
+        if st.session_state.get("debug_fk", False):
+            with st.expander(f"Ver registros com '{id_col}' nulo ({layer_key})", expanded=True):
+                st.dataframe(gdf[gdf[id_col].isna()][[id_col]].head(50), use_container_width=True, hide_index=True)
         return False
 
     dup_mask = s_id.duplicated(keep=False)
@@ -747,6 +814,12 @@ def validate_layer_contract(
         n_null_fk = int(s_fk.isna().sum())
         if n_null_fk > 0:
             st.error(f"[{layer_key}] FK '{parent_col}' tem {n_null_fk:,} nulos. Camada filha precisa de pai.")
+
+            show_cols = [id_col, parent_col]
+            bad = gdf[gdf[parent_col].isna()][show_cols].head(50).copy()
+            with st.expander(f"Ver registros com '{parent_col}' nulo ({layer_key})", expanded=True):
+                st.dataframe(bad, use_container_width=True, hide_index=True)
+
             return False
 
         if strict_fk_integrity and parent_gdf is not None and parent_layer and parent_id_col:
@@ -754,9 +827,14 @@ def validate_layer_contract(
                 st.error(f"[{parent_layer}] Coluna obrigatória ausente: '{parent_id_col}'")
                 return False
 
+            try:
+                parent_ids = parent_gdf[parent_id_col].map(_id_to_str)
+            except Exception:
+                parent_ids = parent_gdf[parent_id_col]
+
             child_uni = pd.unique(s_fk.dropna())
             if len(child_uni) <= MAX_FK_UNIQUES:
-                parent_set = set(pd.unique(parent_gdf[parent_id_col].dropna()).tolist())
+                parent_set = set(pd.unique(parent_ids.dropna()).tolist())
                 missing = [v for v in child_uni.tolist() if v not in parent_set]
                 if missing:
                     st.error(
@@ -885,7 +963,7 @@ def add_parent_fill(
     stroke_weight: float = PARENT_STROKE_WEIGHT,
     stroke_opacity: float = PARENT_STROKE_OPACITY,
     dash_array: str = PARENT_STROKE_DASH,
-    simplify_tol: float = 0.0006,
+    simplify_tol: float = 0.00025,
     cache_key: Optional[str] = None,
 ) -> None:
     if folium is None or gdf is None or gdf.empty:
@@ -926,20 +1004,21 @@ def add_polygons_selectable(
     selected_ids: Optional[Set[Any]] = None,
     pane: str = "detail_shapes",
     base_color: str = "#111111",
-    base_weight: float = 0.8,
+    base_weight: float = 1.35,
     fill_color: str = "#ffffff",
-    fill_opacity: float = 0.10,
+    fill_opacity: float = 0.06,
     selected_color: str = PB_NAVY,
-    selected_weight: float = 2.6,
-    selected_fill_opacity: float = 0.26,
+    selected_weight: float = 3.8,
+    selected_fill_opacity: float = 0.18,
     tooltip_prefix: str = "ID: ",
     simplify_tol: Optional[float] = None,
     cache_key: Optional[str] = None,
 ) -> None:
     """
-    Importante para evitar “tela branca”:
-    - tooltip SOMENTE na camada base
-    - overlay de selecionados SEM tooltip (reduz bug/interação do componente)
+    Melhorias visuais:
+    - "Halo" branco por baixo para deixar divisas mais legíveis
+    - Simplify menos agressivo por nível (config global)
+    - tooltip somente na camada principal (para evitar bugs de overlay)
     """
     if folium is None or gdf is None or gdf.empty:
         return
@@ -949,7 +1028,7 @@ def add_polygons_selectable(
     selected_ids = selected_ids or set()
     sel = {v for v in (_id_to_str(x) for x in selected_ids) if v is not None}
 
-    tol = simplify_tol if simplify_tol is not None else 0.0006
+    tol = simplify_tol if simplify_tol is not None else 0.00025
 
     key = cache_key or f"base:{name}:{id_col}:{tol}:{len(gdf)}"
     geojson_base = _session_geojson_get(key)
@@ -965,6 +1044,23 @@ def add_polygons_selectable(
     tooltip = _mk_tooltip(id_col, tooltip_prefix)
 
     fg_base = folium.FeatureGroup(name=name, show=True)
+
+    # 1) HALO (borda branca por baixo, SEM tooltip)
+    folium.GeoJson(
+        data=geojson_base,
+        pane=pane,
+        smooth_factor=SMOOTH_FACTOR,
+        style_function=lambda _f: {
+            "color": "#ffffff",
+            "weight": base_weight + 2.2,
+            "opacity": 0.95,
+            "lineCap": LINE_CAP,
+            "lineJoin": LINE_JOIN,
+            "fillOpacity": 0.0,
+        },
+    ).add_to(fg_base)
+
+    # 2) Borda “real” por cima (COM tooltip)
     folium.GeoJson(
         data=geojson_base,
         pane=pane,
@@ -972,20 +1068,22 @@ def add_polygons_selectable(
         style_function=lambda _f: {
             "color": base_color,
             "weight": base_weight,
-            "opacity": 0.92,
+            "opacity": 1.0,
             "lineCap": LINE_CAP,
             "lineJoin": LINE_JOIN,
             "fillColor": fill_color,
             "fillOpacity": fill_opacity,
         },
         highlight_function=lambda _f: {
-            "weight": base_weight + 1.4,
-            "fillOpacity": min(fill_opacity + 0.12, 0.40),
+            "weight": base_weight + 2.6,
+            "fillOpacity": min(fill_opacity + 0.08, 0.25),
         },
         tooltip=tooltip,
     ).add_to(fg_base)
+
     fg_base.add_to(m)
 
+    # Selecionados (sem tooltip)
     if sel:
         sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
         if not sel_gdf.empty:
@@ -993,6 +1091,23 @@ def add_polygons_selectable(
             geojson_sel = _simplify_to_geojson(sel_gdf, simplify_tol=tol, keep_cols=[id_col])
             if geojson_sel:
                 fg_sel = folium.FeatureGroup(name=f"{name} (selecionados)", show=True)
+
+                # halo do selecionado
+                folium.GeoJson(
+                    data=geojson_sel,
+                    pane=pane,
+                    smooth_factor=SMOOTH_FACTOR,
+                    style_function=lambda _f: {
+                        "color": "#ffffff",
+                        "weight": selected_weight + 2.4,
+                        "opacity": 0.98,
+                        "lineCap": LINE_CAP,
+                        "lineJoin": LINE_JOIN,
+                        "fillOpacity": 0.0,
+                    },
+                ).add_to(fg_sel)
+
+                # stroke do selecionado
                 folium.GeoJson(
                     data=geojson_sel,
                     pane=pane,
@@ -1000,13 +1115,14 @@ def add_polygons_selectable(
                     style_function=lambda _f: {
                         "color": selected_color,
                         "weight": selected_weight,
-                        "opacity": 0.98,
+                        "opacity": 1.0,
                         "lineCap": LINE_CAP,
                         "lineJoin": LINE_JOIN,
                         "fillColor": fill_color,
                         "fillOpacity": selected_fill_opacity,
                     },
                 ).add_to(fg_sel)
+
                 fg_sel.add_to(m)
 
 # =============================================================================
@@ -1067,7 +1183,8 @@ def _click_signature(tooltip_id: Optional[str], click: Optional[Dict[str, Any]])
     return f"{tip}|"
 
 
-def consume_map_event(level: str, map_state: Dict[str, Any], get_layer: Callable[[str], Optional["gpd.GeoDataFrame"]], allow_click: bool = True) -> None:
+def consume_map_event(level: str, map_state: Dict[str, Any], get_layer: Callable[[str], Optional["gpd.GeoDataFrame"]],
+                      allow_click: bool = True) -> None:
     """
     Processa clique ANTES de desenhar o mapa.
     - lê last_clicked e last_object_clicked_tooltip do map_state (session_state["map_view"])
@@ -1292,6 +1409,12 @@ def data_sources_panel() -> None:
 
     st.divider()
     st.checkbox("Modo diagnóstico (FK/colunas)", key="debug_fk", on_change=lambda: mark_ui_action(False))
+    st.checkbox(
+        "Descartar registros órfãos (IDs/FKs nulos)",
+        key="drop_orphans",
+        on_change=lambda: mark_ui_action(False),
+        help="Remove linhas onde ID ou FK obrigatória está nula (ex.: isócronas sem distrito_id).",
+    )
 
 
 def _level_label(level: str) -> str:
@@ -1431,7 +1554,7 @@ def render_map_panel(get_layer: Callable[[str], Optional["gpd.GeoDataFrame"]]) -
         add_polygons_selectable(
             m, g_sub, "Subprefeituras", SUBPREF_ID,
             selected_ids=set(),
-            base_weight=0.9, fill_opacity=0.04,
+            fill_opacity=0.03,
             tooltip_prefix="Subpref: ",
             simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"],
             cache_key=f"subpref:all:{SIMPLIFY_TOL_BY_LEVEL['subpref']}",
@@ -1480,7 +1603,7 @@ def render_map_panel(get_layer: Callable[[str], Optional["gpd.GeoDataFrame"]]) -
         add_polygons_selectable(
             m, g_show, "Distritos", DIST_ID,
             selected_ids=set(),
-            base_weight=0.75, fill_opacity=0.06,
+            fill_opacity=0.05,
             tooltip_prefix="Distrito: ",
             simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
             cache_key=f"dist:sp:{sp}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}",
@@ -1531,11 +1654,7 @@ def render_map_panel(get_layer: Callable[[str], Optional["gpd.GeoDataFrame"]]) -
         add_polygons_selectable(
             m, g_show, "Isócronas", ISO_ID,
             selected_ids=st.session_state["selected_iso_ids"],
-            base_weight=0.95,
-            fill_opacity=0.14,
             selected_color=PB_NAVY,
-            selected_weight=3.0,
-            selected_fill_opacity=0.30,
             tooltip_prefix="Isócrona: ",
             simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
             cache_key=f"iso:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
@@ -1558,7 +1677,6 @@ def render_map_panel(get_layer: Callable[[str], Optional["gpd.GeoDataFrame"]]) -
         if g_quad is None or g_iso is None:
             st.stop()
 
-        # Regras rápidas: quadra_id único + iso_id (FK) sem nulos e existindo em iso.iso_id
         if not validate_layer_contract("iso", g_iso):
             st.stop()
         if not validate_layer_contract("quadra", g_quad, parent_gdf=g_iso, strict_fk_integrity=True):
@@ -1588,11 +1706,7 @@ def render_map_panel(get_layer: Callable[[str], Optional["gpd.GeoDataFrame"]]) -
         add_polygons_selectable(
             m, g_show, "Quadras", QUADRA_ID,
             selected_ids=st.session_state["selected_quadra_ids"],
-            base_weight=0.80,
-            fill_opacity=0.12,
             selected_color=PB_NAVY,
-            selected_weight=2.6,
-            selected_fill_opacity=0.28,
             tooltip_prefix="Quadra: ",
             simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
             cache_key=f"quadra:iso:{iso_key}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
@@ -1608,7 +1722,6 @@ def render_map_panel(get_layer: Callable[[str], Optional["gpd.GeoDataFrame"]]) -
 
     st.markdown(f"### {title}")
 
-    # Render do mapa (key fixa)
     st_folium(
         m,
         height=780,
@@ -1629,9 +1742,7 @@ def main() -> None:
         st.error("Este app requer `geopandas`, `folium` e `streamlit-folium`.")
         return
 
-    # ------------------------------------------------------------
     # 1) Detecta se o rerun veio de UI (botões/selects) e não do mapa
-    # ------------------------------------------------------------
     ui_sig = int(st.session_state.get("_ui_action_sig", 0))
     ui_seen = int(st.session_state.get("_ui_action_sig_seen", 0))
     ui_action = ui_sig != ui_seen
@@ -1641,15 +1752,11 @@ def main() -> None:
     if ui_action:
         st.session_state["last_click_sig"] = ""
 
-    # ------------------------------------------------------------
     # 2) Lê estado do mapa do session_state e atualiza view (pan/zoom)
-    # ------------------------------------------------------------
     map_state = st.session_state.get("map_view", {}) or {}
     update_view_from_map_state(map_state)
 
-    # ------------------------------------------------------------
     # 2.1) Cache por RERUN para evitar read_layer repetido no mesmo ciclo
-    # ------------------------------------------------------------
     _run_layers: Dict[str, Optional["gpd.GeoDataFrame"]] = {}
 
     def get_layer_cached(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
@@ -1659,20 +1766,14 @@ def main() -> None:
         _run_layers[layer_key] = g
         return g
 
-    # ------------------------------------------------------------
     # 3) Consome clique ANTES do desenho do mapa (sem st.rerun)
-    # ------------------------------------------------------------
     current_level = st.session_state.get("level", "subpref")
     consume_map_event(current_level, map_state, get_layer_cached, allow_click=(not ui_action))
 
-    # ------------------------------------------------------------
     # 4) Sanitize
-    # ------------------------------------------------------------
     sanitize_level_state()
 
-    # ------------------------------------------------------------
     # 5) Layout
-    # ------------------------------------------------------------
     left, right = st.columns([1, 4], gap="large")
     with left:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
