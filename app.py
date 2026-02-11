@@ -54,7 +54,7 @@ CARTO_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.pn
 CARTO_ATTR = "© OpenStreetMap contributors © CARTO"
 
 # Suavização / acabamento
-SMOOTH_FACTOR = 0.9
+SMOOTH_FACTOR = 1.0
 LINE_CAP = "round"
 LINE_JOIN = "round"
 
@@ -66,12 +66,12 @@ PARENT_STROKE_DASH = "2,6"
 
 # Simplificação por nível (somente para VISUAL, não para análise)
 SIMPLIFY_TOL_BY_LEVEL = {
-    "subpref": 0.0010,
-    "distrito": 0.0008,
-    "isocrona": 0.0006,
-    "quadra": 0.00025,
-    "lote": 0.00015,
-    "censo": 0.00025,
+    "subpref": 0.0000,
+    "distrito": 0.0000,
+    "isocrona": 0.0000,
+    "quadra": 0.00000,
+    "lote": 0.00000,
+    "censo": 0.00000,
 }
 
 # =============================================================================
@@ -1577,4 +1577,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
