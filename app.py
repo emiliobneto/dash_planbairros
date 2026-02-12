@@ -774,7 +774,7 @@ def get_quadras_csv_df() -> Optional[pd.DataFrame]:
     if CLUSTER_COL not in df.columns and "cluster" in cols_lower:
         df = df.rename(columns={cols_lower["cluster"]: CLUSTER_COL})
     if QUADRA_ID in df.columns:
-        df[QUADRA_ID] = df[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6)))
+        df[QUADRA_ID] = df[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
 
     # se tiver iso_id no CSV, cria UID e usa ele para merge (evita colisões)
     if ISO_ID in df.columns:
@@ -2056,6 +2056,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
