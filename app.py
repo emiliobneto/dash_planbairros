@@ -389,6 +389,13 @@ def _id_to_str(v: Any) -> Optional[str]:
         if core.isdigit():
             return core
     return s
+    
+def normalize_quadra_id(v: Any, width: int = 6) -> Optional[str]:
+    s = _id_to_str(v)
+    if s is None:
+        return None
+    s = s.strip()
+    return s.zfill(width) if s.isdigit() else s
 
 
 def make_quadra_uid(iso_id: Any, quadra_id: Any) -> Optional[str]:
@@ -626,6 +633,9 @@ def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
         return None
     g = _drop_bad_geoms(g)
     g = normalize_id_cols(g, LAYER_ID_COLS.get(layer_key, []))
+    
+    if layer_key == "quadra" and QUADRA_ID in g.columns:
+        g[QUADRA_ID] = g[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
 
     # FIX: quadra_id pode se repetir em isócronas diferentes; cria chave composta
     if layer_key == "quadra":
@@ -764,7 +774,7 @@ def get_quadras_csv_df() -> Optional[pd.DataFrame]:
     if CLUSTER_COL not in df.columns and "cluster" in cols_lower:
         df = df.rename(columns={cols_lower["cluster"]: CLUSTER_COL})
     if QUADRA_ID in df.columns:
-        df[QUADRA_ID] = df[QUADRA_ID].map(_id_to_str)
+        df[QUADRA_ID] = df[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6)))
 
     # se tiver iso_id no CSV, cria UID e usa ele para merge (evita colisões)
     if ISO_ID in df.columns:
@@ -2046,5 +2056,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
