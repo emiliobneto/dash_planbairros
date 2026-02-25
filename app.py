@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 
+
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import base64
@@ -366,7 +367,7 @@ def init_state() -> None:
     st.session_state.setdefault("_ui_action_sig", 0)
     st.session_state.setdefault("_ui_action_sig_seen", 0)
 
-    st.session_state.setdefault("_map_level", None)
+    st.session_state.setdefault("_map_level_rendered", None)
     st.session_state.setdefault("_quadra_id_col_map", QUADRA_UID)
 
     # final
@@ -1879,13 +1880,15 @@ def render_map_panel() -> None:
         return
 
     # ✅ Retorna apenas eventos de clique (zoom/pan não causa rerun).
-    st_folium(
+    _ = st_folium(
         m,
         height=780,
         use_container_width=True,
         key=MAP_KEY,
         returned_objects=["last_clicked", "last_object_clicked", "last_object_clicked_tooltip"],
     )
+    # Marca qual nível gerou o estado atual do mapa (para evitar consumir clique de outro nível).
+    st.session_state["_map_level_rendered"] = level
 
 
 # =============================================================================
@@ -1901,19 +1904,10 @@ def main() -> None:
         return
 
     # ------------------------------------------------------------
-    # Estabilidade do componente:
-    # - key único (MAP_KEY)
-    # - ao trocar de nível, limpar o estado do componente (evita clique “fantasma”)
-    # ------------------------------------------------------------
-    cur_level = st.session_state.get("level", "subpref")
-    prev_level = st.session_state.get("_map_level")
-    if prev_level != cur_level:
-        st.session_state["_map_level"] = cur_level
-        st.session_state.pop(MAP_KEY, None)
-        st.session_state["last_click_sig"] = ""
-
-    # ------------------------------------------------------------
-    # Pré-consumo do clique do mapa (on-time, sem st.rerun)
+    # Pré-consumo do clique do mapa (on-time, sem st.rerun):
+    # - Consome o clique do RUN anterior, antes de desenhar o mapa deste run.
+    # - Só consome se o estado do mapa (MAP_KEY) tiver sido gerado no mesmo nível atual.
+    #   (Evita clicar em Subpref, trocar de nível por botão, e reprocessar clique antigo.)
     # ------------------------------------------------------------
     ui_sig = int(st.session_state.get("_ui_action_sig", 0))
     ui_seen = int(st.session_state.get("_ui_action_sig_seen", 0))
@@ -1921,10 +1915,19 @@ def main() -> None:
     st.session_state["_ui_action_sig_seen"] = ui_sig
 
     if ui_action:
+        # interações em widgets/botões: evita reaproveitar clique anterior
         st.session_state["last_click_sig"] = ""
 
+    cur_level = st.session_state.get("level", "subpref")
+    rendered_level = st.session_state.get("_map_level_rendered")
+
     map_state_prev = st.session_state.get(MAP_KEY, {}) or {}
-    consume_map_event(cur_level, map_state_prev, allow_click=(not ui_action))
+
+    # Só permite consumir clique se o mapa anterior foi renderizado no mesmo nível atual
+    allow_click = (not ui_action) and (rendered_level == cur_level)
+
+    if allow_click and isinstance(map_state_prev, dict) and map_state_prev:
+        consume_map_event(cur_level, map_state_prev, allow_click=True)
 
     sanitize_level_state()
 
