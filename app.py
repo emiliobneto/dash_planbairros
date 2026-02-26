@@ -1449,7 +1449,8 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
         return
 
     tooltip_raw = (map_state or {}).get("last_object_clicked_tooltip") or None
-    click = (map_state or {}).get("last_clicked") if isinstance((map_state or {}).get("last_clicked"), dict) else Nonene
+    click = (map_state or {}).get("last_clicked") if isinstance((map_state or {}).get("last_clicked"), dict) else None
+
 
     # ------------------------------------------------------------------
     # SUBPREF / DISTRITO / ISO / CENSO
@@ -1833,59 +1834,196 @@ def control_panel() -> None:
 # FINAL: lotes filtrados
 # =============================================================================
 def _quadra_ids_from_selected(uids_or_ids: Set[str]) -> Set[str]:
+    """
+    Converte a seleção de quadras (que pode vir como quadra_uid 'iso__quadra')
+    para um conjunto de quadra_id canônicos (string), com normalização (zfill=6 quando numérico).
+    """
     out: Set[str] = set()
-    for x in uids_or_ids:
+    for x in uids_or_ids or set():
         s = _id_to_str(x)
         if not s:
             continue
+
+        # Seleção pode vir como UID: iso__quadra
         if "__" in s:
-            _, q = split_quadra_uid(s)
-            if q:
-                out.add(q)
+            _iso, q = split_quadra_uid(s)
+            qid = _id_to_str(q)
         else:
-            out.add(s)
+            qid = s
+
+        if not qid:
+            continue
+
+        # Normaliza padding quando for numérico (compatível com quadras)
+        nq = normalize_quadra_id(qid, 6) if isinstance(qid, str) else _id_to_str(qid)
+        if nq:
+            out.add(nq)
+
     return out
 
 
 def _make_parquet_filters_for_quadras(quadra_ids: Set[str]) -> Any:
-    vals = sorted({v for v in quadra_ids if v})
+    """
+    Monta filtros no formato aceito por pyarrow/geopandas.read_parquet(filters=...).
+    Nem todo ambiente suporta; por isso temos fallback em _read_lotes_for_selected_quadras.
+    """
+    vals = sorted({v for v in (quadra_ids or set()) if v})
     if not vals:
         return None
     return [(QUADRA_ID, "in", vals)]
 
 
+def _detect_geometry_unit(g: "gpd.GeoDataFrame") -> Dict[str, Any]:
+    """
+    Identifica informações básicas da geometria (para debug):
+    - coluna geometry
+    - quantidade de geometrias não nulas
+    - se parece ser uma unidade única (1 registro)
+    - tipo de geometria predominante
+    """
+    out: Dict[str, Any] = {"geometry_col": None, "n_geoms": 0, "single_geometry": False, "geom_type": None}
+    if g is None or g.empty:
+        return out
+
+    try:
+        out["geometry_col"] = g.geometry.name
+    except Exception:
+        out["geometry_col"] = "geometry"
+
+    try:
+        n = int(g.geometry.notna().sum())
+        out["n_geoms"] = n
+        out["single_geometry"] = (len(g) == 1) or (n == 1)
+    except Exception:
+        pass
+
+    try:
+        gt = g.geometry.geom_type.dropna().iloc[0]
+        out["geom_type"] = str(gt)
+    except Exception:
+        pass
+
+    return out
+
+
+def _canonicalize_lote_schema(g: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
+    """
+    Normaliza o schema do layer de lotes para:
+    - padronização de colunas
+    - remoção de geometrias ruins
+    - normalização dos IDs relevantes
+    - CRS 4326
+    """
+    if g is None or g.empty:
+        return g
+
+    g = standardize_columns(g)
+    g = _drop_bad_geoms(g)
+
+    # Normaliza IDs como string
+    g = normalize_id_cols(g, [QUADRA_ID, LOTE_ID])
+
+    # Normaliza quadra_id com zfill(6) quando aplicável (evita mismatch)
+    if QUADRA_ID in g.columns:
+        g[QUADRA_ID] = g[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
+
+    # CRS -> 4326 (mantém compatível com o resto do app)
+    try:
+        if g.crs is None:
+            g = g.set_crs(4326, allow_override=True)
+        else:
+            g = g.to_crs(4326)
+    except Exception:
+        pass
+
+    return g
+
+
 def _read_lotes_for_selected_quadras(selected_quad_ids: Set[str]) -> Optional["gpd.GeoDataFrame"]:
+    """
+    Carrega lotes apenas para as quadras selecionadas, tentando:
+    1) leitura parcial via columns + filters (quando suportado)
+    2) fallback: leitura com columns (sem filters) + filtro em memória
+    3) último fallback: leitura completa (evitar, mas garante robustez)
+
+    Também:
+    - normaliza quadra_id (zfill 6) para casar com seleção
+    - usa cache em st.session_state para não recarregar a cada rerun
+    """
+    # 0) garante arquivo local
     try:
         p = ensure_local_layer("lote")
     except Exception as e:
         st.error(str(e))
         return None
 
+    # 1) converte seleção -> quadra_id canônico
     quadra_ids = _quadra_ids_from_selected(selected_quad_ids)
     if not quadra_ids:
         return None
 
+    # 2) cache
     sig = "|".join(sorted(list(quadra_ids)))
     if st.session_state.get("final_loaded", False) and st.session_state.get("final_load_sig") == sig:
-        return st.session_state.get("_final_lotes_gdf")
+        cached = st.session_state.get("_final_lotes_gdf")
+        return cached
 
+    # 3) tentativa de leitura parcial
+    # Obs: geopandas.read_parquet inclui geometry; mas manter "geometry" na lista ajuda alguns engines.
     cols = [QUADRA_ID, LOTE_ID, "geometry"]
     filters = _make_parquet_filters_for_quadras(quadra_ids)
 
-    g = read_gdf_parquet_filtered(str(p), columns=cols, filters=filters)
-    if g is None:
+    g: Optional["gpd.GeoDataFrame"] = None
+
+    # 3.1) columns + filters (melhor caso)
+    try:
+        g = read_gdf_parquet_filtered(str(p), columns=cols, filters=filters)
+    except Exception:
+        g = None
+
+    # 3.2) fallback: columns apenas (sem filters) e filtra em memória
+    if g is None or getattr(g, "empty", True):
+        try:
+            g = read_gdf_parquet_filtered(str(p), columns=cols, filters=None)
+        except Exception:
+            g = None
+
+    # 3.3) último fallback: leitura completa
+    if g is None or getattr(g, "empty", True):
+        g = read_gdf_parquet(str(p))
+
+    if g is None or g.empty:
+        st.session_state["_final_lotes_gdf"] = None
+        st.session_state["final_loaded"] = False
+        st.session_state["final_load_sig"] = sig
         return None
-    g = _drop_bad_geoms(g)
-    g = standardize_columns(g)
-    g = normalize_id_cols(g, [QUADRA_ID, LOTE_ID])
 
-    # filtro extra por segurança
-    if QUADRA_ID in g.columns:
-        g = g[g[QUADRA_ID].isin(list(quadra_ids))].copy()
+    # 4) normaliza/corrige schema
+    g = _canonicalize_lote_schema(g)
 
+    # 5) valida coluna essencial
+    if QUADRA_ID not in g.columns:
+        st.error(f"Lotes.parquet não contém a coluna obrigatória '{QUADRA_ID}'. Colunas: {list(g.columns)}")
+        st.session_state["_final_lotes_gdf"] = None
+        st.session_state["final_loaded"] = False
+        st.session_state["final_load_sig"] = sig
+        return None
+
+    # 6) filtro final em memória (garantia)
+    # quadra_ids já está com zfill; quadra_id do g já foi normalizado
+    g = g[g[QUADRA_ID].isin(list(quadra_ids))].copy()
+
+    # debug opcional (ajuda a entender "unidade única" de geometria)
+    if st.session_state.get("debug_schema", False):
+        st.write("[debug] lotes geometry unit:", _detect_geometry_unit(g))
+        st.write("[debug] lotes filtrados shape:", getattr(g, "shape", None))
+        st.write("[debug] lotes cols:", list(g.columns))
+
+    # 7) salva cache
     st.session_state["_final_lotes_gdf"] = g
     st.session_state["final_loaded"] = True
     st.session_state["final_load_sig"] = sig
+
     return g
 
 
@@ -2310,6 +2448,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
