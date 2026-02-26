@@ -2153,7 +2153,6 @@ def render_map_panel() -> None:
             else:
                 # fallback: se não há censo_id nas quadras, filtramos por iso_id (mantém o app operável)
                 g_show = subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
-                st.info("Quadras.parquet sem censo_id; filtrando quadras por iso_id como fallback.")
         else:
             if ISO_ID not in g_quad.columns:
                 st.error(f"Quadras.parquet não tem '{ISO_ID}'. Colunas: {list(g_quad.columns)}")
@@ -2311,6 +2310,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
