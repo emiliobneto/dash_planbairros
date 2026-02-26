@@ -148,7 +148,7 @@ LAYER_ID_COLS = {
     "subpref": [SUBPREF_ID],
     "dist": [DIST_ID, DIST_PARENT],
     "iso": [ISO_ID, ISO_PARENT],
-    "quadra": [QUADRA_ID, QUADRA_PARENT, QUADRA_UID, ISO_ID, CENSO_ID],
+    "quadra": [QUADRA_ID, ISO_ID, CENSO_ID, QUADRA_UID],
     "lote": [LOTE_ID, LOTE_PARENT, QUADRA_ID, ISO_ID],
     "censo": [CENSO_ID, CENSO_PARENT, QUADRA_ID, ISO_ID],
 }
@@ -2119,4 +2119,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
