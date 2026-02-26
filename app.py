@@ -1117,6 +1117,7 @@ def add_polygons_selectable(
     *,
     tooltip_col: Optional[str] = None,
     selected_ids: Optional[Set[Any]] = None,
+    extra_props: Optional[List[str]] = None,  # ✅ NOVO: propriedades adicionais no GeoJSON
     pane: str = "detail_shapes",
     base_color: str = "#111111",
     base_weight: float = 0.8,
@@ -1130,12 +1131,20 @@ def add_polygons_selectable(
     cache_key: Optional[str] = None,
 ) -> None:
     """
-    Renderiza camada base com tooltip + camada selecionados sem tooltip.
+    Renderiza:
+      - Camada base com tooltip
+      - Camada de selecionados (sem tooltip)
+    Otimização:
+      - GeoJSON cacheado e simplificado
+    Correção:
+      - Permite injetar colunas extras (ex.: censo_id) nas propriedades do GeoJSON
+        para que apareçam em last_object_clicked.properties.
     """
     if folium is None or gdf is None or gdf.empty:
         return
     if id_col not in gdf.columns:
         return
+
     tooltip_col = tooltip_col or id_col
     if tooltip_col not in gdf.columns:
         return
@@ -1143,16 +1152,24 @@ def add_polygons_selectable(
     selected_ids = selected_ids or set()
     sel = {v for v in (_id_to_str(x) for x in selected_ids) if v is not None}
 
-    key = cache_key or f"base:{name}:{id_col}:{tooltip_col}:{simplify_tol}:{len(gdf)}"
+    extra_props = extra_props or []
+    # só mantém extras que existem e não duplicam id/tooltip
+    extra_props = [c for c in extra_props if c in gdf.columns and c not in (id_col, tooltip_col)]
+
+    keep = [id_col] if tooltip_col == id_col else [id_col, tooltip_col]
+    keep = keep + extra_props
+
+    key = cache_key or f"base:{name}:{id_col}:{tooltip_col}:{','.join(extra_props)}:{simplify_tol}:{len(gdf)}"
     geojson_base = _session_geojson_get(key)
     if not geojson_base:
-        keep = [id_col] if tooltip_col == id_col else [id_col, tooltip_col]
         mini = gdf[keep + ["geometry"]].copy()
-        mini[id_col] = mini[id_col].map(_id_to_str)
-        if tooltip_col != id_col:
-            mini[tooltip_col] = mini[tooltip_col].map(_id_to_str)
+        # normaliza propriedades para string (evita 1.0, NaN etc.)
+        for c in keep:
+            mini[c] = mini[c].map(_id_to_str)
+
         geojson_base = _simplify_to_geojson(mini, simplify_tol=simplify_tol, keep_cols=keep)
         _session_geojson_set(key, geojson_base)
+
     if not geojson_base:
         return
 
@@ -1175,6 +1192,30 @@ def add_polygons_selectable(
         tooltip=tooltip_base,
     ).add_to(fg_base)
     fg_base.add_to(m)
+
+    if sel:
+        sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
+        if not sel_gdf.empty:
+            sel_gdf[id_col] = sel_gdf[id_col].map(_id_to_str)
+            geojson_sel = _simplify_to_geojson(sel_gdf, simplify_tol=simplify_tol, keep_cols=[id_col])
+            if geojson_sel:
+                fg_sel = folium.FeatureGroup(name=f"{name} (selecionados)", show=True)
+                folium.GeoJson(
+                    data=geojson_sel,
+                    pane=pane,
+                    smooth_factor=SMOOTH_FACTOR,
+                    style_function=lambda _f: {
+                        "color": selected_color,
+                        "weight": selected_weight,
+                        "opacity": 0.98,
+                        "lineCap": LINE_CAP,
+                        "lineJoin": LINE_JOIN,
+                        "fillColor": fill_color,
+                        "fillOpacity": selected_fill_opacity,
+                    },
+                ).add_to(fg_sel)
+                fg_sel.add_to(m)
+
 
     if sel:
         sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
@@ -1809,15 +1850,18 @@ def render_map_panel() -> None:
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
         add_polygons_selectable(
             m,
-            g_sub,
-            "Subprefeituras",
-            SUBPREF_ID,
-            tooltip_col=SUBPREF_ID,
-            selected_ids=set(),
-            fill_opacity=0.04,
-            tooltip_prefix="Subpref: ",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"],
-            cache_key=f"subpref:all:{SIMPLIFY_TOL_BY_LEVEL['subpref']}",
+            g_show,
+            "Quadras",
+            id_col_map,
+            tooltip_col=QUADRA_ID if QUADRA_ID in g_show.columns else id_col_map,
+            selected_ids=st.session_state.get("selected_quadra_ids", set()),
+            # ✅ Inclui censo_id nas propriedades do GeoJSON SOMENTE quando o modo é censo
+            extra_props=[CENSO_ID] if mode == "censo" else [],
+            fill_opacity=0.12,
+            selected_fill_opacity=0.0,
+            tooltip_prefix="Quadra: ",
+            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
+            cache_key=f"quadB:{mode}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
         )
 
     elif level == "distrito":
@@ -2178,3 +2222,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
