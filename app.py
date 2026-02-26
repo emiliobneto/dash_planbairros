@@ -1527,16 +1527,16 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
     # ------------------------------------------------------------------
     # QUADRA
     # ------------------------------------------------------------------
-     if level == "quadra":
+    if level == "quadra":
         iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v is not None}
             if not iso_ids:
                 return
-    
+        
             mode = st.session_state.get("iso_next_mode", "quadra")
             id_col_map = st.session_state.get("_quadra_id_col_map", QUADRA_UID)
-    
+        
             picked: Optional[str] = None
-    
+        
             # 1) tenta obter do objeto clicado (mais rápido)
             obj = (map_state or {}).get("last_object_clicked") or None
             if isinstance(obj, dict):
@@ -1546,7 +1546,7 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                         picked = _id_to_str(props.get(QUADRA_UID)) or make_quadra_uid(props.get(ISO_ID), props.get(QUADRA_ID))
                     else:
                         picked = _id_to_str(props.get(id_col_map)) or _id_to_str(props.get(QUADRA_ID))
-    
+        
             # 2) hittest geométrico no subset correto (✅ faltava isso funcionar de ponta a ponta)
             g_show: Optional["gpd.GeoDataFrame"] = None
             if not picked and isinstance(click, dict):
@@ -1559,10 +1559,10 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                         iso_ids=iso_ids,
                         filter_censo_ids=filter_censo_ids,
                     )
-    
+        
                     if g_show is not None and not g_show.empty and id_col_map in g_show.columns:
                         picked = pick_feature_id(g_show, click, id_col_map)
-    
+        
             # 3) tooltip fallback (mantém sua lógica, mas só faz sentido se g_show existir)
             picked_tooltip = parse_tooltip_id(tooltip_raw)
             if not picked and picked_tooltip and g_show is not None and not g_show.empty:
@@ -1574,15 +1574,15 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                             picked = _id_to_str(cand.iloc[0][QUADRA_UID])
                 elif id_col_map == QUADRA_ID and QUADRA_ID in g_show.columns:
                     picked = _id_to_str(picked_tooltip)
-    
+        
             if not picked:
                 return
-    
+        
             sig = _click_signature(picked, click)
             if sig == st.session_state.get("last_click_sig", ""):
                 return
             st.session_state["last_click_sig"] = sig
-    
+        
             _toggle_in_set("selected_quadra_ids", picked)
             _final_reset()
             return
@@ -2298,6 +2298,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
