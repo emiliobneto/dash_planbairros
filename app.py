@@ -136,6 +136,7 @@ CENSO_ID = "censo_id"
 DIST_PARENT = SUBPREF_ID  # distritos -> subpref
 ISO_PARENT = DIST_ID  # isócronas -> distrito
 QUADRA_PARENT = ISO_ID  # quadras -> isócrona
+QUADRA_PARENT = CENSO_ID  # quadras -> setor
 LOTE_PARENT = QUADRA_ID  # lotes -> quadra
 CENSO_PARENT = ISO_ID  # setor -> iso (esperado no parquet)
 
@@ -2106,3 +2107,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
