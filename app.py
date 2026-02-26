@@ -1702,18 +1702,25 @@ def _go_from_isos_next() -> None:
 
 
 def _go_from_censo_to_quadras() -> None:
-    sel_censo: Set[str] = st.session_state.get("selected_censo_ids", set()) or set()
-    if not sel_censo:
-        st.warning("Selecione ao menos um setor (censo_id).")
-        return
+    sel_censo: Set[str] = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
 
-    # ✅ chave de filtro para quadras por setor
+    # Mantém o modo de navegação como "censo" para que o nível quadra saiba que veio desse caminho.
+    st.session_state["iso_next_mode"] = "censo"
+
+    # Define o filtro (pode ser vazio agora)
     st.session_state["quadra_filter_col"] = CENSO_ID
     st.session_state["quadra_filter_uids"] = sel_censo
+
+    # Limpa seleção de quadras ao entrar no nível
     st.session_state["selected_quadra_ids"] = set()
+
+    # Vai para quadra sempre
     st.session_state["level"] = "quadra"
     _final_reset()
 
+    # Feedback opcional
+    if not sel_censo:
+        st.info("Nenhum setor selecionado. Exibindo quadras pelo recorte das isócronas (fallback por iso_id).")
 
 def _go_to_final() -> None:
     st.session_state["level"] = "final"
@@ -1779,18 +1786,22 @@ def control_panel() -> None:
 
     if lvl == "censo":
         okc = len(st.session_state.get("selected_censo_ids", set()) or set()) > 0
+    
         st.button(
             "Ajustar ao selecionado",
             use_container_width=True,
             disabled=not okc,
             on_click=lambda: (mark_ui_action(), _fit_selected_censos()),
         )
+    
+        # ✅ sempre habilitado, seleção de setores é opcional
         st.button(
-            "Prosseguir → Quadras (censo_id)",
+            "Visualizar Quadras",
             use_container_width=True,
-            disabled=not okc,
+            disabled=False,
             on_click=lambda: (mark_ui_action(), _go_from_censo_to_quadras()),
         )
+
 
     if lvl == "quadra":
         okq = len(st.session_state.get("selected_quadra_ids", set()) or set()) > 0
@@ -2133,10 +2144,12 @@ def render_map_panel() -> None:
 
             if parent_col == CENSO_ID:
                 if not filter_ids:
-                    st.warning("Nenhum setor selecionado. Volte ao Setor censitário e selecione setores.")
-                    g_show = g_quad.iloc[0:0].copy()
+                    # ✅ seleção opcional: sem setores, exibir por iso_id
+                    g_show = subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
+                    st.info("Nenhum setor selecionado. Exibindo quadras pelo recorte das isócronas (fallback por iso_id).")
                 else:
                     g_show = subset_by_id_multi(g_quad, CENSO_ID, filter_ids)
+
             else:
                 # fallback: se não há censo_id nas quadras, filtramos por iso_id (mantém o app operável)
                 g_show = subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
@@ -2298,6 +2311,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
