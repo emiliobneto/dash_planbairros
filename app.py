@@ -1117,7 +1117,7 @@ def add_polygons_selectable(
     *,
     tooltip_col: Optional[str] = None,
     selected_ids: Optional[Set[Any]] = None,
-    extra_props: Optional[List[str]] = None,  # ✅ NOVO: propriedades adicionais no GeoJSON
+    extra_props: Optional[List[str]] = None,
     pane: str = "detail_shapes",
     base_color: str = "#111111",
     base_weight: float = 0.8,
@@ -1130,16 +1130,6 @@ def add_polygons_selectable(
     simplify_tol: float = 0.0006,
     cache_key: Optional[str] = None,
 ) -> None:
-    """
-    Renderiza:
-      - Camada base com tooltip
-      - Camada de selecionados (sem tooltip)
-    Otimização:
-      - GeoJSON cacheado e simplificado
-    Correção:
-      - Permite injetar colunas extras (ex.: censo_id) nas propriedades do GeoJSON
-        para que apareçam em last_object_clicked.properties.
-    """
     if folium is None or gdf is None or gdf.empty:
         return
     if id_col not in gdf.columns:
@@ -1153,7 +1143,6 @@ def add_polygons_selectable(
     sel = {v for v in (_id_to_str(x) for x in selected_ids) if v is not None}
 
     extra_props = extra_props or []
-    # só mantém extras que existem e não duplicam id/tooltip
     extra_props = [c for c in extra_props if c in gdf.columns and c not in (id_col, tooltip_col)]
 
     keep = [id_col] if tooltip_col == id_col else [id_col, tooltip_col]
@@ -1163,7 +1152,6 @@ def add_polygons_selectable(
     geojson_base = _session_geojson_get(key)
     if not geojson_base:
         mini = gdf[keep + ["geometry"]].copy()
-        # normaliza propriedades para string (evita 1.0, NaN etc.)
         for c in keep:
             mini[c] = mini[c].map(_id_to_str)
 
@@ -1193,6 +1181,7 @@ def add_polygons_selectable(
     ).add_to(fg_base)
     fg_base.add_to(m)
 
+    # camada selecionados (sem tooltip)
     if sel:
         sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
         if not sel_gdf.empty:
@@ -1216,29 +1205,6 @@ def add_polygons_selectable(
                 ).add_to(fg_sel)
                 fg_sel.add_to(m)
 
-
-    if sel:
-        sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
-        if not sel_gdf.empty:
-            sel_gdf[id_col] = sel_gdf[id_col].map(_id_to_str)
-            geojson_sel = _simplify_to_geojson(sel_gdf, simplify_tol=simplify_tol, keep_cols=[id_col])
-            if geojson_sel:
-                fg_sel = folium.FeatureGroup(name=f"{name} (selecionados)", show=True)
-                folium.GeoJson(
-                    data=geojson_sel,
-                    pane=pane,
-                    smooth_factor=SMOOTH_FACTOR,
-                    style_function=lambda _f: {
-                        "color": selected_color,
-                        "weight": selected_weight,
-                        "opacity": 0.98,
-                        "lineCap": LINE_CAP,
-                        "lineJoin": LINE_JOIN,
-                        "fillColor": fill_color,
-                        "fillOpacity": selected_fill_opacity,
-                    },
-                ).add_to(fg_sel)
-                fg_sel.add_to(m)
 
 
 def add_polygons_selectable_colored(
@@ -1834,6 +1800,9 @@ def render_map_panel() -> None:
     title = ""
     m = None
 
+    # -----------------------------
+    # SUBPREF (FIX UnboundLocalError)
+    # -----------------------------
     if level == "subpref":
         title = "Subprefeituras"
         g_sub = read_layer("subpref")
@@ -1850,18 +1819,16 @@ def render_map_panel() -> None:
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
         add_polygons_selectable(
             m,
-            g_show,
-            "Quadras",
-            id_col_map,
-            tooltip_col=QUADRA_ID if QUADRA_ID in g_show.columns else id_col_map,
-            selected_ids=st.session_state.get("selected_quadra_ids", set()),
-            # ✅ Inclui censo_id nas propriedades do GeoJSON SOMENTE quando o modo é censo
-            extra_props=[CENSO_ID] if mode == "censo" else [],
-            fill_opacity=0.12,
+            g_sub,
+            "Subprefeituras",
+            SUBPREF_ID,
+            tooltip_col=SUBPREF_ID,
+            selected_ids=set(),
+            fill_opacity=0.06,
             selected_fill_opacity=0.0,
-            tooltip_prefix="Quadra: ",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
-            cache_key=f"quadB:{mode}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
+            tooltip_prefix="Subpref: ",
+            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"],
+            cache_key=f"subpref:{SIMPLIFY_TOL_BY_LEVEL['subpref']}",
         )
 
     elif level == "distrito":
@@ -1975,7 +1942,7 @@ def render_map_panel() -> None:
             )
 
     elif level == "censo":
-        iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v}
+        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
         if not iso_ids:
             reset_to("isocrona")
             return
@@ -2025,20 +1992,23 @@ def render_map_panel() -> None:
             cache_key=f"censo:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['censo']}",
         )
 
+    # -----------------------------
+    # QUADRA (FIX: filtro por censo_id OU iso_id)
+    # -----------------------------
     elif level == "quadra":
-        iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v}
+        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
         if not iso_ids:
             reset_to("isocrona")
             return
 
-        mode = st.session_state.get("iso_next_mode", "quadra")
-        filter_ids: Set[str] = st.session_state.get("quadra_filter_uids", set()) or set()
+        mode = st.session_state.get("iso_next_mode", "quadra")  # "quadra" | "censo"
+        filter_ids: Set[str] = ensure_set_of_str(st.session_state.get("quadra_filter_uids", set()))
 
         sel_nq = len(st.session_state.get("selected_quadra_ids", set()) or set())
         title = (
             f"Quadras — selecionadas: {sel_nq}"
             if mode != "censo"
-            else f"Quadras (filtradas por censo_id) — selecionadas: {sel_nq}"
+            else f"Quadras (filtradas por setor) — selecionadas: {sel_nq}"
         )
 
         g_quad = read_layer("quadra")
@@ -2048,30 +2018,37 @@ def render_map_panel() -> None:
 
         g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
 
-        # ID do mapa/click depende do modo
+        # FIX: coluna de clique/seleção no mapa
         if mode == "censo":
-            id_col_map = QUADRA_ID
+            # Em modo censo, a seleção por quadra pode ser só QUADRA_ID mesmo.
+            id_col_map = QUADRA_ID if QUADRA_ID in g_quad.columns else (QUADRA_UID if QUADRA_UID in g_quad.columns else QUADRA_ID)
         else:
             id_col_map = QUADRA_UID if QUADRA_UID in g_quad.columns else QUADRA_ID
         st.session_state["_quadra_id_col_map"] = id_col_map
 
-        # ✅ g_show por duas vias
+        # FIX: escolher parent col corretamente
         if mode == "censo":
-            censo_col = QUADRA_PARENTS["censo"]
-            if censo_col not in g_quad.columns:
-                st.error(f"Quadras.parquet não tem '{censo_col}'. Colunas: {list(g_quad.columns)}")
+            # preferir CENSO_ID; se não existir, cair para ISO_ID
+            parent_col = choose_quadra_parent_col(g_quad, preferred=CENSO_ID, fallback=ISO_ID)
+            if parent_col is None:
+                st.error(f"Quadras.parquet precisa ter '{CENSO_ID}' ou '{ISO_ID}'. Colunas: {list(g_quad.columns)}")
                 st.stop()
-            if not filter_ids:
-                st.warning("Nenhum setor selecionado. Volte ao Setor censitário e selecione setores.")
-                g_show = g_quad.iloc[0:0].copy()
+
+            if parent_col == CENSO_ID:
+                if not filter_ids:
+                    st.warning("Nenhum setor selecionado. Volte ao Setor censitário e selecione setores.")
+                    g_show = g_quad.iloc[0:0].copy()
+                else:
+                    g_show = subset_by_id_multi(g_quad, CENSO_ID, filter_ids)
             else:
-                g_show = subset_by_id_multi(g_quad, censo_col, filter_ids)
+                # fallback: se não há censo_id nas quadras, filtramos por iso_id (mantém o app operável)
+                g_show = subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
+                st.info("Quadras.parquet sem censo_id; filtrando quadras por iso_id como fallback.")
         else:
-            iso_col = QUADRA_PARENTS["iso"]
-            if iso_col not in g_quad.columns:
-                st.error(f"Quadras.parquet não tem '{iso_col}'. Colunas: {list(g_quad.columns)}")
+            if ISO_ID not in g_quad.columns:
+                st.error(f"Quadras.parquet não tem '{ISO_ID}'. Colunas: {list(g_quad.columns)}")
                 st.stop()
-            g_show = subset_by_parent_multi(g_quad, iso_col, iso_ids)
+            g_show = subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
 
         if st.session_state.get("last_level") != "quadra":
             set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=1)
@@ -2091,6 +2068,9 @@ def render_map_panel() -> None:
         if CLUSTER_COL in g_show_viz.columns:
             g_show_viz["__cluster_code"] = g_show_viz[CLUSTER_COL].apply(_coerce_int)
             g_show_viz["__cluster_color"] = g_show_viz["__cluster_code"].apply(cluster_color)
+
+        # FIX: incluir CENSO_ID no GeoJSON quando aplicável (para clique/props)
+        extra_props = [CENSO_ID] if (mode == "censo" and CENSO_ID in g_show.columns) else []
 
         if st.session_state.get("variable") == "Cluster" and "__cluster_color" in g_show_viz.columns:
             add_polygons_selectable_colored(
@@ -2116,6 +2096,7 @@ def render_map_panel() -> None:
                 id_col_map,
                 tooltip_col=QUADRA_ID if QUADRA_ID in g_show.columns else id_col_map,
                 selected_ids=st.session_state.get("selected_quadra_ids", set()),
+                extra_props=extra_props,
                 fill_opacity=0.12,
                 selected_fill_opacity=0.0,
                 tooltip_prefix="Quadra: ",
@@ -2160,7 +2141,6 @@ def render_map_panel() -> None:
         st.error("Falha ao importar `streamlit_folium` (dependência ausente ou quebrada).")
         return
 
-    # ✅ Retorna apenas eventos de clique (zoom/pan não causa rerun).
     _ = st_folium(
         m,
         height=780,
@@ -2169,7 +2149,6 @@ def render_map_panel() -> None:
         returned_objects=["last_clicked", "last_object_clicked", "last_object_clicked_tooltip"],
     )
     st.session_state["_map_level_rendered"] = level
-
 
 # =============================================================================
 # APP (main)
@@ -2222,4 +2201,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
