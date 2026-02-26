@@ -135,8 +135,10 @@ CENSO_ID = "censo_id"
 
 DIST_PARENT = SUBPREF_ID  # distritos -> subpref
 ISO_PARENT = DIST_ID  # isócronas -> distrito
-QUADRA_PARENT = ISO_ID  # quadras -> isócrona
-QUADRA_PARENT = CENSO_ID  # quadras -> setor
+QUADRA_PARENTS = {
+    "iso": ISO_ID,            # quadras -> isócrona (quadra.iso_id)
+    "censo": CENSO_ID,        # quadras -> setor (quadra.censo_id)
+}
 LOTE_PARENT = QUADRA_ID  # lotes -> quadra
 CENSO_PARENT = ISO_ID  # setor -> iso (esperado no parquet)
 
@@ -1926,7 +1928,17 @@ def render_map_panel() -> None:
             reset_to("isocrona")
             return
 
-        mode = st.session_state.get("iso_next_mode", "quadra")
+        mode = st.session_state.get("iso_next_mode", "quadra")  # "quadra" | "censo"
+
+        if mode == "censo":
+            parent_col = QUADRA_PARENTS["censo"]   # "censo_id"
+            parent_ids = st.session_state.get("quadra_filter_uids", set()) or set()  # aqui são censo_id
+            g_show = subset_by_id_multi(g_quad, parent_col, parent_ids)
+        else:
+            parent_col = QUADRA_PARENTS["iso"]     # "iso_id"
+            parent_ids = iso_ids
+            g_show = subset_by_parent_multi(g_quad, parent_col, parent_ids)
+            
         filter_ids: Set[str] = st.session_state.get("quadra_filter_uids", set()) or set()
         filter_col: str = st.session_state.get("quadra_filter_col", QUADRA_UID)
 
