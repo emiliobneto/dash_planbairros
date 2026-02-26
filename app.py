@@ -298,7 +298,20 @@ def ensure_set_of_str(value: Any, *, drop_empty: bool = True) -> Set[str]:
         out.add(s)
 
     return out
-
+    
+def choose_quadra_parent_col(
+    g_quad: "gpd.GeoDataFrame",
+    *,
+    preferred: str = CENSO_ID,
+    fallback: str = ISO_ID,
+) -> Optional[str]:
+    if g_quad is None or getattr(g_quad, "empty", True):
+        return None
+    if preferred in g_quad.columns:
+        return preferred
+    if fallback in g_quad.columns:
+        return fallback
+    return None
 # =============================================================================
 # HEADER / CSS
 # =============================================================================
@@ -2236,6 +2249,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
