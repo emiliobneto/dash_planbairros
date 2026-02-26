@@ -972,10 +972,43 @@ def main() -> None:
         st.error("Este app requer `geopandas`, `folium` e `streamlit-folium`.")
         return
 
-    # O seu main original segue aqui (consumo de clique + layout)
-    st.info("Cole o restante do seu `main()` original aqui; esta resposta focou na correção do fluxo de quadras.")
-    # ... (mantém seu main original)
+    # ------------------------------------------------------------
+    # Pré-consumo do clique do mapa:
+    # - Consome clique do RUN anterior antes do render do mapa.
+    # - Só consome se o mapa anterior foi renderizado no mesmo nível atual.
+    # ------------------------------------------------------------
+    ui_sig = int(st.session_state.get("_ui_action_sig", 0))
+    ui_seen = int(st.session_state.get("_ui_action_sig_seen", 0))
+    ui_action = ui_sig != ui_seen
+    st.session_state["_ui_action_sig_seen"] = ui_sig
+
+    if ui_action:
+        st.session_state["last_click_sig"] = ""
+
+    cur_level = st.session_state.get("level", "subpref")
+    rendered_level = st.session_state.get("_map_level_rendered")
+    map_state_prev = st.session_state.get(MAP_KEY, {}) or {}
+
+    allow_click = (not ui_action) and (rendered_level == cur_level)
+
+    if allow_click and isinstance(map_state_prev, dict) and map_state_prev:
+        consume_map_event(cur_level, map_state_prev, allow_click=True)
+
+    sanitize_level_state()
+
+    left, right = st.columns([4, 1], gap="large")
+    with left:
+        st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
+        render_map_panel()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with right:
+        st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
+        control_panel()
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
     main()
+```__
+
