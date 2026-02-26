@@ -265,6 +265,39 @@ def normalize_id_cols(gdf: "gpd.GeoDataFrame", cols: Iterable[str]) -> "gpd.GeoD
             g[c] = g[c].map(_id_to_str)
     return g
 
+from typing import Any, Iterable, Optional, Set
+
+
+def ensure_set_of_str(value: Any, *, drop_empty: bool = True) -> Set[str]:
+    """
+    Normaliza qualquer entrada razoável em `set[str]`.
+
+    Aceita:
+      - set/list/tuple de valores (str/int/float/None...)
+      - valor único (str/int/float) -> vira conjunto unitário
+      - None -> set()
+
+    Converte via `_id_to_str` e remove nulos/vazios.
+    """
+    if value is None:
+        return set()
+
+    # Se já for set/list/tuple, ok. Se for outra coisa, trate como item único.
+    if isinstance(value, (set, list, tuple)):
+        items: Iterable[Any] = value
+    else:
+        items = (value,)  # item único
+
+    out: Set[str] = set()
+    for x in items:
+        s = _id_to_str(x)  # usa a sua função existente
+        if s is None:
+            continue
+        if drop_empty and s == "":
+            continue
+        out.add(s)
+
+    return out
 
 # =============================================================================
 # HEADER / CSS
@@ -1942,7 +1975,8 @@ def render_map_panel() -> None:
             )
 
     elif level == "censo":
-        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
+        raw_iso_ids = st.session_state.get("selected_iso_ids")  # sem default
+        iso_ids = ensure_set_of_str(raw_iso_ids)
         if not iso_ids:
             reset_to("isocrona")
             return
@@ -1996,7 +2030,8 @@ def render_map_panel() -> None:
     # QUADRA (FIX: filtro por censo_id OU iso_id)
     # -----------------------------
     elif level == "quadra":
-        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
+        raw_iso_ids = st.session_state.get("selected_iso_ids")  # sem default
+        iso_ids = ensure_set_of_str(raw_iso_ids)
         if not iso_ids:
             reset_to("isocrona")
             return
@@ -2201,5 +2236,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
