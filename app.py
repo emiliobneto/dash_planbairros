@@ -59,7 +59,6 @@ PARENT_STROKE_OPACITY = 0.35
 PARENT_STROKE_WEIGHT = 0.7
 PARENT_STROKE_DASH = "2,6"
 
-# ✅ Mantemos > 0 para reduzir payload e evitar timeouts do componente em deploy
 SIMPLIFY_TOL_BY_LEVEL = {
     "subpref": 0.0012,
     "distrito": 0.0008,
@@ -137,14 +136,14 @@ CENSO_ID = "censo_id"
 DIST_PARENT = SUBPREF_ID  # distritos -> subpref
 ISO_PARENT = DIST_ID      # isócronas -> distrito
 
-# ✅ NOVO: quadra pode ser filtrada por iso_id OU por censo_id, dependendo do modo
+# ✅ Estrutura nova: quadras podem ser processadas por iso_id OU por censo_id
 QUADRA_PARENTS = {
-    "iso": ISO_ID,     # quadra.iso_id
-    "censo": CENSO_ID, # quadra.censo_id
+    "iso": ISO_ID,
+    "censo": CENSO_ID,
 }
 
-LOTE_PARENT = QUADRA_ID  # lotes -> quadra
-CENSO_PARENT = ISO_ID    # setor -> iso (esperado no parquet)
+LOTE_PARENT = QUADRA_ID
+CENSO_PARENT = ISO_ID
 
 LEVELS = ["subpref", "distrito", "isocrona", "censo", "quadra", "final"]
 
@@ -826,7 +825,6 @@ def attach_quadras_csv(g_quad: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
     df = get_quadras_csv_df()
     if df is None:
         return g_quad
-
     if QUADRA_UID in g_quad.columns and QUADRA_UID in df.columns:
         return g_quad.merge(df, on=QUADRA_UID, how="left", suffixes=("", "_csv"))
     if QUADRA_ID in g_quad.columns and QUADRA_ID in df.columns:
@@ -920,7 +918,7 @@ def _simplify_to_geojson(gdf: "gpd.GeoDataFrame", simplify_tol: float, keep_cols
 
 
 # =============================================================================
-# CLICK HITTEST (fallback robusto)
+# CLICK HITTEST
 # =============================================================================
 def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_col: str) -> Optional[str]:
     if gdf is None or gdf.empty or not click_latlon:
@@ -1098,7 +1096,10 @@ def add_polygons_selectable(
             "fillColor": fill_color,
             "fillOpacity": fill_opacity,
         },
-        highlight_function=lambda _f: {"weight": base_weight + 1.4, "fillOpacity": min(fill_opacity + 0.12, 0.40)},
+        highlight_function=lambda _f: {
+            "weight": base_weight + 1.4,
+            "fillOpacity": min(fill_opacity + 0.12, 0.40),
+        },
         tooltip=tooltip_base,
     ).add_to(fg_base)
     fg_base.add_to(m)
@@ -1196,7 +1197,10 @@ def add_polygons_selectable_colored(
         pane=pane,
         smooth_factor=SMOOTH_FACTOR,
         style_function=_style,
-        highlight_function=lambda _f: {"weight": base_weight + 1.4, "fillOpacity": min(fill_opacity + 0.12, 1.0)},
+        highlight_function=lambda _f: {
+            "weight": base_weight + 1.4,
+            "fillOpacity": min(fill_opacity + 0.12, 1.0),
+        },
         tooltip=tooltip_base,
     ).add_to(fg_base)
     fg_base.add_to(m)
@@ -1249,9 +1253,7 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
     tooltip_raw = (map_state or {}).get("last_object_clicked_tooltip") or None
     click = (map_state or {}).get("last_clicked") if isinstance((map_state or {}).get("last_clicked"), dict) else None
 
-    # ------------------------------------------------------------------
-    # SUBPREF / DISTRITO / ISO / CENSO
-    # ------------------------------------------------------------------
+    # SUBPREF/DISTRITO/ISO/CENSO (mantido)
     if level in ("subpref", "distrito", "isocrona", "censo"):
         if level == "subpref":
             id_col = SUBPREF_ID
@@ -1321,9 +1323,7 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             _final_reset()
             return
 
-    # ------------------------------------------------------------------
-    # QUADRA (corrigido: ISO_ID ou CENSO_ID via QUADRA_PARENTS)
-    # ------------------------------------------------------------------
+    # QUADRA (mantido como estava no seu arquivo: via QUADRA_PARENTS)
     if level == "quadra":
         iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v is not None}
         if not iso_ids:
@@ -1334,7 +1334,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
 
         picked: Optional[str] = None
 
-        # 1) Tenta direto do objeto clicado
         obj = (map_state or {}).get("last_object_clicked") or None
         if isinstance(obj, dict):
             props = obj.get("properties") if isinstance(obj.get("properties"), dict) else obj
@@ -1344,7 +1343,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                 else:
                     picked = _id_to_str(props.get(QUADRA_ID)) or _id_to_str(props.get(id_col_map))
 
-        # 2) Fallback: hit-test geométrico no subset correto (por ISO ou por CENSO)
         g_show: Optional["gpd.GeoDataFrame"] = None
         if not picked and isinstance(click, dict):
             g_quad = read_layer("quadra")
@@ -1352,19 +1350,16 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                 if mode == "censo":
                     filter_ids: Set[str] = st.session_state.get("quadra_filter_uids", set()) or set()
                     filter_col: str = st.session_state.get("quadra_filter_col", CENSO_ID)
-                    # garante uso de coluna "censo_id" (ou a configurada) quando existir
                     if filter_col in g_quad.columns and filter_ids:
                         g_show = subset_by_id_multi(g_quad, filter_col, filter_ids)
                     else:
                         g_show = g_quad.iloc[0:0].copy()
                 else:
-                    # ✅ corrigido: não usar QUADRA_PARENT (inexistente); usar iso_id
                     g_show = subset_by_parent_multi(g_quad, QUADRA_PARENTS["iso"], iso_ids)
 
                 if g_show is not None and not g_show.empty and id_col_map in g_show.columns:
                     picked = pick_feature_id(g_show, click, id_col_map)
 
-        # 3) Último fallback: tooltip (quadra_id) se for único no subset (para UID)
         picked_tooltip = parse_tooltip_id(tooltip_raw)
         if not picked and picked_tooltip and g_show is not None and not g_show.empty:
             if id_col_map == QUADRA_UID and QUADRA_UID in g_show.columns and QUADRA_ID in g_show.columns:
@@ -1577,7 +1572,12 @@ def control_panel() -> None:
 
     if lvl == "isocrona":
         ok = len(st.session_state.get("selected_iso_ids", set()) or set()) > 0
-        st.button("Ajustar ao selecionado", use_container_width=True, disabled=not ok, on_click=lambda: (mark_ui_action(), _fit_selected_isos()))
+        st.button(
+            "Ajustar ao selecionado",
+            use_container_width=True,
+            disabled=not ok,
+            on_click=lambda: (mark_ui_action(), _fit_selected_isos()),
+        )
         st.radio(
             "Próximo nível",
             options=["Quadras", "Setor censitário"],
@@ -1586,22 +1586,52 @@ def control_panel() -> None:
             on_change=mark_ui_action,
         )
         st.session_state["iso_next_mode"] = "quadra" if st.session_state["_iso_next_ui"] == "Quadras" else "censo"
-        st.button("Prosseguir", use_container_width=True, disabled=not ok, on_click=lambda: (mark_ui_action(), _go_from_isos_next()))
+        st.button(
+            "Prosseguir",
+            use_container_width=True,
+            disabled=not ok,
+            on_click=lambda: (mark_ui_action(), _go_from_isos_next()),
+        )
 
     if lvl == "censo":
         okc = len(st.session_state.get("selected_censo_ids", set()) or set()) > 0
-        st.button("Ajustar ao selecionado", use_container_width=True, disabled=not okc, on_click=lambda: (mark_ui_action(), _fit_selected_censos()))
-        st.button("Prosseguir → Quadras (censo_id)", use_container_width=True, disabled=not okc, on_click=lambda: (mark_ui_action(), _go_from_censo_to_quadras()))
+        st.button(
+            "Ajustar ao selecionado",
+            use_container_width=True,
+            disabled=not okc,
+            on_click=lambda: (mark_ui_action(), _fit_selected_censos()),
+        )
+        st.button(
+            "Prosseguir → Quadras (censo_id)",
+            use_container_width=True,
+            disabled=not okc,
+            on_click=lambda: (mark_ui_action(), _go_from_censo_to_quadras()),
+        )
 
     if lvl == "quadra":
         okq = len(st.session_state.get("selected_quadra_ids", set()) or set()) > 0
-        st.button("Ajustar ao selecionado", use_container_width=True, disabled=not okq, on_click=lambda: (mark_ui_action(), _fit_selected_quadras()))
-        st.button("Ir para Lotes", use_container_width=True, disabled=not okq, on_click=lambda: (mark_ui_action(), _go_to_final()))
+        st.button(
+            "Ajustar ao selecionado",
+            use_container_width=True,
+            disabled=not okq,
+            on_click=lambda: (mark_ui_action(), _fit_selected_quadras()),
+        )
+        st.button(
+            "Ir para Lotes",
+            use_container_width=True,
+            disabled=not okq,
+            on_click=lambda: (mark_ui_action(), _go_to_final()),
+        )
 
     if lvl == "final":
         okq = len(st.session_state.get("selected_quadra_ids", set()) or set()) > 0
         st.caption("Lotes são carregados somente para as quadras selecionadas.")
-        st.button("Recarregar Lotes selecionados", use_container_width=True, disabled=not okq, on_click=lambda: (mark_ui_action(), _final_reset()))
+        st.button(
+            "Recarregar Lotes selecionados",
+            use_container_width=True,
+            disabled=not okq,
+            on_click=lambda: (mark_ui_action(), _final_reset()),
+        )
 
 
 # =============================================================================
@@ -1716,9 +1746,11 @@ def render_map_panel() -> None:
             st.session_state["last_level"] = "distrito"
 
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-        add_parent_fill(m, g_parent, "Subpref selecionada (sombra)",
-                        simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"],
-                        cache_key=f"parent:subpref:{sp}:{SIMPLIFY_TOL_BY_LEVEL['subpref']}")
+        add_parent_fill(
+            m, g_parent, "Subpref selecionada (sombra)",
+            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"],
+            cache_key=f"parent:subpref:{sp}:{SIMPLIFY_TOL_BY_LEVEL['subpref']}",
+        )
         add_polygons_selectable(
             m, g_show, "Distritos", DIST_ID,
             tooltip_col=DIST_ID,
@@ -1751,13 +1783,17 @@ def render_map_panel() -> None:
             st.session_state["last_level"] = "isocrona"
 
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-        add_parent_fill(m, g_parent, "Distrito selecionado (sombra)",
-                        simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
-                        cache_key=f"parent:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}")
+        add_parent_fill(
+            m, g_parent, "Distrito selecionado (sombra)",
+            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
+            cache_key=f"parent:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}",
+        )
 
         g_show_viz = g_show.copy()
         if ISO_CLASS_COL in g_show_viz.columns:
-            tmp = g_show_viz[ISO_CLASS_COL].apply(lambda v: pd.Series(iso_label_color(v), index=["__iso_label", "__iso_color"]))
+            tmp = g_show_viz[ISO_CLASS_COL].apply(
+                lambda v: pd.Series(iso_label_color(v), index=["__iso_label", "__iso_color"])
+            )
             g_show_viz["__iso_color"] = tmp["__iso_color"]
         else:
             g_show_viz["__iso_color"] = ISO_DEFAULT_COLOR
@@ -1843,7 +1879,11 @@ def render_map_panel() -> None:
         filter_col: str = st.session_state.get("quadra_filter_col", CENSO_ID)
 
         sel_nq = len(st.session_state.get("selected_quadra_ids", set()) or set())
-        title = f"Quadras — selecionadas: {sel_nq}" if mode != "censo" else f"Quadras (filtradas por censo_id) — selecionadas: {sel_nq}"
+        title = (
+            f"Quadras — selecionadas: {sel_nq}"
+            if mode != "censo"
+            else f"Quadras (filtradas por censo_id) — selecionadas: {sel_nq}"
+        )
 
         g_quad = read_layer("quadra")
         g_iso = read_layer("iso")
@@ -1852,14 +1892,14 @@ def render_map_panel() -> None:
 
         g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
 
-        # qual ID o mapa usa
+        # ID do mapa/click
         if mode == "censo":
             id_col_map = QUADRA_ID
         else:
             id_col_map = QUADRA_UID if QUADRA_UID in g_quad.columns else QUADRA_ID
         st.session_state["_quadra_id_col_map"] = id_col_map
 
-        # ✅ g_show (corrigido: usar QUADRA_PARENTS; sem QUADRA_PARENT)
+        # ✅ g_show por duas vias
         if mode == "censo":
             if QUADRA_PARENTS["censo"] not in g_quad.columns:
                 st.error("Quadras.parquet não tem a coluna 'censo_id'.")
@@ -1870,6 +1910,9 @@ def render_map_panel() -> None:
             else:
                 g_show = subset_by_id_multi(g_quad, QUADRA_PARENTS["censo"], filter_ids)
         else:
+            if QUADRA_PARENTS["iso"] not in g_quad.columns:
+                st.error("Quadras.parquet não tem a coluna 'iso_id'.")
+                st.stop()
             g_show = subset_by_parent_multi(g_quad, QUADRA_PARENTS["iso"], iso_ids)
 
         if st.session_state.get("last_level") != "quadra":
@@ -2002,4 +2045,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
