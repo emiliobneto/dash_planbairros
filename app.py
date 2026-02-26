@@ -1509,17 +1509,22 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             g_quad = read_layer("quadra")
             if g_quad is not None:
                 if mode == "censo":
-                    filter_ids: Set[str] = st.session_state.get("quadra_filter_uids", set()) or set()
-                    censo_col = QUADRA_PARENTS["censo"]
-                    if censo_col in g_quad.columns and filter_ids:
-                        g_show = subset_by_id_multi(g_quad, censo_col, filter_ids)
+                    filter_ids: Set[str] = ensure_set_of_str(st.session_state.get("quadra_filter_uids", set()))
+                    parent_col = choose_quadra_parent_col(g_quad, preferred=CENSO_ID, fallback=ISO_ID)
+                
+                    if parent_col == CENSO_ID:
+                        if filter_ids:
+                            g_show = subset_by_id_multi(g_quad, CENSO_ID, filter_ids)
+                        else:
+                            g_show = g_quad.iloc[0:0].copy()
+                    elif parent_col == ISO_ID:
+                        # fallback: quadras sem censo_id -> filtra por iso_id
+                        g_show = subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
                     else:
                         g_show = g_quad.iloc[0:0].copy()
                 else:
+                    # caminho ISO -> QUADRAS (inalterado)
                     g_show = subset_by_parent_multi(g_quad, QUADRA_PARENTS["iso"], iso_ids)
-
-                if g_show is not None and not g_show.empty and id_col_map in g_show.columns:
-                    picked = pick_feature_id(g_show, click, id_col_map)
 
         # 3) tooltip fallback
         picked_tooltip = parse_tooltip_id(tooltip_raw)
@@ -2078,6 +2083,13 @@ def render_map_panel() -> None:
         if mode == "censo":
             # preferir CENSO_ID; se não existir, cair para ISO_ID
             parent_col = choose_quadra_parent_col(g_quad, preferred=CENSO_ID, fallback=ISO_ID)
+
+                # ✅ INSIRA ESTE BLOCO AQUI (logo após definir parent_col)
+            if st.session_state.get("debug_schema", False):
+                st.write("[debug] quadra mode=censo parent_col escolhido:", parent_col)
+                st.write("[debug] quadra filter_ids (setores):", len(filter_ids))
+                st.write("[debug] quadra iso_ids:", len(iso_ids))
+        
             if parent_col is None:
                 st.error(f"Quadras.parquet precisa ter '{CENSO_ID}' ou '{ISO_ID}'. Colunas: {list(g_quad.columns)}")
                 st.stop()
@@ -2249,6 +2261,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
