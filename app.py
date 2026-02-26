@@ -391,9 +391,11 @@ def _final_reset() -> None:
     st.session_state["_final_lotes_gdf"] = None
 
 
-def reset_to(level: str) -> None:
+# ✅ FIX: não zerar last_click_sig quando a troca de nível veio de um clique “single-select”
+def reset_to(level: str, *, clear_click_sig: bool = True) -> None:
     st.session_state["level"] = level
-    st.session_state["last_click_sig"] = ""
+    if clear_click_sig:
+        st.session_state["last_click_sig"] = ""
     _geojson_cache_reset()
     _final_reset()
 
@@ -1232,14 +1234,16 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
 
     if level == "subpref":
         st.session_state["selected_subpref_id"] = picked
-        reset_to("distrito")
+        # ✅ FIX: não limpar last_click_sig aqui, para não "reprocessar" clique antigo no próximo rerun
+        reset_to("distrito", clear_click_sig=False)
         st.session_state["selected_subpref_id"] = picked
         st.session_state["level"] = "distrito"
         return
 
     if level == "distrito":
         st.session_state["selected_distrito_id"] = picked
-        reset_to("isocrona")
+        # ✅ FIX: idem
+        reset_to("isocrona", clear_click_sig=False)
         st.session_state["level"] = "isocrona"
         return
 
