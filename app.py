@@ -312,6 +312,47 @@ def choose_quadra_parent_col(
     if fallback in g_quad.columns:
         return fallback
     return None
+
+def get_quadras_subset_for_mode(
+    g_quad: "gpd.GeoDataFrame",
+    *,
+    mode: str,
+    iso_ids: Set[str],
+    filter_censo_ids: Set[str],
+) -> "gpd.GeoDataFrame":
+    """
+    Retorna o subset de quadras que deve estar 'clicável' e/ou renderizado
+    no nível quadra, respeitando o modo:
+      - mode == 'censo': tenta filtrar por censo_id; se não existir, fallback por iso_id
+      - mode != 'censo': filtra por iso_id
+    """
+    if g_quad is None or g_quad.empty:
+        return g_quad.iloc[0:0].copy()
+
+    # normaliza inputs
+    iso_ids = ensure_set_of_str(iso_ids)
+    filter_censo_ids = ensure_set_of_str(filter_censo_ids)
+
+    if mode == "censo":
+        parent_col = choose_quadra_parent_col(g_quad, preferred=CENSO_ID, fallback=ISO_ID)
+
+        if parent_col == CENSO_ID:
+            if not filter_censo_ids:
+                return g_quad.iloc[0:0].copy()
+            return subset_by_id_multi(g_quad, CENSO_ID, filter_censo_ids)
+
+        if parent_col == ISO_ID:
+            if not iso_ids:
+                return g_quad.iloc[0:0].copy()
+            return subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
+
+        return g_quad.iloc[0:0].copy()
+
+    # modo padrão (iso -> quadras)
+    if not iso_ids:
+        return g_quad.iloc[0:0].copy()
+    return subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
+
 # =============================================================================
 # HEADER / CSS
 # =============================================================================
@@ -809,9 +850,6 @@ def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
 
 
 def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
-    """
-    Lê layer e mantém cache em sessão com validação por (path, mtime, size).
-    """
     try:
         p = ensure_local_layer(layer_key)
     except Exception as e:
@@ -841,10 +879,22 @@ def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
     g = normalize_id_cols(g, LAYER_ID_COLS.get(layer_key, []))
 
     if layer_key == "quadra":
+        # quadra_id padronizado
         if QUADRA_ID in g.columns:
             g[QUADRA_ID] = g[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
+
+        # iso_id em string “limpa”
+        if ISO_ID in g.columns:
+            g[ISO_ID] = g[ISO_ID].map(_id_to_str)
+
+        # gera UID se possível
         if ISO_ID in g.columns and QUADRA_ID in g.columns:
             g[QUADRA_UID] = [make_quadra_uid(i, q) for i, q in zip(g[ISO_ID], g[QUADRA_ID])]
+
+        # ✅ validação (apenas debug) para detectar incompatibilidade de iso_id
+        if st.session_state.get("debug_schema", False) and ISO_ID in g.columns:
+            sample = g[ISO_ID].dropna().astype(str).head(10).tolist()
+            st.write("[debug] quadra iso_id sample:", sample)
 
     cache[layer_key] = g
     cache_meta[layer_key] = meta
@@ -1395,16 +1445,11 @@ def _click_signature(picked_id: str, click: Optional[Dict[str, Any]]) -> str:
 
 
 def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool = True) -> None:
-    """
-    Consumo robusto de clique:
-    - last_object_clicked -> tooltip -> hit-test geométrico
-    - suporta seleção multi via toggle nos níveis ISO/CENSO/QUADRA
-    """
     if not allow_click:
         return
 
     tooltip_raw = (map_state or {}).get("last_object_clicked_tooltip") or None
-    click = (map_state or {}).get("last_clicked") if isinstance((map_state or {}).get("last_clicked"), dict) else None
+    click = (map_state or {}).get("last_clicked") if isinstance((map_state or {}).get("last_clicked"), dict) else Nonene
 
     # ------------------------------------------------------------------
     # SUBPREF / DISTRITO / ISO / CENSO
@@ -1482,18 +1527,17 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
     # ------------------------------------------------------------------
     # QUADRA
     # ------------------------------------------------------------------
-    if level == "quadra":
-        # precisa de isócronas selecionadas para consistência do fluxo
+     if level == "quadra":
         iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v is not None}
         if not iso_ids:
             return
 
-        mode = st.session_state.get("iso_next_mode", "quadra")  # "quadra" | "censo"
+        mode = st.session_state.get("iso_next_mode", "quadra")
         id_col_map = st.session_state.get("_quadra_id_col_map", QUADRA_UID)
 
         picked: Optional[str] = None
 
-        # 1) tenta do objeto clicado
+        # 1) tenta obter do objeto clicado (mais rápido)
         obj = (map_state or {}).get("last_object_clicked") or None
         if isinstance(obj, dict):
             props = obj.get("properties") if isinstance(obj.get("properties"), dict) else obj
@@ -1501,32 +1545,25 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                 if id_col_map == QUADRA_UID:
                     picked = _id_to_str(props.get(QUADRA_UID)) or make_quadra_uid(props.get(ISO_ID), props.get(QUADRA_ID))
                 else:
-                    picked = _id_to_str(props.get(QUADRA_ID)) or _id_to_str(props.get(id_col_map))
+                    picked = _id_to_str(props.get(id_col_map)) or _id_to_str(props.get(QUADRA_ID))
 
-        # 2) hittest geométrico no subset correto
+        # 2) hittest geométrico no subset correto (✅ faltava isso funcionar de ponta a ponta)
         g_show: Optional["gpd.GeoDataFrame"] = None
         if not picked and isinstance(click, dict):
             g_quad = read_layer("quadra")
             if g_quad is not None:
-                if mode == "censo":
-                    filter_ids: Set[str] = ensure_set_of_str(st.session_state.get("quadra_filter_uids", set()))
-                    parent_col = choose_quadra_parent_col(g_quad, preferred=CENSO_ID, fallback=ISO_ID)
-                
-                    if parent_col == CENSO_ID:
-                        if filter_ids:
-                            g_show = subset_by_id_multi(g_quad, CENSO_ID, filter_ids)
-                        else:
-                            g_show = g_quad.iloc[0:0].copy()
-                    elif parent_col == ISO_ID:
-                        # fallback: quadras sem censo_id -> filtra por iso_id
-                        g_show = subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
-                    else:
-                        g_show = g_quad.iloc[0:0].copy()
-                else:
-                    # caminho ISO -> QUADRAS (inalterado)
-                    g_show = subset_by_parent_multi(g_quad, QUADRA_PARENTS["iso"], iso_ids)
+                filter_censo_ids = ensure_set_of_str(st.session_state.get("quadra_filter_uids", set()))
+                g_show = get_quadras_subset_for_mode(
+                    g_quad,
+                    mode=mode,
+                    iso_ids=iso_ids,
+                    filter_censo_ids=filter_censo_ids,
+                )
 
-        # 3) tooltip fallback
+                if g_show is not None and not g_show.empty and id_col_map in g_show.columns:
+                    picked = pick_feature_id(g_show, click, id_col_map)
+
+        # 3) tooltip fallback (mantém sua lógica, mas só faz sentido se g_show existir)
         picked_tooltip = parse_tooltip_id(tooltip_raw)
         if not picked and picked_tooltip and g_show is not None and not g_show.empty:
             if id_col_map == QUADRA_UID and QUADRA_UID in g_show.columns and QUADRA_ID in g_show.columns:
@@ -2261,6 +2298,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
