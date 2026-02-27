@@ -1900,11 +1900,11 @@ def control_panel() -> None:
 
     if lvl == "final":
         okq = len(st.session_state.get("selected_quadra_ids", set()) or set()) > 0
-        st.caption("Lotes são carregados somente para as quadras selecionadas.")
+        st.caption("Lotes.")
         st.button(
-            "Recarregar Lotes selecionados",
+            "Carregar Lotes", 
             use_container_width=True,
-            disabled=not okq,
+            disabled=False,
             on_click=lambda: (mark_ui_action(), _final_reset()),
         )
 
@@ -2018,89 +2018,38 @@ def _canonicalize_lote_schema(g: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
     return g
 
 
-def _read_lotes_for_selected_quadras(selected_quad_ids: Set[str]) -> Optional["gpd.GeoDataFrame"]:
+def _read_lotes_for_selected_isos(selected_iso_ids: Set[str]) -> Optional["gpd.GeoDataFrame"]:
     """
-    Carrega lotes apenas para as quadras selecionadas.
-
-    Estratégia:
-    - tenta leitura parcial (columns + filters)
-    - fallback: columns (sem filters)
-    - se falhar: força re-download e tenta novamente
+    Carrega lotes filtrando por iso_id (único modo a partir de agora).
     """
-    # 0) garante arquivo local
     try:
         p = ensure_local_layer("lote")
     except Exception as e:
         st.error(str(e))
         return None
 
-    # 1) converte seleção -> quadra_id canônico
-    quadra_ids = _quadra_ids_from_selected(selected_quad_ids)  # <- corrigido aqui
-    if not quadra_ids:
+    iso_ids = ensure_set_of_str(selected_iso_ids)
+    if not iso_ids:
         return None
 
-    # 2) cache
-    sig = "|".join(sorted(list(quadra_ids)))
-    if st.session_state.get("final_loaded", False) and st.session_state.get("final_load_sig") == sig:
-        return st.session_state.get("_final_lotes_gdf")
+    cols = [ISO_ID, QUADRA_ID, LOTE_ID, "geometry"]
+    filters = [(ISO_ID, "in", sorted(list(iso_ids)))]
 
-    cols = [QUADRA_ID, LOTE_ID, "geometry"]
-    filters = _make_parquet_filters_for_quadras(quadra_ids)
-
-    def _try_partial_read(path: Path) -> Optional["gpd.GeoDataFrame"]:
-        g = read_gdf_parquet_filtered(str(path), columns=cols, filters=filters)
-        if g is not None and not g.empty:
-            return g
-
-        g = read_gdf_parquet_filtered(str(path), columns=cols, filters=None)
-        if g is not None and not g.empty:
-            return g
-
-        return None
-
-    g = _try_partial_read(p)
-
-    # força re-download em caso de falha (mitiga cache com download incompleto)
-    if g is None:
-        try:
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                pass
-            p = ensure_local_layer("lote")
-            g = _try_partial_read(p)
-        except Exception as e:
-            st.error(f"Falha ao rebaixar Lotes.parquet: {e}")
-            g = None
-
+    g = read_gdf_parquet_filtered(str(p), columns=cols, filters=filters)
     if g is None or g.empty:
-        st.warning("Não foi possível ler Lotes.parquet (parquet inválido, corrompido ou incompatível).")
-        st.session_state["_final_lotes_gdf"] = None
-        st.session_state["final_loaded"] = False
-        st.session_state["final_load_sig"] = sig
+        g = read_gdf_parquet_filtered(str(p), columns=cols, filters=None)
+    if g is None or g.empty:
         return None
 
     g = _canonicalize_lote_schema(g)
 
-    if QUADRA_ID not in g.columns:
-        st.error(f"Lotes.parquet não contém a coluna obrigatória '{QUADRA_ID}'. Colunas: {list(g.columns)}")
-        st.session_state["_final_lotes_gdf"] = None
-        st.session_state["final_loaded"] = False
-        st.session_state["final_load_sig"] = sig
+    # garante iso_id normalizado e filtra (garantia)
+    if ISO_ID not in g.columns:
+        st.error(f"Lotes.parquet não contém a coluna obrigatória '{ISO_ID}'. Colunas: {list(g.columns)}")
         return None
 
-    # filtro final em memória (garantia)
-    g = g[g[QUADRA_ID].isin(list(quadra_ids))].copy()
-
-    if st.session_state.get("debug_schema", False):
-        st.write("[debug] lotes geometry unit:", _detect_geometry_unit(g))
-        st.write("[debug] lotes filtrados shape:", getattr(g, "shape", None))
-        st.write("[debug] lotes cols:", list(g.columns))
-        st.write("[debug] lotes path:", str(p))
-
-    st.session_state["_final_lotes_gdf"] = g
-    st.session_state["final_loaded"] = True
-    st.session_state["final_load_sig"] = sig
+    g[ISO_ID] = g[ISO_ID].map(_id_to_str)
+    g = g[g[ISO_ID].isin(list(iso_ids))].copy()
     return g
 
 # =============================================================================
@@ -2440,32 +2389,43 @@ def render_map_panel() -> None:
             )
 
     else:
-        # FINAL
-        title = "Lotes (filtrado por quadras selecionadas)"
-        sel_ids: Set[str] = st.session_state.get("selected_quadra_ids", set()) or set()
+        # FINAL (apenas por isócronas selecionadas)
+        title = "Lotes (filtrado por isócronas selecionadas)"
 
-        m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
+        iso_ids: Set[str] = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
+        iso_ids_sorted = sorted([v for v in iso_ids if v])  # garante lista estável/sem vazios
 
-        if not sel_ids:
-            st.warning("Selecione ao menos uma quadra para visualizar lotes.")
+        m = make_carto_map(center=st.session_state.get("view_center", (-23.55, -46.63)),
+                           zoom=st.session_state.get("view_zoom", 11))
+
+        if not iso_ids_sorted:
+            st.warning("Selecione ao menos uma isócrona para visualizar lotes.")
         else:
-            g_lote = _read_lotes_for_selected_quadras(sel_ids)
-            if g_lote is not None and not g_lote.empty:
+            g_lote = _read_lotes_for_selected_isos(set(iso_ids_sorted))
+
+            if g_lote is None or getattr(g_lote, "empty", True):
+                st.warning("Nenhum lote encontrado para as isócronas selecionadas (ou falha de leitura).")
+            else:
+                # ajusta visão ao entrar no nível final (ou na primeira renderização com dados)
                 if st.session_state.get("last_level") != "final":
                     set_view_to_gdf(g_lote, bump=0, zmax=19)
                     st.session_state["last_level"] = "final"
+
+                # id/tooltip robustos
+                lote_id_col = LOTE_ID if (LOTE_ID in g_lote.columns) else (QUADRA_ID if QUADRA_ID in g_lote.columns else ISO_ID)
+                tooltip_col = lote_id_col
 
                 add_polygons_selectable(
                     m,
                     g_lote,
                     "Lotes",
-                    LOTE_ID if LOTE_ID in g_lote.columns else QUADRA_ID,
-                    tooltip_col=LOTE_ID if LOTE_ID in g_lote.columns else QUADRA_ID,
+                    lote_id_col,
+                    tooltip_col=tooltip_col,
                     selected_ids=set(),
                     fill_opacity=0.08,
-                    tooltip_prefix="Lote: " if LOTE_ID in g_lote.columns else "Quadra: ",
-                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
-                    cache_key=f"lote:{st.session_state.get('final_load_sig','')}:{SIMPLIFY_TOL_BY_LEVEL['lote']}",
+                    tooltip_prefix="Lote: " if lote_id_col == LOTE_ID else ("Quadra: " if lote_id_col == QUADRA_ID else "Isócrona: "),
+                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL.get("lote", 0.00012),
+                    cache_key=f"loteISO:{'|'.join(iso_ids_sorted)}:{SIMPLIFY_TOL_BY_LEVEL.get('lote', 0.00012)}",
                 )
             else:
                 st.warning("Nenhum lote encontrado para as quadras selecionadas (ou falha de leitura).")
@@ -2536,6 +2496,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
