@@ -53,19 +53,19 @@ SMOOTH_FACTOR = 1.0
 LINE_CAP = "round"
 LINE_JOIN = "round"
 
-PARENT_FILL_OPACITY = 0.16
+PARENT_FILL_OPACITY = 0.20
 PARENT_STROKE_OPACITY = 0.35
 PARENT_STROKE_WEIGHT = 0.7
 PARENT_STROKE_DASH = "2,6"
 
 # ✅ Simplificação > 0 para reduzir payload e evitar timeouts do componente em deploy
 SIMPLIFY_TOL_BY_LEVEL = {
-    "subpref": 0.0012,
-    "distrito": 0.0008,
-    "isocrona": 0.0006,
-    "censo": 0.00035,
-    "quadra": 0.00025,
-    "lote": 0.00012,
+    "subpref": 0.0000,
+    "distrito": 0.0000,
+    "isocrona": 0.0000,
+    "censo": 0.00000,
+    "quadra": 0.00000,
+    "lote": 0.00000,
 }
 
 # =============================================================================
@@ -2494,6 +2494,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
