@@ -2220,7 +2220,7 @@ def render_map_panel() -> None:
             g_show_viz["__iso_color"] = list(colors)
         else:
             g_show_viz["__iso_label"] = "Sem classe"
-    g_show_viz["__iso_color"] = ISO_DEFAULT_COLOR
+            g_show_viz["__iso_color"] = ISO_DEFAULT_COLOR
 
         if st.session_state.get("variable") == "Isócronas (classes)":
             add_polygons_selectable_colored(
@@ -2523,6 +2523,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
