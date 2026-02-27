@@ -651,42 +651,62 @@ def _get_secret(key: str) -> str:
 
 
 def extract_drive_id(raw: str) -> str:
+    """
+    Extrai FILE_ID de:
+      - ID puro
+      - links /file/d/<id>/...
+      - links ?id=<id>
+      - links do tipo open?id=<id>
+      - links uc?export=download&id=<id>
+
+    Retorna "" se não conseguir extrair.
+    """
     raw = (raw or "").strip()
     if not raw:
         return ""
+
+    # ID puro
     if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", raw) and "http" not in raw.lower():
         return raw
-    m = _DRIVE_ID_RE_1.search(raw)
+
+    # padrões comuns
+    m = re.search(r"/file/d/([a-zA-Z0-9_-]+)", raw)
     if m:
         return m.group(1)
-    m = _DRIVE_ID_RE_2.search(raw)
+
+    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", raw)
     if m:
         return m.group(1)
+
+    # fallback agressivo: pega um token grande
     m = re.search(r"([a-zA-Z0-9_-]{20,})", raw)
     return m.group(1) if m else ""
 
 
 def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path:
     """
-    Download via Google Drive com token de confirmação (para arquivos grandes).
+    Download via Google Drive com:
+      - diagnóstico (status/URL final/content-type)
+      - suporte a token de confirmação para arquivos grandes
+      - detecção de "HTML salvo no lugar do parquet" (permissão/link incorreto)
 
-    Melhoria:
-    - mensagens de erro mais claras (status code + url)
-    - fallback de URL
+    Levanta RuntimeError com mensagem útil quando falhar.
     """
     import requests  # local import
 
     file_id = extract_drive_id(file_id_or_url)
     if not file_id:
-        raise RuntimeError(f"FILE_ID inválido (não foi possível extrair ID do link): {file_id_or_url!r}")
+        raise RuntimeError(f"FILE_ID inválido: não foi possível extrair ID de: {file_id_or_url!r}")
 
     dst.parent.mkdir(parents=True, exist_ok=True)
+
+    # se já existe e tem tamanho, retorna
     if dst.exists() and dst.stat().st_size > 0:
         return dst
 
     session = requests.Session()
 
-    # URL principal (uc export)
+    # Endpoint mais estável para download
     url = "https://drive.google.com/uc"
     params = {"export": "download", "id": file_id}
 
@@ -697,32 +717,33 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
         return None
 
     # 1) primeira tentativa
-    response = session.get(url, params=params, stream=True, allow_redirects=True)
-    token = get_confirm_token(response)
+    resp = session.get(url, params=params, stream=True, allow_redirects=True, timeout=120)
+    token = get_confirm_token(resp)
+
+    # 2) se houver token de confirmação (arquivos grandes), tenta com confirm
     if token:
         params2 = {"export": "download", "id": file_id, "confirm": token}
-        response = session.get(url, params=params2, stream=True, allow_redirects=True)
+        resp = session.get(url, params=params2, stream=True, allow_redirects=True, timeout=120)
 
-    # 2) valida resposta antes de gravar
-    if response.status_code != 200:
-        final_url = getattr(response, "url", url)
-        # Conteúdo às vezes vem como HTML (página de erro do Google)
-        ct = response.headers.get("Content-Type", "")
+    # 3) valida status
+    if resp.status_code != 200:
+        final_url = getattr(resp, "url", url)
+        ct = resp.headers.get("Content-Type", "")
         raise RuntimeError(
-            f"Download falhou para '{label or dst.name}' (status={response.status_code}). "
+            f"Download falhou para '{label or dst.name}' (HTTP {resp.status_code}). "
             f"URL={final_url} Content-Type={ct}. "
-            f"Verifique se o arquivo do Drive está público (ou se o ID está correto)."
+            f"Possíveis causas: link/ID incorreto, arquivo removido/movido, ou permissões (não público)."
         )
 
-    total = int(response.headers.get("Content-Length", 0) or 0)
-    chunk = 1024 * 1024
+    total = int(resp.headers.get("Content-Length", 0) or 0)
+    chunk = 1024 * 1024  # 1MB
 
     ui_label = label or dst.name
     prog = st.progress(0, text=f"Baixando {ui_label}…")
     downloaded = 0
 
     with open(dst, "wb") as f:
-        for part in response.iter_content(chunk_size=chunk):
+        for part in resp.iter_content(chunk_size=chunk):
             if not part:
                 continue
             f.write(part)
@@ -733,22 +754,22 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
 
     prog.empty()
 
-    # Se o Google devolveu HTML de erro, o arquivo baixado tende a ser pequeno e começa com "<!DOCTYPE html>"
+    # 4) sanity check: às vezes o Drive devolve HTML (página de erro) e salva como arquivo "parquet"
     try:
-        if dst.stat().st_size < 200_000:  # 200 KB
-            head = dst.read_bytes()[:200].lower()
+        size = dst.stat().st_size
+        if size < 300_000:  # 300KB (parquet real costuma ser maior; ajuste se necessário)
+            head = dst.read_bytes()[:512].lower()
             if b"<!doctype html" in head or b"<html" in head:
                 dst.unlink(missing_ok=True)
                 raise RuntimeError(
-                    f"Arquivo '{ui_label}' baixado do Drive parece ser uma página HTML de erro (não é parquet). "
-                    f"Cheque permissões/ID do Drive."
+                    f"Download de '{ui_label}' retornou HTML (não é parquet). "
+                    f"Verifique se o arquivo está público e se o ID do Drive está correto."
                 )
     except Exception:
-        # se der erro aqui, deixe propagar (melhor do que aceitar arquivo inválido)
+        # se o check falhar, prefira falhar explicitamente em vez de aceitar arquivo inválido
         raise
 
     return dst
-
 
 
 def get_drive_raw(layer_key: str) -> str:
@@ -774,15 +795,28 @@ def layer_available_locally(layer_key: str) -> bool:
     return p.exists() and p.stat().st_size > 0
 
 
-def ensure_local_layer(layer_key: str) -> Path:
+def ensure_local_layer(layer_key: str, *, force_redownload: bool = False) -> Path:
+    """
+    Garante que o layer esteja no cache local.
+    Ajuste: permite forçar re-download (útil quando o arquivo local ficou incompleto/corrompido).
+    """
     dst = local_layer_path(layer_key)
+
+    if force_redownload:
+        try:
+            dst.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     if layer_available_locally(layer_key):
         return dst
+
     raw = get_drive_raw(layer_key)
     if not raw:
         raise RuntimeError(
-            f"Layer '{layer_key}' não encontrada localmente em {dst.name} e não há FILE_ID/link configurado."
+            f"Layer '{layer_key}' não encontrada localmente ({dst.name}) e não há FILE_ID/link configurado."
         )
+
     return download_drive_file(raw, dst, label=dst.name)
 
 
@@ -2477,6 +2511,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
