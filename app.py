@@ -1605,8 +1605,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             return
 
         if level == "censo":
-            _toggle_in_set("selected_censo_ids", picked)
-            _final_reset()
             return
 
     # ------------------------------------------------------------------
@@ -1667,9 +1665,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
         if sig == st.session_state.get("last_click_sig", ""):
             return
         st.session_state["last_click_sig"] = sig
-    
-        _toggle_in_set("selected_quadra_ids", picked)
-        _final_reset()
         return
 
 
@@ -2541,6 +2536,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
