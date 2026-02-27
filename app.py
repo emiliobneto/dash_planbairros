@@ -2189,29 +2189,29 @@ def render_map_panel() -> None:
             cache_key=f"dist:sp:{sp}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}",
         )
 
-     elif level == "isocrona":
+    elif level == "isocrona":
         d = _id_to_str(st.session_state.get("selected_distrito_id"))
         if d is None:
             reset_to("distrito")
             return
-
+        
         sel_n = len(st.session_state.get("selected_iso_ids", set()) or set())
         title = f"Isócronas (Distrito {d}) — selecionadas: {sel_n}"
-
+        
         g_iso = read_layer("iso")
         g_dist = read_layer("dist")
         if g_iso is None or g_dist is None:
             st.stop()
-
+        
         g_parent = subset_by_id(g_dist, DIST_ID, d)
         g_show = subset_by_parent(g_iso, ISO_PARENT, d)
-
+        
         if st.session_state.get("last_level") != "isocrona":
             set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=0)
             st.session_state["last_level"] = "isocrona"
-
+        
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-
+        
         # ------------------------------------------------------------------
         # AJUSTE MÍNIMO (SÓ AQUI): "sombra" do distrito NÃO pode ser clicável
         # para não interceptar o clique das isócronas.
@@ -2223,7 +2223,7 @@ def render_map_panel() -> None:
             if not geojson:
                 geojson = _simplify_to_geojson(g_parent, simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"], keep_cols=[])
                 _session_geojson_set(key, geojson)
-
+        
             if geojson:
                 fg = folium.FeatureGroup(name="Distrito selecionado (sombra)", show=True)
                 folium.GeoJson(
@@ -2244,31 +2244,31 @@ def render_map_panel() -> None:
                 ).add_to(fg)
                 fg.add_to(m)
         # ------------------------------------------------------------------
-
+        
         g_show_viz = g_show.copy()
-
+        
         # Gera cor por classe de forma robusta (sem depender de apply->DataFrame)
         if ISO_CLASS_COL in g_show_viz.columns:
             pairs = g_show_viz[ISO_CLASS_COL].map(iso_label_color)  # retorna (label, color)
-
+        
             safe_pairs = []
             for p in pairs.tolist():
                 if isinstance(p, (tuple, list)) and len(p) == 2:
                     safe_pairs.append((str(p[0]), str(p[1])))
                 else:
                     safe_pairs.append(("Sem classe", ISO_DEFAULT_COLOR))
-
+        
             labels, colors = zip(*safe_pairs) if safe_pairs else ([], [])
             g_show_viz["__iso_label"] = list(labels)
             g_show_viz["__iso_color"] = list(colors)
         else:
             g_show_viz["__iso_label"] = "Sem classe"
             g_show_viz["__iso_color"] = ISO_DEFAULT_COLOR
-
+        
         # Reforço mínimo de contorno para garantir que a linha das isócronas apareça
         base_line_color = "#000000"
         base_line_weight = 1.2
-
+        
         if st.session_state.get("variable") == "Isócronas (classes)":
             add_polygons_selectable_colored(
                 m,
@@ -2574,6 +2574,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
