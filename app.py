@@ -1137,7 +1137,7 @@ def _session_geojson_set(key: str, value: str, max_items: int = 120) -> None:
 def _simplify_to_geojson(
     gdf: "gpd.GeoDataFrame",
     simplify_tol: float,
-    keep_cols: Optional[list[str]] = None,
+    keep_cols: Optional[List[str]] = None,
 ) -> str:
     """
     Converte GeoDataFrame em GeoJSON (string) com simplificação opcional.
@@ -1147,7 +1147,7 @@ def _simplify_to_geojson(
         return ""
 
     keep_cols = keep_cols or []
-    keep_cols = [c for c in keep_cols if c in gdf.columns]  # <- evita KeyError / geojson vazio
+    keep_cols = [c for c in keep_cols if c in gdf.columns]  # evita KeyError
 
     cols = keep_cols + ["geometry"]
     try:
@@ -2574,6 +2574,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
