@@ -1894,7 +1894,7 @@ def control_panel() -> None:
         st.button(
             "Ir para Lotes",
             use_container_width=True,
-            disabled=not okq,
+            disabled=False,
             on_click=lambda: (mark_ui_action(), _go_to_final()),
         )
 
@@ -2494,6 +2494,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
