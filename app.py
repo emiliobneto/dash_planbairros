@@ -2194,81 +2194,52 @@ def render_map_panel() -> None:
         if d is None:
             reset_to("distrito")
             return
-        
+
         sel_n = len(st.session_state.get("selected_iso_ids", set()) or set())
         title = f"Isócronas (Distrito {d}) — selecionadas: {sel_n}"
-        
+
         g_iso = read_layer("iso")
         g_dist = read_layer("dist")
         if g_iso is None or g_dist is None:
             st.stop()
-        
+
         g_parent = subset_by_id(g_dist, DIST_ID, d)
         g_show = subset_by_parent(g_iso, ISO_PARENT, d)
-        
+
         if st.session_state.get("last_level") != "isocrona":
             set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=0)
             st.session_state["last_level"] = "isocrona"
-        
+
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-        
-        # ------------------------------------------------------------------
-        # AJUSTE MÍNIMO (SÓ AQUI): "sombra" do distrito NÃO pode ser clicável
-        # para não interceptar o clique das isócronas.
-        # Não altera outros níveis pois não mexe em add_parent_fill global.
-        # ------------------------------------------------------------------
-        if folium is not None and g_parent is not None and not g_parent.empty:
-            key = f"parent:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}"
-            geojson = _session_geojson_get(key)
-            if not geojson:
-                geojson = _simplify_to_geojson(g_parent, simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"], keep_cols=[])
-                _session_geojson_set(key, geojson)
-        
-            if geojson:
-                fg = folium.FeatureGroup(name="Distrito selecionado (sombra)", show=True)
-                folium.GeoJson(
-                    data=geojson,
-                    pane="parent_fill",
-                    smooth_factor=SMOOTH_FACTOR,
-                    style_function=lambda _f: {
-                        "color": PB_BROWN,
-                        "weight": PARENT_STROKE_WEIGHT,
-                        "opacity": PARENT_STROKE_OPACITY,
-                        "dashArray": PARENT_STROKE_DASH,
-                        "lineCap": LINE_CAP,
-                        "lineJoin": LINE_JOIN,
-                        "fillColor": PB_BROWN,
-                        "fillOpacity": PARENT_FILL_OPACITY,
-                    },
-                    interactive=False,  # <-- A MUDANÇA-CHAVE (somente no nível isócronas)
-                ).add_to(fg)
-                fg.add_to(m)
-        # ------------------------------------------------------------------
-        
+        add_parent_fill(
+            m,
+            g_parent,
+            "Distrito selecionado (sombra)",
+            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
+            cache_key=f"parent:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}",
+        )
+
         g_show_viz = g_show.copy()
-        
+
         # Gera cor por classe de forma robusta (sem depender de apply->DataFrame)
         if ISO_CLASS_COL in g_show_viz.columns:
             pairs = g_show_viz[ISO_CLASS_COL].map(iso_label_color)  # retorna (label, color)
-        
+
+            # pairs pode ter NaN/None inesperado; protege
             safe_pairs = []
             for p in pairs.tolist():
                 if isinstance(p, (tuple, list)) and len(p) == 2:
                     safe_pairs.append((str(p[0]), str(p[1])))
                 else:
                     safe_pairs.append(("Sem classe", ISO_DEFAULT_COLOR))
-        
+
             labels, colors = zip(*safe_pairs) if safe_pairs else ([], [])
             g_show_viz["__iso_label"] = list(labels)
             g_show_viz["__iso_color"] = list(colors)
         else:
             g_show_viz["__iso_label"] = "Sem classe"
             g_show_viz["__iso_color"] = ISO_DEFAULT_COLOR
-        
-        # Reforço mínimo de contorno para garantir que a linha das isócronas apareça
-        base_line_color = "#000000"
-        base_line_weight = 1.2
-        
+
         if st.session_state.get("variable") == "Isócronas (classes)":
             add_polygons_selectable_colored(
                 m,
@@ -2278,8 +2249,6 @@ def render_map_panel() -> None:
                 fill_color_col="__iso_color",
                 selected_ids=st.session_state.get("selected_iso_ids", set()),
                 tooltip_col=ISO_ID,
-                base_color=base_line_color,     # <-- só afeta isócronas
-                base_weight=base_line_weight,   # <-- só afeta isócronas
                 fill_opacity=1.0,
                 selected_fill_opacity=0.0,
                 tooltip_prefix="Isócrona: ",
@@ -2295,8 +2264,6 @@ def render_map_panel() -> None:
                 ISO_ID,
                 selected_ids=st.session_state.get("selected_iso_ids", set()),
                 tooltip_col=ISO_ID,
-                base_color=base_line_color,     # <-- só afeta isócronas
-                base_weight=base_line_weight,   # <-- só afeta isócronas
                 fill_opacity=0.14,
                 selected_fill_opacity=0.0,
                 tooltip_prefix="Isócrona: ",
@@ -2574,6 +2541,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
