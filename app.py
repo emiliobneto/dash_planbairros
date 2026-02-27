@@ -2388,47 +2388,47 @@ def render_map_panel() -> None:
                 cache_key=f"quadB:{mode}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
             )
 
-    else:
-        # FINAL (apenas por isócronas selecionadas)
-        title = "Lotes (filtrado por isócronas selecionadas)"
-
-        iso_ids: Set[str] = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
-        iso_ids_sorted = sorted([v for v in iso_ids if v])  # garante lista estável/sem vazios
-
-        m = make_carto_map(center=st.session_state.get("view_center", (-23.55, -46.63)),
-                           zoom=st.session_state.get("view_zoom", 11))
-
-        if not iso_ids_sorted:
-            st.warning("Selecione ao menos uma isócrona para visualizar lotes.")
         else:
-            g_lote = _read_lotes_for_selected_isos(set(iso_ids_sorted))
-
-            if g_lote is None or getattr(g_lote, "empty", True):
-                st.warning("Nenhum lote encontrado para as isócronas selecionadas (ou falha de leitura).")
+            # FINAL (apenas por isócronas selecionadas)
+            title = "Lotes (filtrado por isócronas selecionadas)"
+    
+            iso_ids: Set[str] = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
+            iso_ids_sorted = sorted([v for v in iso_ids if v])  # garante lista estável/sem vazios
+    
+            m = make_carto_map(center=st.session_state.get("view_center", (-23.55, -46.63)),
+                               zoom=st.session_state.get("view_zoom", 11))
+    
+            if not iso_ids_sorted:
+                st.warning("Selecione ao menos uma isócrona para visualizar lotes.")
             else:
-                # ajusta visão ao entrar no nível final (ou na primeira renderização com dados)
-                if st.session_state.get("last_level") != "final":
-                    set_view_to_gdf(g_lote, bump=0, zmax=19)
-                    st.session_state["last_level"] = "final"
-
-                # id/tooltip robustos
-                lote_id_col = LOTE_ID if (LOTE_ID in g_lote.columns) else (QUADRA_ID if QUADRA_ID in g_lote.columns else ISO_ID)
-                tooltip_col = lote_id_col
-
-                add_polygons_selectable(
-                    m,
-                    g_lote,
-                    "Lotes",
-                    lote_id_col,
-                    tooltip_col=tooltip_col,
-                    selected_ids=set(),
-                    fill_opacity=0.08,
-                    tooltip_prefix="Lote: " if lote_id_col == LOTE_ID else ("Quadra: " if lote_id_col == QUADRA_ID else "Isócrona: "),
-                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL.get("lote", 0.00012),
-                    cache_key=f"loteISO:{'|'.join(iso_ids_sorted)}:{SIMPLIFY_TOL_BY_LEVEL.get('lote', 0.00012)}",
-                )
-        else:
-            st.warning("Nenhum lote encontrado para as quadras selecionadas (ou falha de leitura).")
+                g_lote = _read_lotes_for_selected_isos(set(iso_ids_sorted))
+    
+                if g_lote is None or getattr(g_lote, "empty", True):
+                    st.warning("Nenhum lote encontrado para as isócronas selecionadas (ou falha de leitura).")
+                else:
+                    # ajusta visão ao entrar no nível final (ou na primeira renderização com dados)
+                    if st.session_state.get("last_level") != "final":
+                        set_view_to_gdf(g_lote, bump=0, zmax=19)
+                        st.session_state["last_level"] = "final"
+    
+                    # id/tooltip robustos
+                    lote_id_col = LOTE_ID if (LOTE_ID in g_lote.columns) else (QUADRA_ID if QUADRA_ID in g_lote.columns else ISO_ID)
+                    tooltip_col = lote_id_col
+    
+                    add_polygons_selectable(
+                        m,
+                        g_lote,
+                        "Lotes",
+                        lote_id_col,
+                        tooltip_col=tooltip_col,
+                        selected_ids=set(),
+                        fill_opacity=0.08,
+                        tooltip_prefix="Lote: " if lote_id_col == LOTE_ID else ("Quadra: " if lote_id_col == QUADRA_ID else "Isócrona: "),
+                        simplify_tol=SIMPLIFY_TOL_BY_LEVEL.get("lote", 0.00012),
+                        cache_key=f"loteISO:{'|'.join(iso_ids_sorted)}:{SIMPLIFY_TOL_BY_LEVEL.get('lote', 0.00012)}",
+                    )
+            else:
+                st.warning("Nenhum lote encontrado para as quadras selecionadas (ou falha de leitura).")
 
     st.markdown(f"### {title}")
 
@@ -2496,6 +2496,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
