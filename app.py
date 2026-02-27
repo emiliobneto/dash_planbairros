@@ -2427,8 +2427,8 @@ def render_map_panel() -> None:
                     simplify_tol=SIMPLIFY_TOL_BY_LEVEL.get("lote", 0.00012),
                     cache_key=f"loteISO:{'|'.join(iso_ids_sorted)}:{SIMPLIFY_TOL_BY_LEVEL.get('lote', 0.00012)}",
                 )
-            else:
-                st.warning("Nenhum lote encontrado para as quadras selecionadas (ou falha de leitura).")
+        else:
+            st.warning("Nenhum lote encontrado para as quadras selecionadas (ou falha de leitura).")
 
     st.markdown(f"### {title}")
 
@@ -2496,6 +2496,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
