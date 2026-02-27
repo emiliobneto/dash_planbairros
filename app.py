@@ -265,9 +265,6 @@ def normalize_id_cols(gdf: "gpd.GeoDataFrame", cols: Iterable[str]) -> "gpd.GeoD
             g[c] = g[c].map(_id_to_str)
     return g
 
-from typing import Any, Iterable, Optional, Set
-
-
 def ensure_set_of_str(value: Any, *, drop_empty: bool = True) -> Set[str]:
     """
     Normaliza qualquer entrada razoável em `set[str]`.
@@ -1943,13 +1940,10 @@ def _read_lotes_for_selected_quadras(selected_quad_ids: Set[str]) -> Optional["g
     """
     Carrega lotes apenas para as quadras selecionadas.
 
-    Mudanças importantes (para evitar o erro do traceback):
-    - Não usa leitura completa via geopandas.read_parquet como fallback final, porque
-      se o parquet estiver corrompido/incompatível, isso quebra no deploy.
-    - Se a leitura parcial falhar, tenta:
-        (a) forçar re-download do arquivo (apagar e baixar de novo)
-        (b) tentar leitura parcial novamente
-    - Só se tudo falhar: retorna None com mensagem clara.
+    Estratégia:
+    - tenta leitura parcial (columns + filters)
+    - fallback: columns (sem filters)
+    - se falhar: força re-download e tenta novamente
     """
     # 0) garante arquivo local
     try:
@@ -1959,7 +1953,7 @@ def _read_lotes_for_selected_quadras(selected_quad_ids: Set[str]) -> Optional["g
         return None
 
     # 1) converte seleção -> quadra_id canônico
-    quadra_ids = _quadra_ids_from_selected(selected_quad_ids)
+    quadra_ids = _quadra_ids_from_selected(selected_quad_ids)  # <- corrigido aqui
     if not quadra_ids:
         return None
 
@@ -1972,37 +1966,25 @@ def _read_lotes_for_selected_quadras(selected_quad_ids: Set[str]) -> Optional["g
     filters = _make_parquet_filters_for_quadras(quadra_ids)
 
     def _try_partial_read(path: Path) -> Optional["gpd.GeoDataFrame"]:
-        # 1) melhor caso: columns + filters
         g = read_gdf_parquet_filtered(str(path), columns=cols, filters=filters)
         if g is not None and not g.empty:
             return g
 
-        # 2) fallback: columns apenas (sem filters) + filtro em memória depois
         g = read_gdf_parquet_filtered(str(path), columns=cols, filters=None)
         if g is not None and not g.empty:
             return g
 
         return None
 
-    # 3) primeira tentativa
     g = _try_partial_read(p)
 
-    # 4) Se falhou, é muito provável que o arquivo local esteja incompleto/corrompido.
-    #    Força re-download e tenta de novo.
+    # força re-download em caso de falha (mitiga cache com download incompleto)
     if g is None:
         try:
-            # apaga arquivo local para baixar novamente
             try:
-                p.unlink(missing_ok=True)  # py3.8+; ok no 3.11
+                p.unlink(missing_ok=True)
             except Exception:
-                # se unlink falhar, tenta truncar
-                try:
-                    with open(p, "wb") as f:
-                        f.write(b"")
-                except Exception:
-                    pass
-
-            # baixa novamente
+                pass
             p = ensure_local_layer("lote")
             g = _try_partial_read(p)
         except Exception as e:
@@ -2010,17 +1992,14 @@ def _read_lotes_for_selected_quadras(selected_quad_ids: Set[str]) -> Optional["g
             g = None
 
     if g is None or g.empty:
-        # Não cai em read_gdf_parquet() para evitar o crash do pyarrow no deploy.
         st.warning("Não foi possível ler Lotes.parquet (parquet inválido, corrompido ou incompatível).")
         st.session_state["_final_lotes_gdf"] = None
         st.session_state["final_loaded"] = False
         st.session_state["final_load_sig"] = sig
         return None
 
-    # 5) normaliza/corrige schema
     g = _canonicalize_lote_schema(g)
 
-    # 6) valida coluna essencial
     if QUADRA_ID not in g.columns:
         st.error(f"Lotes.parquet não contém a coluna obrigatória '{QUADRA_ID}'. Colunas: {list(g.columns)}")
         st.session_state["_final_lotes_gdf"] = None
@@ -2028,23 +2007,19 @@ def _read_lotes_for_selected_quadras(selected_quad_ids: Set[str]) -> Optional["g
         st.session_state["final_load_sig"] = sig
         return None
 
-    # 7) filtro final em memória (garantia)
+    # filtro final em memória (garantia)
     g = g[g[QUADRA_ID].isin(list(quadra_ids))].copy()
 
-    # debug opcional
     if st.session_state.get("debug_schema", False):
         st.write("[debug] lotes geometry unit:", _detect_geometry_unit(g))
         st.write("[debug] lotes filtrados shape:", getattr(g, "shape", None))
         st.write("[debug] lotes cols:", list(g.columns))
         st.write("[debug] lotes path:", str(p))
 
-    # 8) salva cache
     st.session_state["_final_lotes_gdf"] = g
     st.session_state["final_loaded"] = True
     st.session_state["final_load_sig"] = sig
     return g
-
-
 
 # =============================================================================
 # MAP RENDER (todos os níveis)
@@ -2289,7 +2264,7 @@ def render_map_panel() -> None:
             # preferir CENSO_ID; se não existir, cair para ISO_ID
             parent_col = choose_quadra_parent_col(g_quad, preferred=CENSO_ID, fallback=ISO_ID)
 
-                # ✅ INSIRA ESTE BLOCO AQUI (logo após definir parent_col)
+            # debug opcional
             if st.session_state.get("debug_schema", False):
                 st.write("[debug] quadra mode=censo parent_col escolhido:", parent_col)
                 st.write("[debug] quadra filter_ids (setores):", len(filter_ids))
@@ -2467,6 +2442,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
