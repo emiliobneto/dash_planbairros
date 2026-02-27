@@ -667,19 +667,28 @@ def extract_drive_id(raw: str) -> str:
 
 
 def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path:
-    """Download via Google Drive com token de confirmação (para arquivos grandes)."""
+    """
+    Download via Google Drive com token de confirmação (para arquivos grandes).
+
+    Melhoria:
+    - mensagens de erro mais claras (status code + url)
+    - fallback de URL
+    """
     import requests  # local import
 
     file_id = extract_drive_id(file_id_or_url)
     if not file_id:
-        raise RuntimeError("FILE_ID inválido (não foi possível extrair ID do link).")
+        raise RuntimeError(f"FILE_ID inválido (não foi possível extrair ID do link): {file_id_or_url!r}")
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() and dst.stat().st_size > 0:
         return dst
 
     session = requests.Session()
-    url = "https://drive.google.com/uc?export=download"
+
+    # URL principal (uc export)
+    url = "https://drive.google.com/uc"
+    params = {"export": "download", "id": file_id}
 
     def get_confirm_token(resp) -> Optional[str]:
         for k, v in resp.cookies.items():
@@ -687,13 +696,23 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
                 return v
         return None
 
-    response = session.get(url, params={"id": file_id}, stream=True)
+    # 1) primeira tentativa
+    response = session.get(url, params=params, stream=True, allow_redirects=True)
     token = get_confirm_token(response)
     if token:
-        response = session.get(url, params={"id": file_id, "confirm": token}, stream=True)
+        params2 = {"export": "download", "id": file_id, "confirm": token}
+        response = session.get(url, params=params2, stream=True, allow_redirects=True)
 
+    # 2) valida resposta antes de gravar
     if response.status_code != 200:
-        raise RuntimeError(f"Download falhou (status={response.status_code}).")
+        final_url = getattr(response, "url", url)
+        # Conteúdo às vezes vem como HTML (página de erro do Google)
+        ct = response.headers.get("Content-Type", "")
+        raise RuntimeError(
+            f"Download falhou para '{label or dst.name}' (status={response.status_code}). "
+            f"URL={final_url} Content-Type={ct}. "
+            f"Verifique se o arquivo do Drive está público (ou se o ID está correto)."
+        )
 
     total = int(response.headers.get("Content-Length", 0) or 0)
     chunk = 1024 * 1024
@@ -713,7 +732,23 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
                 prog.progress(pct, text=f"Baixando {ui_label}… {pct}%")
 
     prog.empty()
+
+    # Se o Google devolveu HTML de erro, o arquivo baixado tende a ser pequeno e começa com "<!DOCTYPE html>"
+    try:
+        if dst.stat().st_size < 200_000:  # 200 KB
+            head = dst.read_bytes()[:200].lower()
+            if b"<!doctype html" in head or b"<html" in head:
+                dst.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"Arquivo '{ui_label}' baixado do Drive parece ser uma página HTML de erro (não é parquet). "
+                    f"Cheque permissões/ID do Drive."
+                )
+    except Exception:
+        # se der erro aqui, deixe propagar (melhor do que aceitar arquivo inválido)
+        raise
+
     return dst
+
 
 
 def get_drive_raw(layer_key: str) -> str:
@@ -2442,6 +2477,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
