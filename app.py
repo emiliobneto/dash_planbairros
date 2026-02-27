@@ -2202,13 +2202,25 @@ def render_map_panel() -> None:
         )
 
         g_show_viz = g_show.copy()
+
+        # Gera cor por classe de forma robusta (sem depender de apply->DataFrame)
         if ISO_CLASS_COL in g_show_viz.columns:
-            tmp = g_show_viz[ISO_CLASS_COL].apply(
-                lambda v: pd.Series(iso_label_color(v), index=["__iso_label", "__iso_color"])
-            )
-            g_show_viz["__iso_color"] = tmp["__iso_color"]
+            pairs = g_show_viz[ISO_CLASS_COL].map(iso_label_color)  # retorna (label, color)
+        
+            # pairs pode ter NaN/None inesperado; protege
+            safe_pairs = []
+            for p in pairs.tolist():
+                if isinstance(p, (tuple, list)) and len(p) == 2:
+                    safe_pairs.append((str(p[0]), str(p[1])))
+                else:
+                    safe_pairs.append(("Sem classe", ISO_DEFAULT_COLOR))
+        
+            labels, colors = zip(*safe_pairs) if safe_pairs else ([], [])
+            g_show_viz["__iso_label"] = list(labels)
+            g_show_viz["__iso_color"] = list(colors)
         else:
-            g_show_viz["__iso_color"] = ISO_DEFAULT_COLOR
+            g_show_viz["__iso_label"] = "Sem classe"
+    g_show_viz["__iso_color"] = ISO_DEFAULT_COLOR
 
         if st.session_state.get("variable") == "Isócronas (classes)":
             add_polygons_selectable_colored(
@@ -2511,6 +2523,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
