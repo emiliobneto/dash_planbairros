@@ -612,9 +612,9 @@ SECRETS_KEYS = {
 FALLBACK_URLS = {
     "subpref": "https://drive.google.com/file/d/1vPY34cQLCoGfADpyOJjL9pNCYkVrmSZA/view?usp=drive_link",
     "dist": "https://drive.google.com/file/d/1K-t2BiSHN_D8De0oCFxzGdrEMhnGnh10/view?usp=drive_link",
-    "iso": "https://drive.google.com/file/d/1UQkswArEB_1MmPhGW_TgvLahR6dPvZXn/view?usp=drive_link",
+    "iso": "https://drive.google.com/file/d/1niPdWKfGp36jGnfaJOV3BjItY_E5geDp/view?usp=drive_link",
     "censo": "https://drive.google.com/file/d/1APp7fxT2mgTpegVisVyQwjTRWOPz6Rgn/view?usp=drive_link",
-    "od": "",
+    "od": "https://drive.google.com/file/d/18yFCikpYxSvH8sqh8qULq-nMFRo2CqL7/view?usp=drive_link",
     "quadra": "https://drive.google.com/file/d/1Ivy2PyGHqFgIxSMoK3N9oik2wr5v912U/view?usp=drive_link",
     "lote": "https://drive.google.com/file/d/1oTFAZff1mVAWD6KQTJSz45I6B6pi6ceP/view?usp=drive_link",
 }
