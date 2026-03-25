@@ -159,9 +159,6 @@ LOCAL_FILENAMES = {
     "lote": "Lotes.parquet",
 }
 
-# =============================================================================
-# NORMALIZAÇÃO DE COLUNAS / IDS
-# =============================================================================
 def _mk_aliases(base: str) -> Set[str]:
     b = base.strip()
     return {
@@ -174,7 +171,6 @@ def _mk_aliases(base: str) -> Set[str]:
         f" {b}",
     }
 
-
 COL_ALIASES: Dict[str, Set[str]] = {
     SUBPREF_ID: _mk_aliases(SUBPREF_ID),
     DIST_ID: _mk_aliases(DIST_ID),
@@ -185,54 +181,42 @@ COL_ALIASES: Dict[str, Set[str]] = {
     CENSO_ID: _mk_aliases(CENSO_ID) | {"cendo_id", "CENDO_ID", "setor_id", "id_setor", "codigo_setor", "cd_setor"},
 }
 
-
 def standardize_columns(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
     if gdf is None or gdf.empty:
         return gdf
-
     ren: Dict[str, str] = {}
     for c in gdf.columns:
         raw = str(c)
         cl = re.sub(r"\s+", " ", raw.strip())
         low = cl.lower()
-
         if raw != cl:
             ren[raw] = cl
-
         for canon, aliases in COL_ALIASES.items():
             aliases_norm = {a.strip() for a in aliases}
             aliases_low = {a.strip().lower() for a in aliases}
             if cl in aliases_norm or low in aliases_low:
                 ren[cl] = canon
-
     return gdf.rename(columns=ren)
-
 
 def _id_to_str(v: Any) -> Optional[str]:
     if v is None:
         return None
-
     if isinstance(v, str):
         s = v.strip()
         return s if s != "" else None
-
     try:
         if pd.isna(v):
             return None
     except Exception:
         pass
-
     if isinstance(v, bool):
         return str(v)
-
     if isinstance(v, int):
         return str(v)
-
     if isinstance(v, float):
         if v.is_integer():
             return str(int(v))
         return str(v).strip()
-
     s = str(v).strip()
     if s == "":
         return None
@@ -242,13 +226,11 @@ def _id_to_str(v: Any) -> Optional[str]:
             return core
     return s
 
-
 def normalize_quadra_id(v: Any, width: int = 6) -> Optional[str]:
     s = _id_to_str(v)
     if s is None:
         return None
     return s.zfill(width) if s.isdigit() else s
-
 
 def make_quadra_uid(iso_id: Any, quadra_id: Any) -> Optional[str]:
     iso = _id_to_str(iso_id)
@@ -256,7 +238,6 @@ def make_quadra_uid(iso_id: Any, quadra_id: Any) -> Optional[str]:
     if not iso or not qid:
         return None
     return f"{iso}__{qid}"
-
 
 def normalize_id_cols(gdf: "gpd.GeoDataFrame", cols: Iterable[str]) -> "gpd.GeoDataFrame":
     if gdf is None or gdf.empty:
@@ -267,16 +248,13 @@ def normalize_id_cols(gdf: "gpd.GeoDataFrame", cols: Iterable[str]) -> "gpd.GeoD
             g[c] = g[c].map(_id_to_str)
     return g
 
-
 def ensure_set_of_str(value: Any, *, drop_empty: bool = True) -> Set[str]:
     if value is None:
         return set()
-
     if isinstance(value, (set, list, tuple)):
         items: Iterable[Any] = value
     else:
         items = (value,)
-
     out: Set[str] = set()
     for x in items:
         s = _id_to_str(x)
@@ -287,6 +265,73 @@ def ensure_set_of_str(value: Any, *, drop_empty: bool = True) -> Set[str]:
         out.add(s)
     return out
 
+def first_non_null_value(gdf: "gpd.GeoDataFrame", col: str) -> Optional[str]:
+    if gdf is None or gdf.empty or col not in gdf.columns:
+        return None
+    try:
+        vals = gdf[col].dropna()
+        if len(vals) == 0:
+            return None
+        v = vals.iloc[0]
+        s = str(v).strip()
+        return s if s else None
+    except Exception:
+        return None
+
+def label_or_id(
+    gdf: "gpd.GeoDataFrame",
+    *,
+    label_col: str,
+    fallback_col: str,
+    fallback_prefix: str = "",
+) -> str:
+    label = first_non_null_value(gdf, label_col)
+    if label:
+        return label
+    fallback = first_non_null_value(gdf, fallback_col)
+    if fallback:
+        return f"{fallback_prefix}{fallback}"
+    return fallback_prefix.strip() or ""
+
+def subset_by_parent(child: "gpd.GeoDataFrame", parent_col: str, parent_val: Any) -> "gpd.GeoDataFrame":
+    if child is None or child.empty:
+        return child
+    if parent_col not in child.columns or parent_val is None:
+        return child.iloc[0:0].copy()
+    pv = _id_to_str(parent_val)
+    if pv is None:
+        return child.iloc[0:0].copy()
+    return child[child[parent_col] == pv]
+
+def subset_by_parent_multi(child: "gpd.GeoDataFrame", parent_col: str, parent_vals: Set[Any]) -> "gpd.GeoDataFrame":
+    if child is None or child.empty:
+        return child
+    if parent_col not in child.columns or not parent_vals:
+        return child.iloc[0:0].copy()
+    pset = {v for v in (_id_to_str(x) for x in parent_vals) if v is not None}
+    if not pset:
+        return child.iloc[0:0].copy()
+    return child[child[parent_col].isin(list(pset))]
+
+def subset_by_id(gdf: "gpd.GeoDataFrame", id_col: str, id_val: Any) -> "gpd.GeoDataFrame":
+    if gdf is None or gdf.empty:
+        return gdf
+    if id_col not in gdf.columns or id_val is None:
+        return gdf.iloc[0:0].copy()
+    iv = _id_to_str(id_val)
+    if iv is None:
+        return gdf.iloc[0:0].copy()
+    return gdf[gdf[id_col] == iv]
+
+def subset_by_id_multi(gdf: "gpd.GeoDataFrame", id_col: str, ids: Set[Any]) -> "gpd.GeoDataFrame":
+    if gdf is None or gdf.empty:
+        return gdf
+    if id_col not in gdf.columns or not ids:
+        return gdf.iloc[0:0].copy()
+    iset = {v for v in (_id_to_str(x) for x in ids) if v is not None}
+    if not iset:
+        return gdf.iloc[0:0].copy()
+    return gdf[gdf[id_col].isin(list(iset))]
 
 def choose_quadra_parent_col(
     g_quad: "gpd.GeoDataFrame",
@@ -302,11 +347,9 @@ def choose_quadra_parent_col(
         return fallback
     return None
 
-
 def get_quadras_subset_for_mode(
     g_quad: "gpd.GeoDataFrame",
     *,
-    mode: str,
     iso_ids: Set[str],
     filter_censo_ids: Set[str],
 ) -> "gpd.GeoDataFrame":
@@ -316,27 +359,15 @@ def get_quadras_subset_for_mode(
     iso_ids = ensure_set_of_str(iso_ids)
     filter_censo_ids = ensure_set_of_str(filter_censo_ids)
 
-    if mode == "censo":
-        parent_col = choose_quadra_parent_col(g_quad, preferred=CENSO_ID, fallback=ISO_ID)
+    parent_col = choose_quadra_parent_col(g_quad, preferred=CENSO_ID, fallback=ISO_ID)
 
-        if parent_col == CENSO_ID:
-            if not filter_censo_ids:
-                if ISO_ID in g_quad.columns and iso_ids:
-                    return subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
-                return g_quad.iloc[0:0].copy()
-            return subset_by_id_multi(g_quad, CENSO_ID, filter_censo_ids)
+    if parent_col == CENSO_ID and filter_censo_ids:
+        return subset_by_id_multi(g_quad, CENSO_ID, filter_censo_ids)
 
-        if parent_col == ISO_ID:
-            if not iso_ids:
-                return g_quad.iloc[0:0].copy()
-            return subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
+    if ISO_ID in g_quad.columns and iso_ids:
+        return subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
 
-        return g_quad.iloc[0:0].copy()
-
-    if not iso_ids:
-        return g_quad.iloc[0:0].copy()
-    return subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
-
+    return g_quad.iloc[0:0].copy()
 
 def get_censo_subset_for_isos(g_censo: "gpd.GeoDataFrame", iso_ids: Set[str]) -> "gpd.GeoDataFrame":
     if g_censo is None or g_censo.empty:
@@ -347,41 +378,6 @@ def get_censo_subset_for_isos(g_censo: "gpd.GeoDataFrame", iso_ids: Set[str]) ->
         return subset_by_parent_multi(g_censo, ISO_ID, iso_ids)
     return g_censo.iloc[0:0].copy()
 
-
-def first_non_null_value(gdf: "gpd.GeoDataFrame", col: str) -> Optional[str]:
-    if gdf is None or gdf.empty or col not in gdf.columns:
-        return None
-    try:
-        vals = gdf[col].dropna()
-        if len(vals) == 0:
-            return None
-        v = vals.iloc[0]
-        s = str(v).strip()
-        return s if s else None
-    except Exception:
-        return None
-
-
-def label_or_id(
-    gdf: "gpd.GeoDataFrame",
-    *,
-    label_col: str,
-    fallback_col: str,
-    fallback_prefix: str = "",
-) -> str:
-    label = first_non_null_value(gdf, label_col)
-    if label:
-        return label
-
-    fallback = first_non_null_value(gdf, fallback_col)
-    if fallback:
-        return f"{fallback_prefix}{fallback}"
-
-    return fallback_prefix.strip() or ""
-
-# =============================================================================
-# HEADER / CSS
-# =============================================================================
 def _logo_data_uri() -> str:
     if LOGO_PATH.exists():
         suf = LOGO_PATH.suffix.lstrip(".").lower()
@@ -392,7 +388,6 @@ def _logo_data_uri() -> str:
         "https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/"
         "logomark/streamlit-mark-color.png"
     )
-
 
 def inject_css() -> None:
     st.markdown(
@@ -432,7 +427,6 @@ def inject_css() -> None:
         unsafe_allow_html=True,
     )
 
-
 def render_header() -> None:
     st.markdown(
         f"""
@@ -449,11 +443,7 @@ def render_header() -> None:
         unsafe_allow_html=True,
     )
 
-# =============================================================================
-# STATE
-# =============================================================================
 MAP_KEY = "map_view"
-
 
 def init_state() -> None:
     st.session_state.setdefault("level", "subpref")
@@ -467,11 +457,6 @@ def init_state() -> None:
     st.session_state.setdefault("selected_od_ids", set())
     st.session_state.setdefault("selected_quadra_ids", set())
     st.session_state.setdefault("selected_lote_ids", set())
-
-    st.session_state.setdefault("iso_next_mode", "quadra")
-
-    st.session_state.setdefault("quadra_filter_col", CENSO_ID)
-    st.session_state.setdefault("quadra_filter_ids", set())
 
     st.session_state.setdefault("view_center", (-23.55, -46.63))
     st.session_state.setdefault("view_zoom", 11)
@@ -492,37 +477,25 @@ def init_state() -> None:
     st.session_state.setdefault("_current_lote_id_col", LOTE_ID)
 
     st.session_state.setdefault("variable", None)
-
     st.session_state.setdefault("selection_draw_mode", False)
 
-    st.session_state.setdefault("iso_view_censo", False)
-    st.session_state.setdefault("iso_view_od", False)
-    st.session_state.setdefault("iso_view_quadra", True)
-    st.session_state.setdefault("iso_view_lote", False)
-
+    # overlays do nível pós-isócrona
+    st.session_state.setdefault("post_iso_view", "quadra")
 
 def mark_ui_action() -> None:
     st.session_state["_ui_action_sig"] = int(st.session_state.get("_ui_action_sig", 0)) + 1
-
 
 def _geojson_cache_reset() -> None:
     st.session_state["_geojson_cache"] = {}
     st.session_state["_geojson_cache_order"] = []
 
-
-def reset_iso_overlays() -> None:
-    st.session_state["iso_view_censo"] = False
-    st.session_state["iso_view_od"] = False
-    st.session_state["iso_view_quadra"] = True
-    st.session_state["iso_view_lote"] = False
+def reset_post_iso_state() -> None:
+    st.session_state["post_iso_view"] = "quadra"
     st.session_state["selected_censo_ids"] = set()
     st.session_state["selected_od_ids"] = set()
     st.session_state["selected_quadra_ids"] = set()
     st.session_state["selected_lote_ids"] = set()
-    st.session_state["quadra_filter_col"] = CENSO_ID
-    st.session_state["quadra_filter_ids"] = set()
     st.session_state["_current_lote_id_col"] = LOTE_ID
-
 
 def reset_to(level: str, *, clear_click_sig: bool = True) -> None:
     st.session_state["level"] = level
@@ -535,8 +508,7 @@ def reset_to(level: str, *, clear_click_sig: bool = True) -> None:
         st.session_state["selected_subpref_id"] = None
         st.session_state["selected_distrito_id"] = None
         st.session_state["selected_iso_ids"] = set()
-        reset_iso_overlays()
-        st.session_state["iso_next_mode"] = "quadra"
+        reset_post_iso_state()
         st.session_state["view_center"] = (-23.55, -46.63)
         st.session_state["view_zoom"] = 11
         st.session_state["last_level"] = None
@@ -544,26 +516,14 @@ def reset_to(level: str, *, clear_click_sig: bool = True) -> None:
     elif level == "distrito":
         st.session_state["selected_distrito_id"] = None
         st.session_state["selected_iso_ids"] = set()
-        reset_iso_overlays()
-        st.session_state["iso_next_mode"] = "quadra"
+        reset_post_iso_state()
 
     elif level == "isocrona":
         st.session_state["selected_iso_ids"] = set()
-        reset_iso_overlays()
-        st.session_state["iso_next_mode"] = "quadra"
-
-    elif level == "censo":
-        st.session_state["selected_censo_ids"] = set()
-
-    elif level == "od":
-        st.session_state["selected_od_ids"] = set()
+        reset_post_iso_state()
 
     elif level == "quadra":
-        st.session_state["selected_quadra_ids"] = set()
-
-    elif level == "final":
-        st.session_state["selected_lote_ids"] = set()
-
+        reset_post_iso_state()
 
 def _prev_level(level: str) -> Optional[str]:
     if level == "subpref":
@@ -572,17 +532,15 @@ def _prev_level(level: str) -> Optional[str]:
         return "subpref"
     if level == "isocrona":
         return "distrito"
-    if level in ("censo", "od", "quadra", "final"):
+    if level == "quadra":
         return "isocrona"
     return None
-
 
 def _back_one_level() -> None:
     cur = st.session_state.get("level", "subpref")
     prev = _prev_level(cur)
     if prev:
         reset_to(prev)
-
 
 def _toggle_in_set(key: str, value: Any) -> None:
     s: Set[Any] = st.session_state.get(key, set()) or set()
@@ -592,36 +550,6 @@ def _toggle_in_set(key: str, value: Any) -> None:
         s.add(value)
     st.session_state[key] = s
 
-# =============================================================================
-# SANITIZE
-# =============================================================================
-def sanitize_level_state() -> None:
-    lvl = st.session_state.get("level", "subpref")
-
-    if lvl == "distrito" and _id_to_str(st.session_state.get("selected_subpref_id")) is None:
-        reset_to("subpref")
-        return
-
-    if lvl in ("isocrona", "censo", "od", "quadra", "final") and _id_to_str(st.session_state.get("selected_distrito_id")) is None:
-        reset_to("distrito")
-        return
-
-    if lvl in ("censo", "od", "quadra", "final"):
-        iso_ids = st.session_state.get("selected_iso_ids", set()) or set()
-        if not iso_ids:
-            reset_to("isocrona")
-            return
-
-    if lvl == "quadra":
-        id_col_map = st.session_state.get("_quadra_id_col_map", QUADRA_UID)
-        if id_col_map == QUADRA_UID:
-            qset = st.session_state.get("selected_quadra_ids", set()) or set()
-            if any(isinstance(x, str) and "__" not in x for x in qset):
-                st.session_state["selected_quadra_ids"] = set()
-
-# =============================================================================
-# DRIVE / LOCAL IO
-# =============================================================================
 SECRETS_KEYS = {
     "subpref": "PB_SUBPREF_FILE_ID",
     "dist": "PB_DISTRITO_FILE_ID",
@@ -642,46 +570,36 @@ FALLBACK_URLS = {
     "lote": "https://drive.google.com/file/d/1oTFAZff1mVAWD6KQTJSz45I6B6pi6ceP/view?usp=drive_link",
 }
 
-
 def _get_secret(key: str) -> str:
     try:
         return str(st.secrets.get(key, "")).strip()
     except Exception:
         return ""
 
-
 def extract_drive_id(raw: str) -> str:
     raw = (raw or "").strip()
     if not raw:
         return ""
-
     if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", raw) and "http" not in raw.lower():
         return raw
-
     m = re.search(r"/file/d/([a-zA-Z0-9_-]+)", raw)
     if m:
         return m.group(1)
-
     m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", raw)
     if m:
         return m.group(1)
-
     m = re.search(r"([a-zA-Z0-9_-]{20,})", raw)
     return m.group(1) if m else ""
-
 
 def _drive_download_candidates(file_id_or_url: str) -> List[str]:
     raw = (file_id_or_url or "").strip()
     file_id = extract_drive_id(raw)
     urls: List[str] = []
-
     if file_id:
         urls.append(f"https://drive.google.com/uc?export=download&id={file_id}")
         urls.append(f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t")
-
     if raw.lower().startswith("http"):
         urls.append(raw)
-
     seen = set()
     out = []
     for u in urls:
@@ -690,14 +608,12 @@ def _drive_download_candidates(file_id_or_url: str) -> List[str]:
             seen.add(u)
     return out
 
-
 def _looks_like_html(path: Path) -> bool:
     try:
         head = path.read_bytes()[:2048].lower()
         return b"<!doctype html" in head or b"<html" in head or b"<head" in head
     except Exception:
         return False
-
 
 def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path:
     import requests
@@ -708,7 +624,6 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
         raise RuntimeError(f"FILE_ID inválido: não foi possível extrair ID de: {file_id_or_url!r}")
 
     dst.parent.mkdir(parents=True, exist_ok=True)
-
     if dst.exists() and dst.stat().st_size > 0 and not _looks_like_html(dst):
         return dst
 
@@ -778,29 +693,23 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
 
     raise RuntimeError(str(last_error) if last_error else f"Falha ao baixar '{ui_label}'.")
 
-
 def get_drive_raw(layer_key: str) -> str:
     ui_key = f"drive_{layer_key}_raw"
     raw_ui = str(st.session_state.get(ui_key, "")).strip()
     if raw_ui:
         return raw_ui
-
     secret_key = SECRETS_KEYS.get(layer_key, "")
     raw_secret = _get_secret(secret_key) if secret_key else ""
     if raw_secret:
         return raw_secret
-
     return str(FALLBACK_URLS.get(layer_key, "")).strip()
-
 
 def local_layer_path(layer_key: str) -> Path:
     return DATA_CACHE_DIR / LOCAL_FILENAMES[layer_key]
 
-
 def layer_available_locally(layer_key: str) -> bool:
     p = local_layer_path(layer_key)
     return p.exists() and p.stat().st_size > 0 and not _looks_like_html(p)
-
 
 def ensure_local_layer(layer_key: str, *, force_redownload: bool = False) -> Path:
     dst = local_layer_path(layer_key)
@@ -829,41 +738,6 @@ def ensure_local_layer(layer_key: str, *, force_redownload: bool = False) -> Pat
             f"Detalhe: {e}"
         )
 
-
-def get_quadras_csv_raw() -> str:
-    raw_ui = str(st.session_state.get("drive_quadras_csv_raw", "")).strip()
-    if raw_ui:
-        return raw_ui
-    raw_secret = _get_secret(QUADRAS_CSV_SECRET_KEY) if QUADRAS_CSV_SECRET_KEY else ""
-    if raw_secret:
-        return raw_secret
-    return str(QUADRAS_CSV_FALLBACK_URL or "").strip()
-
-
-def quadras_csv_local_path() -> Path:
-    p1 = REPO_ROOT / QUADRAS_CSV_FILENAME
-    if p1.exists() and p1.stat().st_size > 0:
-        return p1
-    return DATA_CACHE_DIR / QUADRAS_CSV_FILENAME
-
-
-def ensure_local_quadras_csv() -> Path:
-    p = quadras_csv_local_path()
-    if p.exists() and p.stat().st_size > 0:
-        return p
-    raw = get_quadras_csv_raw()
-    dst = DATA_CACHE_DIR / QUADRAS_CSV_FILENAME
-    if not raw:
-        return dst
-    try:
-        return download_drive_file(raw, dst, label=dst.name)
-    except Exception as e:
-        st.warning(f"Não foi possível baixar {QUADRAS_CSV_FILENAME} do Drive: {e}")
-        return dst
-
-# =============================================================================
-# READ / FILTER
-# =============================================================================
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
 def read_gdf_parquet(path: str) -> Optional["gpd.GeoDataFrame"]:
     if gpd is None:
@@ -881,35 +755,15 @@ def read_gdf_parquet(path: str) -> Optional["gpd.GeoDataFrame"]:
         pass
     return gdf
 
-
-def read_gdf_parquet_filtered(
-    path: str,
-    *,
-    columns: Optional[List[str]] = None,
-    filters: Optional[Any] = None,
-) -> Optional["gpd.GeoDataFrame"]:
-    if gpd is None:
-        return None
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
+def read_df_csv(path: str) -> Optional[pd.DataFrame]:
     p = Path(path)
-    if not p.exists():
+    if not p.exists() or p.stat().st_size <= 0:
         return None
     try:
-        gdf = gpd.read_parquet(p, columns=columns, filters=filters)  # type: ignore[arg-type]
+        return pd.read_csv(p, dtype={QUADRA_ID: "string", ISO_ID: "string", CLUSTER_COL: "string"})
     except Exception:
-        try:
-            gdf = gpd.read_parquet(p, columns=columns)
-        except Exception:
-            return None
-
-    try:
-        if gdf.crs is None:
-            gdf = gdf.set_crs(4326, allow_override=True)
-        else:
-            gdf = gdf.to_crs(4326)
-    except Exception:
-        pass
-    return gdf
-
+        return None
 
 def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
     if gdf is None or gdf.empty:
@@ -921,7 +775,6 @@ def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
     except Exception:
         pass
     return gdf
-
 
 def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
     try:
@@ -966,63 +819,33 @@ def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
     st.session_state["_layer_cache_meta"] = cache_meta
     return g
 
+def get_quadras_csv_raw() -> str:
+    raw_ui = str(st.session_state.get("drive_quadras_csv_raw", "")).strip()
+    if raw_ui:
+        return raw_ui
+    raw_secret = _get_secret(QUADRAS_CSV_SECRET_KEY) if QUADRAS_CSV_SECRET_KEY else ""
+    if raw_secret:
+        return raw_secret
+    return ""
 
-def subset_by_parent(child: "gpd.GeoDataFrame", parent_col: str, parent_val: Any) -> "gpd.GeoDataFrame":
-    if child is None or child.empty:
-        return child
-    if parent_col not in child.columns or parent_val is None:
-        return child.iloc[0:0].copy()
-    pv = _id_to_str(parent_val)
-    if pv is None:
-        return child.iloc[0:0].copy()
-    return child[child[parent_col] == pv]
+def quadras_csv_local_path() -> Path:
+    p1 = REPO_ROOT / QUADRAS_CSV_FILENAME
+    if p1.exists() and p1.stat().st_size > 0:
+        return p1
+    return DATA_CACHE_DIR / QUADRAS_CSV_FILENAME
 
-
-def subset_by_parent_multi(child: "gpd.GeoDataFrame", parent_col: str, parent_vals: Set[Any]) -> "gpd.GeoDataFrame":
-    if child is None or child.empty:
-        return child
-    if parent_col not in child.columns or not parent_vals:
-        return child.iloc[0:0].copy()
-    pset = {v for v in (_id_to_str(x) for x in parent_vals) if v is not None}
-    if not pset:
-        return child.iloc[0:0].copy()
-    return child[child[parent_col].isin(list(pset))]
-
-
-def subset_by_id(gdf: "gpd.GeoDataFrame", id_col: str, id_val: Any) -> "gpd.GeoDataFrame":
-    if gdf is None or gdf.empty:
-        return gdf
-    if id_col not in gdf.columns or id_val is None:
-        return gdf.iloc[0:0].copy()
-    iv = _id_to_str(id_val)
-    if iv is None:
-        return gdf.iloc[0:0].copy()
-    return gdf[gdf[id_col] == iv]
-
-
-def subset_by_id_multi(gdf: "gpd.GeoDataFrame", id_col: str, ids: Set[Any]) -> "gpd.GeoDataFrame":
-    if gdf is None or gdf.empty:
-        return gdf
-    if id_col not in gdf.columns or not ids:
-        return gdf.iloc[0:0].copy()
-    iset = {v for v in (_id_to_str(x) for x in ids) if v is not None}
-    if not iset:
-        return gdf.iloc[0:0].copy()
-    return gdf[gdf[id_col].isin(list(iset))]
-
-# =============================================================================
-# CSV clusters
-# =============================================================================
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
-def read_df_csv(path: str) -> Optional[pd.DataFrame]:
-    p = Path(path)
-    if not p.exists() or p.stat().st_size <= 0:
-        return None
+def ensure_local_quadras_csv() -> Path:
+    p = quadras_csv_local_path()
+    if p.exists() and p.stat().st_size > 0:
+        return p
+    raw = get_quadras_csv_raw()
+    dst = DATA_CACHE_DIR / QUADRAS_CSV_FILENAME
+    if not raw:
+        return dst
     try:
-        return pd.read_csv(p, dtype={QUADRA_ID: "string", ISO_ID: "string", CLUSTER_COL: "string"})
+        return download_drive_file(raw, dst, label=dst.name)
     except Exception:
-        return None
-
+        return dst
 
 def get_quadras_csv_df() -> Optional[pd.DataFrame]:
     p = ensure_local_quadras_csv()
@@ -1046,20 +869,17 @@ def get_quadras_csv_df() -> Optional[pd.DataFrame]:
         df[QUADRA_UID] = [make_quadra_uid(i, q) for i, q in zip(df.get(ISO_ID, []), df.get(QUADRA_ID, []))]
     return df
 
-
 def attach_quadras_csv(g_quad: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
     if g_quad is None or g_quad.empty:
         return g_quad
     df = get_quadras_csv_df()
     if df is None:
         return g_quad
-
     if QUADRA_UID in g_quad.columns and QUADRA_UID in df.columns:
         return g_quad.merge(df, on=QUADRA_UID, how="left", suffixes=("", "_csv"))
     if QUADRA_ID in g_quad.columns and QUADRA_ID in df.columns:
         return g_quad.merge(df, on=QUADRA_ID, how="left", suffixes=("", "_csv"))
     return g_quad
-
 
 def _coerce_int(v: Any) -> Optional[int]:
     if v is None:
@@ -1079,12 +899,10 @@ def _coerce_int(v: Any) -> Optional[int]:
     except Exception:
         return None
 
-
 def cluster_color(code: Optional[int]) -> str:
     if code is None:
         return CLUSTER_NULL_COLOR
     return CLUSTER_COLOR_MAP.get(code, CLUSTER_NULL_COLOR)
-
 
 def iso_label_color(nova_class: Any) -> Tuple[str, str]:
     nc = _coerce_int(nova_class)
@@ -1097,13 +915,9 @@ def iso_label_color(nova_class: Any) -> Tuple[str, str]:
         return (f"Classe {k}", ISO_CLASSNUM_TO_COLOR.get(k, ISO_DEFAULT_COLOR))
     return ("Outros", ISO_DEFAULT_COLOR)
 
-# =============================================================================
-# GEOJSON cache LRU
-# =============================================================================
 def _session_geojson_get(key: str) -> Optional[str]:
     cache: Dict[str, str] = st.session_state.get("_geojson_cache", {})
     return cache.get(key)
-
 
 def _session_geojson_set(key: str, value: str, max_items: int = 120) -> None:
     cache: Dict[str, str] = st.session_state.get("_geojson_cache", {})
@@ -1127,7 +941,6 @@ def _session_geojson_set(key: str, value: str, max_items: int = 120) -> None:
     st.session_state["_geojson_cache"] = cache
     st.session_state["_geojson_cache_order"] = order
 
-
 def _simplify_to_geojson(
     gdf: "gpd.GeoDataFrame",
     simplify_tol: float,
@@ -1135,155 +948,24 @@ def _simplify_to_geojson(
 ) -> str:
     if gdf is None or gdf.empty:
         return ""
-
     keep_cols = keep_cols or []
     keep_cols = [c for c in keep_cols if c in gdf.columns]
-
     cols = keep_cols + ["geometry"]
     try:
         g = gdf[cols].copy()
     except Exception:
         return ""
-
     try:
         if simplify_tol and simplify_tol > 0:
             g["geometry"] = g.geometry.simplify(simplify_tol, preserve_topology=True)
     except Exception:
         pass
-
     g = _drop_bad_geoms(g)
-
     try:
         return g.to_json()
     except Exception:
         return ""
 
-# =============================================================================
-# CLICK HITTEST / DRAW
-# =============================================================================
-def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_col: str) -> Optional[str]:
-    if gdf is None or gdf.empty or not click_latlon:
-        return None
-    if id_col not in gdf.columns:
-        return None
-    if Point is None:
-        return None
-    lat = click_latlon.get("lat")
-    lng = click_latlon.get("lng")
-    if lat is None or lng is None:
-        return None
-
-    try:
-        pt = Point(lng, lat)
-        cand = gdf
-        try:
-            if hasattr(gdf, "sindex") and gdf.sindex is not None:
-                idx = list(gdf.sindex.intersection(pt.bounds))
-                if idx:
-                    cand = gdf.iloc[idx]
-        except Exception:
-            pass
-
-        hit = cand[cand.geometry.contains(pt)]
-        if hit.empty:
-            hit = cand[cand.geometry.intersects(pt)]
-        if hit.empty:
-            return None
-        return _id_to_str(hit.iloc[0][id_col])
-    except Exception:
-        return None
-
-
-def add_draw_tools(m) -> None:
-    if folium is None or Draw is None or m is None:
-        return
-
-    Draw(
-        export=False,
-        position="topleft",
-        draw_options={
-            "polyline": False,
-            "marker": False,
-            "circle": False,
-            "circlemarker": False,
-            "polygon": True,
-            "rectangle": True,
-        },
-        edit_options={"edit": False, "remove": True},
-    ).add_to(m)
-
-
-def _extract_drawn_geometry(map_state: Dict[str, Any]):
-    if not isinstance(map_state, dict):
-        return None
-
-    candidates = [
-        map_state.get("all_drawings"),
-        map_state.get("last_active_drawing"),
-        map_state.get("last_drawing"),
-    ]
-
-    for cand in candidates:
-        if not cand:
-            continue
-
-        if isinstance(cand, list) and len(cand) > 0:
-            last = cand[-1]
-            geom = last.get("geometry") if isinstance(last, dict) else None
-            if geom and shape is not None:
-                try:
-                    return shape(geom)
-                except Exception:
-                    pass
-
-        if isinstance(cand, dict):
-            geom = cand.get("geometry", cand)
-            if geom and shape is not None:
-                try:
-                    return shape(geom)
-                except Exception:
-                    pass
-
-    return None
-
-
-def select_features_by_geometry(
-    gdf: "gpd.GeoDataFrame",
-    geom,
-    id_col: str,
-    selection_state_key: str,
-    mode: str = "add",
-) -> None:
-    if gdf is None or gdf.empty or geom is None or id_col not in gdf.columns:
-        return
-
-    try:
-        hits = gdf[gdf.geometry.intersects(geom)]
-    except Exception:
-        return
-
-    ids = {_id_to_str(v) for v in hits[id_col].tolist()}
-    ids = {v for v in ids if v is not None}
-
-    if mode == "replace":
-        st.session_state[selection_state_key] = ids
-        return
-
-    current = ensure_set_of_str(st.session_state.get(selection_state_key, set()))
-    if mode == "toggle":
-        for v in ids:
-            if v in current:
-                current.remove(v)
-            else:
-                current.add(v)
-        st.session_state[selection_state_key] = current
-        return
-
-    st.session_state[selection_state_key] = current | ids
-
-# =============================================================================
-# FOLIUM HELPERS
-# =============================================================================
 def make_carto_map(center=(-23.55, -46.63), zoom=11):
     if folium is None:
         return None
@@ -1297,14 +979,12 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
         subdomains="abcd",
         max_zoom=20,
     ).add_to(m)
-
     try:
         folium.map.CustomPane("parent_fill", z_index=610).add_to(m)
         folium.map.CustomPane("detail_shapes", z_index=640).add_to(m)
     except Exception:
         pass
     return m
-
 
 def _mk_tooltip(id_col: str, prefix: str) -> Optional[Any]:
     if GeoJsonTooltip is None:
@@ -1317,7 +997,6 @@ def _mk_tooltip(id_col: str, prefix: str) -> Optional[Any]:
         localize=True,
         max_width=320,
     )
-
 
 def add_parent_fill(
     m,
@@ -1336,7 +1015,6 @@ def add_parent_fill(
 ) -> None:
     if folium is None or gdf is None or gdf.empty:
         return
-
     key = cache_key or f"parent:{name}:{simplify_tol}:{len(gdf)}"
     geojson = _session_geojson_get(key)
     if not geojson:
@@ -1344,7 +1022,6 @@ def add_parent_fill(
         _session_geojson_set(key, geojson)
     if not geojson:
         return
-
     fg = folium.FeatureGroup(name=name, show=True)
     folium.GeoJson(
         data=geojson,
@@ -1362,7 +1039,6 @@ def add_parent_fill(
         },
     ).add_to(fg)
     fg.add_to(m)
-
 
 def add_polygons_selectable(
     m,
@@ -1409,10 +1085,8 @@ def add_polygons_selectable(
         mini = gdf[keep + ["geometry"]].copy()
         for c in keep:
             mini[c] = mini[c].map(_id_to_str)
-
         geojson_base = _simplify_to_geojson(mini, simplify_tol=simplify_tol, keep_cols=keep)
         _session_geojson_set(key, geojson_base)
-
     if not geojson_base:
         return
 
@@ -1425,7 +1099,7 @@ def add_polygons_selectable(
         style_function=lambda _f: {
             "color": base_color,
             "weight": base_weight,
-            "opacity": 0.92,
+            "opacity": 0.95,
             "lineCap": LINE_CAP,
             "lineJoin": LINE_JOIN,
             "fillColor": fill_color,
@@ -1458,7 +1132,6 @@ def add_polygons_selectable(
                     },
                 ).add_to(fg_sel)
                 fg_sel.add_to(m)
-
 
 def add_polygons_selectable_colored(
     m,
@@ -1516,7 +1189,7 @@ def add_polygons_selectable_colored(
         return {
             "color": base_color,
             "weight": base_weight,
-            "opacity": 0.92,
+            "opacity": 0.95,
             "lineCap": LINE_CAP,
             "lineJoin": LINE_JOIN,
             "fillColor": fc,
@@ -1550,7 +1223,7 @@ def add_polygons_selectable_colored(
                     style_function=lambda _f: {
                         "color": selected_color,
                         "weight": selected_weight,
-                        "opacity": 0.98,
+                        "opacity": 0.99,
                         "lineCap": LINE_CAP,
                         "lineJoin": LINE_JOIN,
                         "fillColor": "#ffffff",
@@ -1559,89 +1232,20 @@ def add_polygons_selectable_colored(
                 ).add_to(fg_sel)
                 fg_sel.add_to(m)
 
-# =============================================================================
-# HELPERS DE OVERLAY A PARTIR DE ISÓCRONAS
-# =============================================================================
-def _overlay_modes_active() -> List[str]:
-    out = []
-    if st.session_state.get("iso_view_censo", False):
-        out.append("censo")
-    if st.session_state.get("iso_view_od", False):
-        out.append("od")
-    if st.session_state.get("iso_view_quadra", False):
-        out.append("quadra")
-    if st.session_state.get("iso_view_lote", False):
-        out.append("lote")
-    return out
-
-
-def _overlay_primary_mode() -> str:
-    active = _overlay_modes_active()
-    if active:
-        return active[0]
-    return "quadra"
-
-
-def _title_suffix_from_iso_overlays() -> str:
-    labels = []
-    if st.session_state.get("iso_view_censo", False):
-        labels.append("Setor censitário")
-    if st.session_state.get("iso_view_od", False):
-        labels.append("Zonas OD")
-    if st.session_state.get("iso_view_quadra", False):
-        labels.append("Quadras")
-    if st.session_state.get("iso_view_lote", False):
-        labels.append("Lotes")
-    if not labels:
-        return "Isócronas"
-    return " | ".join(labels)
-
-
 def _read_lotes_for_selected_isos(selected_iso_ids: Set[str]) -> Optional["gpd.GeoDataFrame"]:
-    try:
-        p = ensure_local_layer("lote")
-    except Exception as e:
-        st.error(str(e))
+    g = read_layer("lote")
+    if g is None or g.empty:
         return None
-
     iso_ids = ensure_set_of_str(selected_iso_ids)
     if not iso_ids:
         return None
-
-    cols = [ISO_ID, QUADRA_ID, LOTE_ID, "geometry"]
-    filters = [(ISO_ID, "in", sorted(list(iso_ids)))]
-
-    g = read_gdf_parquet_filtered(str(p), columns=cols, filters=filters)
-    if g is None or g.empty:
-        g = read_gdf_parquet_filtered(str(p), columns=cols, filters=None)
-    if g is None or g.empty:
-        return None
-
-    g = standardize_columns(g)
-    g = _drop_bad_geoms(g)
-    g = normalize_id_cols(g, [ISO_ID, QUADRA_ID, LOTE_ID])
-
-    if QUADRA_ID in g.columns:
-        g[QUADRA_ID] = g[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
-
-    try:
-        if g.crs is None:
-            g = g.set_crs(4326, allow_override=True)
-        else:
-            g = g.to_crs(4326)
-    except Exception:
-        pass
-
     if ISO_ID not in g.columns:
         st.error(f"Lotes.parquet não contém a coluna obrigatória '{ISO_ID}'. Colunas: {list(g.columns)}")
         return None
-
-    g[ISO_ID] = g[ISO_ID].map(_id_to_str)
     g = g[g[ISO_ID].isin(list(iso_ids))].copy()
-    return g
+    return g if not g.empty else None
 
-
-def build_iso_overlay_data() -> Dict[str, Any]:
+def build_post_iso_data() -> Dict[str, Any]:
     iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
     out: Dict[str, Any] = {
         "iso_ids": iso_ids,
@@ -1653,7 +1257,6 @@ def build_iso_overlay_data() -> Dict[str, Any]:
         "quadra_id_col": QUADRA_UID,
         "lote_id_col": LOTE_ID,
     }
-
     if not iso_ids:
         return out
 
@@ -1661,47 +1264,138 @@ def build_iso_overlay_data() -> Dict[str, Any]:
     if g_iso is not None:
         out["g_parent"] = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
 
-    if st.session_state.get("iso_view_censo", False):
-        g_censo = read_layer("censo")
-        if g_censo is not None:
-            out["g_censo"] = get_censo_subset_for_isos(g_censo, iso_ids)
+    g_censo = read_layer("censo")
+    if g_censo is not None:
+        out["g_censo"] = get_censo_subset_for_isos(g_censo, iso_ids)
 
-    if st.session_state.get("iso_view_od", False):
-        g_od = read_layer("od")
-        if g_od is not None and ISO_ID in g_od.columns:
-            out["g_od"] = subset_by_parent_multi(g_od, ISO_ID, iso_ids)
+    g_od = read_layer("od")
+    if g_od is not None:
+        if ISO_ID not in g_od.columns:
+            st.warning(f"ZonasOD.parquet sem coluna '{ISO_ID}'. Colunas encontradas: {list(g_od.columns)}")
+        else:
+            g_od_show = subset_by_parent_multi(g_od, ISO_ID, iso_ids)
+            out["g_od"] = g_od_show
 
-    if st.session_state.get("iso_view_quadra", False):
-        g_quad = read_layer("quadra")
-        if g_quad is not None:
-            censo_filter_ids = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
-            mode = "censo" if censo_filter_ids else "quadra"
-            g_quad_show = get_quadras_subset_for_mode(
-                g_quad,
-                mode=mode,
-                iso_ids=iso_ids,
-                filter_censo_ids=censo_filter_ids,
-            )
-            id_col = QUADRA_UID if QUADRA_UID in g_quad_show.columns and mode != "censo" else QUADRA_ID
-            if id_col not in g_quad_show.columns:
-                id_col = QUADRA_ID if QUADRA_ID in g_quad_show.columns else QUADRA_UID
-            out["g_quadra"] = g_quad_show
-            out["quadra_id_col"] = id_col
-            st.session_state["_quadra_id_col_map"] = id_col
+    g_quad = read_layer("quadra")
+    if g_quad is not None:
+        censo_ids = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
+        g_quad_show = get_quadras_subset_for_mode(
+            g_quad,
+            iso_ids=iso_ids,
+            filter_censo_ids=censo_ids,
+        )
+        id_col = QUADRA_UID if QUADRA_UID in g_quad_show.columns else QUADRA_ID
+        if id_col not in g_quad_show.columns:
+            id_col = QUADRA_ID if QUADRA_ID in g_quad_show.columns else QUADRA_UID
+        out["g_quadra"] = g_quad_show
+        out["quadra_id_col"] = id_col
+        st.session_state["_quadra_id_col_map"] = id_col
 
-    if st.session_state.get("iso_view_lote", False):
-        g_lote = _read_lotes_for_selected_isos(iso_ids)
-        if g_lote is not None and not g_lote.empty:
-            lote_id_col = LOTE_ID if LOTE_ID in g_lote.columns else (QUADRA_ID if QUADRA_ID in g_lote.columns else ISO_ID)
-            out["g_lote"] = g_lote
-            out["lote_id_col"] = lote_id_col
-            st.session_state["_current_lote_id_col"] = lote_id_col
+    g_lote = _read_lotes_for_selected_isos(iso_ids)
+    if g_lote is not None and not g_lote.empty:
+        lote_id_col = LOTE_ID if LOTE_ID in g_lote.columns else (QUADRA_ID if QUADRA_ID in g_lote.columns else ISO_ID)
+        out["g_lote"] = g_lote
+        out["lote_id_col"] = lote_id_col
+        st.session_state["_current_lote_id_col"] = lote_id_col
 
     return out
 
-# =============================================================================
-# CLICK / DRAW consumption
-# =============================================================================
+def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_col: str) -> Optional[str]:
+    if gdf is None or gdf.empty or not click_latlon:
+        return None
+    if id_col not in gdf.columns:
+        return None
+    if Point is None:
+        return None
+    lat = click_latlon.get("lat")
+    lng = click_latlon.get("lng")
+    if lat is None or lng is None:
+        return None
+    try:
+        pt = Point(lng, lat)
+        cand = gdf
+        try:
+            if hasattr(gdf, "sindex") and gdf.sindex is not None:
+                idx = list(gdf.sindex.intersection(pt.bounds))
+                if idx:
+                    cand = gdf.iloc[idx]
+        except Exception:
+            pass
+        hit = cand[cand.geometry.contains(pt)]
+        if hit.empty:
+            hit = cand[cand.geometry.intersects(pt)]
+        if hit.empty:
+            return None
+        return _id_to_str(hit.iloc[0][id_col])
+    except Exception:
+        return None
+
+def add_draw_tools(m) -> None:
+    if folium is None or Draw is None or m is None:
+        return
+    Draw(
+        export=False,
+        position="topleft",
+        draw_options={
+            "polyline": False,
+            "marker": False,
+            "circle": False,
+            "circlemarker": False,
+            "polygon": True,
+            "rectangle": True,
+        },
+        edit_options={"edit": False, "remove": True},
+    ).add_to(m)
+
+def _extract_drawn_geometry(map_state: Dict[str, Any]):
+    if not isinstance(map_state, dict):
+        return None
+    candidates = [
+        map_state.get("all_drawings"),
+        map_state.get("last_active_drawing"),
+        map_state.get("last_drawing"),
+    ]
+    for cand in candidates:
+        if not cand:
+            continue
+        if isinstance(cand, list) and len(cand) > 0:
+            last = cand[-1]
+            geom = last.get("geometry") if isinstance(last, dict) else None
+            if geom and shape is not None:
+                try:
+                    return shape(geom)
+                except Exception:
+                    pass
+        if isinstance(cand, dict):
+            geom = cand.get("geometry", cand)
+            if geom and shape is not None:
+                try:
+                    return shape(geom)
+                except Exception:
+                    pass
+    return None
+
+def select_features_by_geometry(
+    gdf: "gpd.GeoDataFrame",
+    geom,
+    id_col: str,
+    selection_state_key: str,
+    mode: str = "add",
+) -> None:
+    if gdf is None or gdf.empty or geom is None or id_col not in gdf.columns:
+        return
+    try:
+        hits = gdf[gdf.geometry.intersects(geom)]
+    except Exception:
+        return
+    ids = {_id_to_str(v) for v in hits[id_col].tolist()}
+    ids = {v for v in ids if v is not None}
+    if mode == "replace":
+        st.session_state[selection_state_key] = ids
+        return
+    current = ensure_set_of_str(st.session_state.get(selection_state_key, set()))
+    st.session_state[selection_state_key] = current | ids
+
 def _pick_id_from_last_object(map_state: Dict[str, Any], id_col: str) -> Optional[str]:
     obj = (map_state or {}).get("last_object_clicked")
     if not isinstance(obj, dict):
@@ -1710,7 +1404,6 @@ def _pick_id_from_last_object(map_state: Dict[str, Any], id_col: str) -> Optiona
     if not isinstance(props, dict):
         return None
     return _id_to_str(props.get(id_col))
-
 
 def parse_tooltip_id(tooltip: Any) -> Optional[str]:
     if not tooltip:
@@ -1724,7 +1417,6 @@ def parse_tooltip_id(tooltip: Any) -> Optional[str]:
     m2 = re.search(r"([A-Za-z0-9_-]+)\s*$", s)
     return _id_to_str(m2.group(1)) if m2 else None
 
-
 def _click_signature(picked_id: str, click: Optional[Dict[str, Any]]) -> str:
     lat = None
     lng = None
@@ -1737,7 +1429,6 @@ def _click_signature(picked_id: str, click: Optional[Dict[str, Any]]) -> str:
     except Exception:
         pass
     return f"{picked_id}|"
-
 
 def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool = True) -> None:
     if not allow_click:
@@ -1783,69 +1474,38 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             st.session_state["level"] = "isocrona"
             return
 
-    if level in ("isocrona", "censo", "od", "quadra", "final"):
-        primary = level if level != "final" else "lote"
+    if level == "isocrona":
+        picked = _pick_id_from_last_object(map_state, ISO_ID) or parse_tooltip_id(tooltip_raw)
 
-        if level == "isocrona":
-            picked = _pick_id_from_last_object(map_state, ISO_ID) or parse_tooltip_id(tooltip_raw)
+        if not picked and isinstance(click, dict):
+            d = _id_to_str(st.session_state.get("selected_distrito_id"))
+            if d is not None:
+                g = read_layer("iso")
+                if g is not None:
+                    g_show = subset_by_parent(g, ISO_PARENT, d)
+                    if g_show.empty and DIST_ID in g.columns:
+                        g2 = g.copy()
+                        g2[DIST_ID] = g2[DIST_ID].astype(str).str.strip()
+                        g_show = g2[g2[DIST_ID] == str(d).strip()].copy()
+                    picked = pick_feature_id(g_show, click, ISO_ID)
 
-            if not picked and isinstance(click, dict):
-                d = _id_to_str(st.session_state.get("selected_distrito_id"))
-                if d is not None:
-                    g = read_layer("iso")
-                    if g is not None:
-                        g_show = subset_by_parent(g, ISO_PARENT, d)
-                        if g_show.empty and DIST_ID in g.columns:
-                            g2 = g.copy()
-                            g2[DIST_ID] = g2[DIST_ID].astype(str).str.strip()
-                            g_show = g2[g2[DIST_ID] == str(d).strip()].copy()
-                        picked = pick_feature_id(g_show, click, ISO_ID)
-
-            if not picked:
-                return
-
-            sig = _click_signature(picked, click)
-            if sig == st.session_state.get("last_click_sig", ""):
-                return
-            st.session_state["last_click_sig"] = sig
-            _toggle_in_set("selected_iso_ids", picked)
+        if not picked:
             return
 
-        if primary == "censo":
-            iso_data = build_iso_overlay_data()
-            g_show = iso_data.get("g_censo")
-            picked = _pick_id_from_last_object(map_state, CENSO_ID) or parse_tooltip_id(tooltip_raw)
-            if not picked and isinstance(click, dict) and g_show is not None:
-                picked = pick_feature_id(g_show, click, CENSO_ID)
-            if not picked:
-                return
-            sig = _click_signature(picked, click)
-            if sig == st.session_state.get("last_click_sig", ""):
-                return
-            st.session_state["last_click_sig"] = sig
-            _toggle_in_set("selected_censo_ids", picked)
-            st.session_state["quadra_filter_ids"] = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
+        sig = _click_signature(picked, click)
+        if sig == st.session_state.get("last_click_sig", ""):
             return
+        st.session_state["last_click_sig"] = sig
+        _toggle_in_set("selected_iso_ids", picked)
+        return
 
-        if primary == "od":
-            iso_data = build_iso_overlay_data()
-            g_show = iso_data.get("g_od")
-            picked = _pick_id_from_last_object(map_state, OD_ID) or parse_tooltip_id(tooltip_raw)
-            if not picked and isinstance(click, dict) and g_show is not None:
-                picked = pick_feature_id(g_show, click, OD_ID)
-            if not picked:
-                return
-            sig = _click_signature(picked, click)
-            if sig == st.session_state.get("last_click_sig", ""):
-                return
-            st.session_state["last_click_sig"] = sig
-            _toggle_in_set("selected_od_ids", picked)
-            return
+    if level == "quadra":
+        post_view = st.session_state.get("post_iso_view", "quadra")
+        data = build_post_iso_data()
 
-        if primary == "quadra":
-            iso_data = build_iso_overlay_data()
-            g_show = iso_data.get("g_quadra")
-            id_col_map = iso_data.get("quadra_id_col", QUADRA_UID)
+        if post_view == "quadra":
+            g_show = data.get("g_quadra")
+            id_col_map = data.get("quadra_id_col", QUADRA_UID)
             picked = None
 
             obj = (map_state or {}).get("last_object_clicked") or None
@@ -1860,17 +1520,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             if not picked and isinstance(click, dict) and g_show is not None and id_col_map in g_show.columns:
                 picked = pick_feature_id(g_show, click, id_col_map)
 
-            picked_tooltip = parse_tooltip_id(tooltip_raw)
-            if not picked and picked_tooltip and g_show is not None and not g_show.empty:
-                if id_col_map == QUADRA_UID and QUADRA_UID in g_show.columns and QUADRA_ID in g_show.columns:
-                    qid = _id_to_str(picked_tooltip)
-                    if qid is not None:
-                        cand = g_show[g_show[QUADRA_ID] == qid]
-                        if len(cand) == 1:
-                            picked = _id_to_str(cand.iloc[0][QUADRA_UID])
-                elif id_col_map == QUADRA_ID and QUADRA_ID in g_show.columns:
-                    picked = _id_to_str(picked_tooltip)
-
             if not picked:
                 return
 
@@ -1881,24 +1530,48 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             _toggle_in_set("selected_quadra_ids", picked)
             return
 
-        if primary == "lote":
-            iso_data = build_iso_overlay_data()
-            g_show = iso_data.get("g_lote")
-            lote_id_col = iso_data.get("lote_id_col", LOTE_ID)
+        if post_view == "censo":
+            g_show = data.get("g_censo")
+            picked = _pick_id_from_last_object(map_state, CENSO_ID) or parse_tooltip_id(tooltip_raw)
+            if not picked and isinstance(click, dict) and g_show is not None:
+                picked = pick_feature_id(g_show, click, CENSO_ID)
+            if not picked:
+                return
+            sig = _click_signature(picked, click)
+            if sig == st.session_state.get("last_click_sig", ""):
+                return
+            st.session_state["last_click_sig"] = sig
+            _toggle_in_set("selected_censo_ids", picked)
+            return
 
+        if post_view == "od":
+            g_show = data.get("g_od")
+            picked = _pick_id_from_last_object(map_state, OD_ID) or parse_tooltip_id(tooltip_raw)
+            if not picked and isinstance(click, dict) and g_show is not None:
+                picked = pick_feature_id(g_show, click, OD_ID)
+            if not picked:
+                return
+            sig = _click_signature(picked, click)
+            if sig == st.session_state.get("last_click_sig", ""):
+                return
+            st.session_state["last_click_sig"] = sig
+            _toggle_in_set("selected_od_ids", picked)
+            return
+
+        if post_view == "lote":
+            g_show = data.get("g_lote")
+            lote_id_col = data.get("lote_id_col", LOTE_ID)
             picked = _pick_id_from_last_object(map_state, lote_id_col) or parse_tooltip_id(tooltip_raw)
             if not picked and isinstance(click, dict) and g_show is not None and lote_id_col in g_show.columns:
                 picked = pick_feature_id(g_show, click, lote_id_col)
             if not picked:
                 return
-
             sig = _click_signature(picked, click)
             if sig == st.session_state.get("last_click_sig", ""):
                 return
             st.session_state["last_click_sig"] = sig
             _toggle_in_set("selected_lote_ids", picked)
             return
-
 
 def consume_draw_selection(level: str, map_state: Dict[str, Any]) -> None:
     geom = _extract_drawn_geometry(map_state)
@@ -1911,98 +1584,48 @@ def consume_draw_selection(level: str, map_state: Dict[str, Any]) -> None:
     st.session_state["last_draw_sig"] = sig
 
     if level == "isocrona":
-        active = _overlay_modes_active()
-        if not active:
-            g = read_layer("iso")
-            d = _id_to_str(st.session_state.get("selected_distrito_id"))
-            if g is None or d is None:
-                return
-            g_show = subset_by_parent(g, ISO_PARENT, d)
-            if g_show.empty and DIST_ID in g.columns:
-                g2 = g.copy()
-                g2[DIST_ID] = g2[DIST_ID].astype(str).str.strip()
-                g_show = g2[g2[DIST_ID] == str(d).strip()].copy()
-            select_features_by_geometry(g_show, geom, ISO_ID, "selected_iso_ids", mode="add")
+        g = read_layer("iso")
+        d = _id_to_str(st.session_state.get("selected_distrito_id"))
+        if g is None or d is None:
             return
+        g_show = subset_by_parent(g, ISO_PARENT, d)
+        if g_show.empty and DIST_ID in g.columns:
+            g2 = g.copy()
+            g2[DIST_ID] = g2[DIST_ID].astype(str).str.strip()
+            g_show = g2[g2[DIST_ID] == str(d).strip()].copy()
+        select_features_by_geometry(g_show, geom, ISO_ID, "selected_iso_ids", mode="add")
+        return
 
-        primary = _overlay_primary_mode()
-        iso_data = build_iso_overlay_data()
+    if level == "quadra":
+        data = build_post_iso_data()
+        post_view = st.session_state.get("post_iso_view", "quadra")
 
-        if primary == "censo":
-            g_show = iso_data.get("g_censo")
-            if g_show is not None:
-                select_features_by_geometry(g_show, geom, CENSO_ID, "selected_censo_ids", mode="add")
-                st.session_state["quadra_filter_ids"] = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
-            return
-
-        if primary == "od":
-            g_show = iso_data.get("g_od")
-            if g_show is not None:
-                select_features_by_geometry(g_show, geom, OD_ID, "selected_od_ids", mode="add")
-            return
-
-        if primary == "quadra":
-            g_show = iso_data.get("g_quadra")
-            id_col_map = iso_data.get("quadra_id_col", QUADRA_UID)
+        if post_view == "quadra":
+            g_show = data.get("g_quadra")
+            id_col_map = data.get("quadra_id_col", QUADRA_UID)
             if g_show is not None and id_col_map in g_show.columns:
                 select_features_by_geometry(g_show, geom, id_col_map, "selected_quadra_ids", mode="add")
             return
 
-        if primary == "lote":
-            g_show = iso_data.get("g_lote")
-            lote_id_col = iso_data.get("lote_id_col", LOTE_ID)
+        if post_view == "censo":
+            g_show = data.get("g_censo")
+            if g_show is not None:
+                select_features_by_geometry(g_show, geom, CENSO_ID, "selected_censo_ids", mode="add")
+            return
+
+        if post_view == "od":
+            g_show = data.get("g_od")
+            if g_show is not None:
+                select_features_by_geometry(g_show, geom, OD_ID, "selected_od_ids", mode="add")
+            return
+
+        if post_view == "lote":
+            g_show = data.get("g_lote")
+            lote_id_col = data.get("lote_id_col", LOTE_ID)
             if g_show is not None and lote_id_col in g_show.columns:
                 select_features_by_geometry(g_show, geom, lote_id_col, "selected_lote_ids", mode="add")
             return
 
-    if level == "censo":
-        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
-        g = read_layer("censo")
-        if g is None:
-            return
-        g_show = get_censo_subset_for_isos(g, iso_ids)
-        select_features_by_geometry(g_show, geom, CENSO_ID, "selected_censo_ids", mode="add")
-        st.session_state["quadra_filter_ids"] = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
-        return
-
-    if level == "od":
-        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
-        g = read_layer("od")
-        if g is None:
-            return
-        g_show = subset_by_parent_multi(g, ISO_ID, iso_ids)
-        select_features_by_geometry(g_show, geom, OD_ID, "selected_od_ids", mode="add")
-        return
-
-    if level == "quadra":
-        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
-        g = read_layer("quadra")
-        if g is None:
-            return
-        filter_censo_ids = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
-        g_show = get_quadras_subset_for_mode(
-            g,
-            mode="censo" if filter_censo_ids else "quadra",
-            iso_ids=iso_ids,
-            filter_censo_ids=filter_censo_ids,
-        )
-        id_col_map = st.session_state.get("_quadra_id_col_map", QUADRA_UID)
-        if id_col_map not in g_show.columns:
-            id_col_map = QUADRA_ID
-        select_features_by_geometry(g_show, geom, id_col_map, "selected_quadra_ids", mode="add")
-        return
-
-    if level == "final":
-        iso_data = build_iso_overlay_data()
-        g_show = iso_data.get("g_lote")
-        lote_id_col = iso_data.get("lote_id_col", LOTE_ID)
-        if g_show is not None and lote_id_col in g_show.columns:
-            select_features_by_geometry(g_show, geom, lote_id_col, "selected_lote_ids", mode="add")
-        return
-
-# =============================================================================
-# UI: variável e navegação
-# =============================================================================
 def _variables_for_level(level: str) -> List[str]:
     if level == "subpref":
         return ["Subprefeituras"]
@@ -2010,16 +1633,9 @@ def _variables_for_level(level: str) -> List[str]:
         return ["Distritos"]
     if level == "isocrona":
         return ["Isócronas", "Isócronas (classes)"]
-    if level == "censo":
-        return ["Setor censitário"]
-    if level == "od":
-        return ["Zonas OD"]
     if level == "quadra":
-        return ["Quadras", "Cluster"]
-    if level == "final":
-        return ["Lotes"]
+        return ["Quadras", "Cluster", "Setor censitário", "Zonas OD", "Lotes"]
     return ["Nível"]
-
 
 def ensure_variable_for_level(level: str) -> None:
     opts = _variables_for_level(level)
@@ -2027,12 +1643,10 @@ def ensure_variable_for_level(level: str) -> None:
     if cur not in opts:
         st.session_state["variable"] = opts[0]
 
-
 def variable_panel() -> None:
     lvl = st.session_state.get("level", "subpref")
     ensure_variable_for_level(lvl)
     st.selectbox("Variável", options=_variables_for_level(lvl), key="variable", on_change=mark_ui_action)
-
 
 def bounds_center_zoom(gdf: "gpd.GeoDataFrame") -> Tuple[Tuple[float, float], int]:
     minx, miny, maxx, maxy = gdf.total_bounds
@@ -2050,7 +1664,6 @@ def bounds_center_zoom(gdf: "gpd.GeoDataFrame") -> Tuple[Tuple[float, float], in
         z = 11
     return center, z
 
-
 def set_view_to_gdf(gdf: "gpd.GeoDataFrame", bump: int = 0, zmax: int = 18) -> None:
     if gdf is None or gdf.empty:
         return
@@ -2061,7 +1674,6 @@ def set_view_to_gdf(gdf: "gpd.GeoDataFrame", bump: int = 0, zmax: int = 18) -> N
     except Exception:
         pass
 
-
 def _fit_selected_isos() -> None:
     iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
     if not iso_ids:
@@ -2071,72 +1683,42 @@ def _fit_selected_isos() -> None:
         return
     set_view_to_gdf(subset_by_id_multi(g_iso, ISO_ID, iso_ids), bump=0, zmax=18)
 
+def _fit_selected_post_level() -> None:
+    data = build_post_iso_data()
+    post_view = st.session_state.get("post_iso_view", "quadra")
 
-def _fit_selected_censos() -> None:
-    cids = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
-    if not cids:
+    if post_view == "quadra":
+        ids = ensure_set_of_str(st.session_state.get("selected_quadra_ids", set()))
+        g = data.get("g_quadra")
+        id_col = data.get("quadra_id_col", QUADRA_UID)
+        if g is not None and ids and id_col in g.columns:
+            set_view_to_gdf(subset_by_id_multi(g, id_col, ids), bump=1, zmax=19)
         return
-    g_censo = read_layer("censo")
-    if g_censo is None:
+
+    if post_view == "censo":
+        ids = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
+        g = data.get("g_censo")
+        if g is not None and ids:
+            set_view_to_gdf(subset_by_id_multi(g, CENSO_ID, ids), bump=0, zmax=18)
         return
-    set_view_to_gdf(subset_by_id_multi(g_censo, CENSO_ID, cids), bump=0, zmax=18)
 
-
-def _fit_selected_ods() -> None:
-    od_ids = ensure_set_of_str(st.session_state.get("selected_od_ids", set()))
-    if not od_ids:
+    if post_view == "od":
+        ids = ensure_set_of_str(st.session_state.get("selected_od_ids", set()))
+        g = data.get("g_od")
+        if g is not None and ids:
+            set_view_to_gdf(subset_by_id_multi(g, OD_ID, ids), bump=0, zmax=18)
         return
-    g_od = read_layer("od")
-    if g_od is None:
+
+    if post_view == "lote":
+        ids = ensure_set_of_str(st.session_state.get("selected_lote_ids", set()))
+        g = data.get("g_lote")
+        lote_id_col = data.get("lote_id_col", LOTE_ID)
+        if g is not None and ids and lote_id_col in g.columns:
+            set_view_to_gdf(subset_by_id_multi(g, lote_id_col, ids), bump=1, zmax=19)
         return
-    set_view_to_gdf(subset_by_id_multi(g_od, OD_ID, od_ids), bump=0, zmax=18)
 
-
-def _fit_selected_quadras() -> None:
-    qids = ensure_set_of_str(st.session_state.get("selected_quadra_ids", set()))
-    if not qids:
-        return
-    g_quad = read_layer("quadra")
-    if g_quad is None:
-        return
-    id_col = st.session_state.get("_quadra_id_col_map", QUADRA_UID)
-    if id_col not in g_quad.columns:
-        id_col = QUADRA_ID if QUADRA_ID in g_quad.columns else id_col
-    set_view_to_gdf(subset_by_id_multi(g_quad, id_col, qids), bump=1, zmax=19)
-
-
-def _fit_selected_lotes() -> None:
-    selected = ensure_set_of_str(st.session_state.get("selected_lote_ids", set()))
-    if not selected:
-        return
-    iso_data = build_iso_overlay_data()
-    g_lote = iso_data.get("g_lote")
-    lote_id_col = iso_data.get("lote_id_col", LOTE_ID)
-    if g_lote is None or lote_id_col not in g_lote.columns:
-        return
-    set_view_to_gdf(subset_by_id_multi(g_lote, lote_id_col, selected), bump=1, zmax=19)
-
-# =============================================================================
-# PAINEL
-# =============================================================================
-def _on_iso_overlay_change() -> None:
-    if st.session_state.get("iso_view_censo", False):
-        st.session_state["quadra_filter_ids"] = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
-    else:
-        st.session_state["selected_censo_ids"] = set()
-        st.session_state["quadra_filter_ids"] = set()
-
-    if not st.session_state.get("iso_view_od", False):
-        st.session_state["selected_od_ids"] = set()
-
-    if not st.session_state.get("iso_view_quadra", False):
-        st.session_state["selected_quadra_ids"] = set()
-
-    if not st.session_state.get("iso_view_lote", False):
-        st.session_state["selected_lote_ids"] = set()
-
+def _on_post_iso_view_change() -> None:
     mark_ui_action()
-
 
 def control_panel() -> None:
     lvl = st.session_state.get("level", "subpref")
@@ -2178,102 +1760,40 @@ def control_panel() -> None:
             on_click=lambda: (mark_ui_action(), _fit_selected_isos()),
         )
 
-        st.caption("Após selecionar isócronas, alterne os elementos abaixo sem voltar de nível.")
-        st.checkbox(
-            "Setor censitário",
-            key="iso_view_censo",
-            disabled=not ok_iso,
-            on_change=_on_iso_overlay_change,
-        )
-        st.checkbox(
-            "Zonas OD",
-            key="iso_view_od",
-            disabled=not ok_iso,
-            on_change=_on_iso_overlay_change,
-        )
-        st.checkbox(
-            "Quadras",
-            key="iso_view_quadra",
-            disabled=not ok_iso,
-            on_change=_on_iso_overlay_change,
-        )
-        st.checkbox(
-            "Lotes",
-            key="iso_view_lote",
-            disabled=not ok_iso,
-            on_change=_on_iso_overlay_change,
-        )
-
-        if st.session_state.get("iso_view_censo", False):
-            okc = len(ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))) > 0
-            st.button(
-                "Ajustar aos setores selecionados",
-                use_container_width=True,
-                disabled=not okc,
-                on_click=lambda: (mark_ui_action(), _fit_selected_censos()),
-            )
-
-        if st.session_state.get("iso_view_od", False):
-            okod = len(ensure_set_of_str(st.session_state.get("selected_od_ids", set()))) > 0
-            st.button(
-                "Ajustar às zonas OD selecionadas",
-                use_container_width=True,
-                disabled=not okod,
-                on_click=lambda: (mark_ui_action(), _fit_selected_ods()),
-            )
-
-        if st.session_state.get("iso_view_quadra", False):
-            okq = len(ensure_set_of_str(st.session_state.get("selected_quadra_ids", set()))) > 0
-            st.button(
-                "Ajustar às quadras selecionadas",
-                use_container_width=True,
-                disabled=not okq,
-                on_click=lambda: (mark_ui_action(), _fit_selected_quadras()),
-            )
-
-        if st.session_state.get("iso_view_lote", False):
-            okl = len(ensure_set_of_str(st.session_state.get("selected_lote_ids", set()))) > 0
-            st.button(
-                "Ajustar aos lotes selecionados",
-                use_container_width=True,
-                disabled=not okl,
-                on_click=lambda: (mark_ui_action(), _fit_selected_lotes()),
-            )
-
-    if lvl == "censo":
-        okc = len(ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))) > 0
         st.button(
-            "Ajustar ao selecionado",
+            "Avançar para Quadras",
+            type="primary",
             use_container_width=True,
-            disabled=not okc,
-            on_click=lambda: (mark_ui_action(), _fit_selected_censos()),
+            disabled=not ok_iso,
+            on_click=lambda: (
+                mark_ui_action(),
+                st.session_state.__setitem__("post_iso_view", "quadra"),
+                st.session_state.__setitem__("level", "quadra"),
+                st.session_state.__setitem__("last_level", None),
+            ),
         )
 
-    if lvl == "od":
-        okod = len(ensure_set_of_str(st.session_state.get("selected_od_ids", set()))) > 0
-        st.button(
-            "Ajustar ao selecionado",
-            use_container_width=True,
-            disabled=not okod,
-            on_click=lambda: (mark_ui_action(), _fit_selected_ods()),
-        )
+        st.caption("Selecione uma ou mais isócronas antes de avançar.")
 
     if lvl == "quadra":
-        okq = len(ensure_set_of_str(st.session_state.get("selected_quadra_ids", set()))) > 0
-        st.button(
-            "Ajustar ao selecionado",
-            use_container_width=True,
-            disabled=not okq,
-            on_click=lambda: (mark_ui_action(), _fit_selected_quadras()),
+        st.radio(
+            "Visualização pós-isócronas",
+            options=["quadra", "lote", "censo", "od"],
+            format_func=lambda x: {
+                "quadra": "Quadras",
+                "lote": "Lotes",
+                "censo": "Setor censitário",
+                "od": "Zonas OD",
+            }[x],
+            key="post_iso_view",
+            horizontal=False,
+            on_change=_on_post_iso_view_change,
         )
 
-    if lvl == "final":
-        okl = len(ensure_set_of_str(st.session_state.get("selected_lote_ids", set()))) > 0
         st.button(
             "Ajustar ao selecionado",
             use_container_width=True,
-            disabled=not okl,
-            on_click=lambda: (mark_ui_action(), _fit_selected_lotes()),
+            on_click=lambda: (mark_ui_action(), _fit_selected_post_level()),
         )
 
     st.checkbox(
@@ -2282,9 +1802,6 @@ def control_panel() -> None:
         on_change=mark_ui_action,
     )
 
-# =============================================================================
-# MAP RENDER
-# =============================================================================
 def render_map_panel() -> None:
     level = st.session_state.get("level", "subpref")
     ensure_variable_for_level(level)
@@ -2306,7 +1823,6 @@ def render_map_panel() -> None:
             st.session_state["last_level"] = "subpref"
 
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-
         tooltip_subpref_col = "sp_nome" if "sp_nome" in g_sub.columns else SUBPREF_ID
 
         add_polygons_selectable(
@@ -2335,11 +1851,7 @@ def render_map_panel() -> None:
             st.stop()
 
         g_parent = subset_by_id(g_sub, SUBPREF_ID, sp)
-        subpref_nome = label_or_id(
-            g_parent,
-            label_col="sp_nome",
-            fallback_col=SUBPREF_ID,
-        )
+        subpref_nome = label_or_id(g_parent, label_col="sp_nome", fallback_col=SUBPREF_ID)
         title = f"Distritos ({subpref_nome})"
 
         g_show = subset_by_parent(g_dist, DIST_PARENT, sp)
@@ -2379,8 +1891,6 @@ def render_map_panel() -> None:
             return
 
         sel_n = len(st.session_state.get("selected_iso_ids", set()) or set())
-        overlay_suffix = _title_suffix_from_iso_overlays()
-        title = ""
 
         g_iso = read_layer("iso")
         g_dist = read_layer("dist")
@@ -2388,16 +1898,10 @@ def render_map_panel() -> None:
             st.stop()
 
         g_parent_dist = subset_by_id(g_dist, DIST_ID, d)
-        distrito_nome = label_or_id(
-            g_parent_dist,
-            label_col="ds_nome",
-            fallback_col=DIST_ID,
-        )
+        distrito_nome = label_or_id(g_parent_dist, label_col="ds_nome", fallback_col=DIST_ID)
         title = f"Isócronas ({distrito_nome})"
         if sel_n > 0:
-            title = f"{title} — isócronas selecionadas: {sel_n}"
-            if overlay_suffix != "Isócronas":
-                title = f"{title} | visualizando: {overlay_suffix}"
+            title = f"{title} — selecionadas: {sel_n}"
 
         if DIST_ID not in g_iso.columns:
             st.error(f"Isocronas.parquet não contém '{DIST_ID}'. Colunas: {list(g_iso.columns)}")
@@ -2413,31 +1917,8 @@ def render_map_panel() -> None:
             g_iso2[DIST_ID] = g_iso2[DIST_ID].astype(str).str.strip()
             g_show_iso = g_iso2[g_iso2[DIST_ID] == str(d).strip()].copy()
 
-        iso_data = build_iso_overlay_data()
-        g_parent_iso = iso_data.get("g_parent")
-        active_modes = _overlay_modes_active()
-
         if st.session_state.get("last_level") != "isocrona":
-            if active_modes:
-                target = None
-                if "lote" in active_modes and iso_data.get("g_lote") is not None and not iso_data["g_lote"].empty:
-                    target = iso_data["g_lote"]
-                elif "quadra" in active_modes and iso_data.get("g_quadra") is not None and not iso_data["g_quadra"].empty:
-                    target = iso_data["g_quadra"]
-                elif "censo" in active_modes and iso_data.get("g_censo") is not None and not iso_data["g_censo"].empty:
-                    target = iso_data["g_censo"]
-                elif "od" in active_modes and iso_data.get("g_od") is not None and not iso_data["g_od"].empty:
-                    target = iso_data["g_od"]
-                elif g_parent_iso is not None and not g_parent_iso.empty:
-                    target = g_parent_iso
-                elif not g_show_iso.empty:
-                    target = g_show_iso
-                else:
-                    target = g_parent_dist
-                set_view_to_gdf(target, bump=0)
-            else:
-                set_view_to_gdf(g_show_iso if not g_show_iso.empty else g_parent_dist, bump=0)
-
+            set_view_to_gdf(g_show_iso if not g_show_iso.empty else g_parent_dist, bump=0)
             st.session_state["last_level"] = "isocrona"
 
         m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
@@ -2497,60 +1978,51 @@ def render_map_panel() -> None:
                 cache_key=f"iso:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
             )
 
-        if g_parent_iso is not None and not g_parent_iso.empty:
+    elif level == "quadra":
+        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids"))
+        if not iso_ids:
+            reset_to("isocrona")
+            return
+
+        post_view = st.session_state.get("post_iso_view", "quadra")
+        data = build_post_iso_data()
+        g_parent = data.get("g_parent")
+
+        label_map = {
+            "quadra": "Quadras",
+            "lote": "Lotes",
+            "censo": "Setor censitário",
+            "od": "Zonas OD",
+        }
+        title = f"{label_map.get(post_view, 'Quadras')} — filtrado pelas isócronas selecionadas"
+
+        target = data.get("g_quadra") or g_parent
+        if post_view == "censo":
+            target = data.get("g_censo") or g_parent
+        elif post_view == "od":
+            target = data.get("g_od") or g_parent
+        elif post_view == "lote":
+            target = data.get("g_lote") or g_parent
+
+        if st.session_state.get("last_level") != "quadra":
+            if target is not None and not getattr(target, "empty", True):
+                set_view_to_gdf(target, bump=0)
+            st.session_state["last_level"] = "quadra"
+
+        m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
+
+        if g_parent is not None and not g_parent.empty:
             add_parent_fill(
                 m,
-                g_parent_iso,
+                g_parent,
                 "Isócronas selecionadas (sombra)",
-                fill_color=PB_NAVY,
-                stroke_color=PB_NAVY,
-                fill_opacity=0.05,
-                stroke_opacity=0.55,
-                stroke_weight=1.2,
-                dash_array="3,4",
                 simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-                cache_key=f"parent:selectediso:{'|'.join(sorted(list(iso_data['iso_ids'])))}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
+                cache_key=f"parent:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
             )
 
-        if st.session_state.get("iso_view_censo", False):
-            g_censo = iso_data.get("g_censo")
-            if g_censo is not None and not g_censo.empty:
-                add_polygons_selectable(
-                    m,
-                    g_censo,
-                    "Setor censitário",
-                    CENSO_ID,
-                    tooltip_col=CENSO_ID,
-                    selected_ids=st.session_state.get("selected_censo_ids", set()),
-                    fill_color="#7aa6c2",
-                    fill_opacity=0.08,
-                    selected_fill_opacity=0.0,
-                    tooltip_prefix="Setor: ",
-                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL["censo"],
-                    cache_key=f"censo:iso:{'|'.join(sorted(list(iso_data['iso_ids'])))}:{SIMPLIFY_TOL_BY_LEVEL['censo']}",
-                )
-
-        if st.session_state.get("iso_view_od", False):
-            g_od = iso_data.get("g_od")
-            if g_od is not None and not g_od.empty:
-                add_polygons_selectable(
-                    m,
-                    g_od,
-                    "Zonas OD",
-                    OD_ID,
-                    tooltip_col=OD_ID,
-                    selected_ids=st.session_state.get("selected_od_ids", set()),
-                    fill_color="#d9b26f",
-                    fill_opacity=0.08,
-                    selected_fill_opacity=0.0,
-                    tooltip_prefix="Zona OD: ",
-                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL["od"],
-                    cache_key=f"od:iso:{'|'.join(sorted(list(iso_data['iso_ids'])))}:{SIMPLIFY_TOL_BY_LEVEL['od']}",
-                )
-
-        if st.session_state.get("iso_view_quadra", False):
-            g_quad = iso_data.get("g_quadra")
-            id_col_map = iso_data.get("quadra_id_col", QUADRA_UID)
+        if post_view == "quadra":
+            g_quad = data.get("g_quadra")
+            id_col_map = data.get("quadra_id_col", QUADRA_UID)
             if g_quad is not None and not g_quad.empty:
                 g_quad_viz = attach_quadras_csv(g_quad)
                 if CLUSTER_COL in g_quad_viz.columns:
@@ -2570,7 +2042,7 @@ def render_map_panel() -> None:
                         selected_fill_opacity=0.0,
                         tooltip_prefix="Quadra: ",
                         simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
-                        cache_key=f"quad-overlay:{'|'.join(sorted(list(iso_data['iso_ids'])))}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
+                        cache_key=f"quad-overlay:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
                         default_fill=CLUSTER_NULL_COLOR,
                     )
                 else:
@@ -2586,12 +2058,56 @@ def render_map_panel() -> None:
                         selected_fill_opacity=0.0,
                         tooltip_prefix="Quadra: ",
                         simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
-                        cache_key=f"quadB-overlay:{'|'.join(sorted(list(iso_data['iso_ids'])))}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
+                        cache_key=f"quadB-overlay:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
                     )
+            else:
+                st.warning("Nenhuma quadra encontrada para as isócronas selecionadas.")
 
-        if st.session_state.get("iso_view_lote", False):
-            g_lote = iso_data.get("g_lote")
-            lote_id_col = iso_data.get("lote_id_col", LOTE_ID)
+        elif post_view == "censo":
+            g_censo = data.get("g_censo")
+            if g_censo is not None and not g_censo.empty:
+                add_polygons_selectable(
+                    m,
+                    g_censo,
+                    "Setor censitário",
+                    CENSO_ID,
+                    tooltip_col=CENSO_ID,
+                    selected_ids=st.session_state.get("selected_censo_ids", set()),
+                    fill_color="#7aa6c2",
+                    fill_opacity=0.10,
+                    selected_fill_opacity=0.0,
+                    tooltip_prefix="Setor: ",
+                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL["censo"],
+                    cache_key=f"censo-postiso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['censo']}",
+                )
+            else:
+                st.warning("Nenhum setor censitário encontrado para as isócronas selecionadas.")
+
+        elif post_view == "od":
+            g_od = data.get("g_od")
+            if g_od is not None and not g_od.empty:
+                add_polygons_selectable(
+                    m,
+                    g_od,
+                    "Zonas OD",
+                    OD_ID,
+                    tooltip_col=OD_ID,
+                    selected_ids=st.session_state.get("selected_od_ids", set()),
+                    fill_color="#d9b26f",
+                    fill_opacity=0.16,
+                    base_color="#8c5f1d",
+                    base_weight=1.2,
+                    selected_fill_opacity=0.0,
+                    tooltip_prefix="Zona OD: ",
+                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL["od"],
+                    cache_key=f"od-postiso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['od']}",
+                )
+            else:
+                st.warning("Nenhuma zona OD encontrada para as isócronas selecionadas.")
+
+        elif post_view == "lote":
+            g_lote = data.get("g_lote")
+            lote_id_col = data.get("lote_id_col", LOTE_ID)
             if g_lote is not None and not g_lote.empty:
                 add_polygons_selectable(
                     m,
@@ -2601,217 +2117,14 @@ def render_map_panel() -> None:
                     tooltip_col=lote_id_col,
                     selected_ids=st.session_state.get("selected_lote_ids", set()),
                     fill_color="#ffffff",
-                    fill_opacity=0.03,
+                    fill_opacity=0.04,
                     selected_fill_opacity=0.0,
                     tooltip_prefix="Lote: " if lote_id_col == LOTE_ID else ("Quadra: " if lote_id_col == QUADRA_ID else "Isócrona: "),
                     simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
-                    cache_key=f"lote-overlay:{'|'.join(sorted(list(iso_data['iso_ids'])))}:{SIMPLIFY_TOL_BY_LEVEL['lote']}",
+                    cache_key=f"lote-postiso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['lote']}",
                 )
-
-    elif level == "censo":
-        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids"))
-        if not iso_ids:
-            reset_to("isocrona")
-            return
-
-        sel_nc = len(st.session_state.get("selected_censo_ids", set()) or set())
-        title = f"Setor censitário — selecionados: {sel_nc}"
-
-        g_censo = read_layer("censo")
-        g_iso = read_layer("iso")
-        if g_censo is None or g_iso is None:
-            st.stop()
-
-        g_show = get_censo_subset_for_isos(g_censo, iso_ids)
-        g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
-
-        if st.session_state.get("last_level") != "censo":
-            set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=0)
-            st.session_state["last_level"] = "censo"
-
-        m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-        add_parent_fill(
-            m,
-            g_parent,
-            "Isócronas selecionadas (sombra)",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-            cache_key=f"parent:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
-        )
-        add_polygons_selectable(
-            m,
-            g_show,
-            "Setor censitário",
-            CENSO_ID,
-            tooltip_col=CENSO_ID,
-            selected_ids=st.session_state.get("selected_censo_ids", set()),
-            fill_opacity=0.10,
-            selected_fill_opacity=0.0,
-            tooltip_prefix="Setor: ",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["censo"],
-            cache_key=f"censo:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['censo']}",
-        )
-
-    elif level == "od":
-        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids"))
-        if not iso_ids:
-            reset_to("isocrona")
-            return
-
-        sel_od = len(st.session_state.get("selected_od_ids", set()) or set())
-        title = f"Zonas OD — selecionadas: {sel_od}"
-
-        g_od = read_layer("od")
-        g_iso = read_layer("iso")
-        if g_od is None or g_iso is None:
-            st.stop()
-
-        if ISO_ID not in g_od.columns:
-            st.error(f"ZonasOD.parquet não contém '{ISO_ID}'. Colunas: {list(g_od.columns)}")
-            st.stop()
-
-        if OD_ID not in g_od.columns:
-            st.error(f"ZonasOD.parquet não contém '{OD_ID}'. Colunas: {list(g_od.columns)}")
-            st.stop()
-
-        g_show = subset_by_parent_multi(g_od, ISO_ID, iso_ids)
-        g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
-
-        if st.session_state.get("last_level") != "od":
-            set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=0)
-            st.session_state["last_level"] = "od"
-
-        m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-        add_parent_fill(
-            m,
-            g_parent,
-            "Isócronas selecionadas (sombra)",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-            cache_key=f"parent:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
-        )
-        add_polygons_selectable(
-            m,
-            g_show,
-            "Zonas OD",
-            OD_ID,
-            tooltip_col=OD_ID,
-            selected_ids=st.session_state.get("selected_od_ids", set()),
-            fill_opacity=0.10,
-            selected_fill_opacity=0.0,
-            tooltip_prefix="Zona OD: ",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["od"],
-            cache_key=f"od:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['od']}",
-        )
-
-    elif level == "quadra":
-        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids"))
-        if not iso_ids:
-            reset_to("isocrona")
-            return
-
-        sel_nq = len(st.session_state.get("selected_quadra_ids", set()) or set())
-        title = f"Quadras — selecionadas: {sel_nq}"
-
-        g_quad = read_layer("quadra")
-        g_iso = read_layer("iso")
-        if g_quad is None or g_iso is None:
-            st.stop()
-
-        g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
-        filter_ids = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
-        mode = "censo" if filter_ids else "quadra"
-        g_show = get_quadras_subset_for_mode(
-            g_quad,
-            mode=mode,
-            iso_ids=iso_ids,
-            filter_censo_ids=filter_ids,
-        )
-
-        id_col_map = QUADRA_UID if QUADRA_UID in g_show.columns and mode != "censo" else QUADRA_ID
-        if id_col_map not in g_show.columns:
-            id_col_map = QUADRA_ID if QUADRA_ID in g_show.columns else QUADRA_UID
-        st.session_state["_quadra_id_col_map"] = id_col_map
-
-        if st.session_state.get("last_level") != "quadra":
-            set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=1)
-            st.session_state["last_level"] = "quadra"
-
-        m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-        add_parent_fill(
-            m,
-            g_parent,
-            "Isócronas selecionadas (sombra)",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-            cache_key=f"parent:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
-        )
-
-        g_show_viz = attach_quadras_csv(g_show)
-        if CLUSTER_COL in g_show_viz.columns:
-            g_show_viz["__cluster_code"] = g_show_viz[CLUSTER_COL].apply(_coerce_int)
-            g_show_viz["__cluster_color"] = g_show_viz["__cluster_code"].apply(cluster_color)
-
-        if st.session_state.get("variable") == "Cluster" and "__cluster_color" in g_show_viz.columns:
-            add_polygons_selectable_colored(
-                m,
-                g_show_viz,
-                "Quadras",
-                id_col_map,
-                fill_color_col="__cluster_color",
-                selected_ids=st.session_state.get("selected_quadra_ids", set()),
-                tooltip_col=QUADRA_ID if QUADRA_ID in g_show_viz.columns else id_col_map,
-                fill_opacity=1.0,
-                selected_fill_opacity=0.0,
-                tooltip_prefix="Quadra: ",
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
-                cache_key=f"quad:{mode}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
-                default_fill=CLUSTER_NULL_COLOR,
-            )
-        else:
-            add_polygons_selectable(
-                m,
-                g_show,
-                "Quadras",
-                id_col_map,
-                tooltip_col=QUADRA_ID if QUADRA_ID in g_show.columns else id_col_map,
-                selected_ids=st.session_state.get("selected_quadra_ids", set()),
-                fill_opacity=0.12,
-                selected_fill_opacity=0.0,
-                tooltip_prefix="Quadra: ",
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
-                cache_key=f"quadB:{mode}:{SIMPLIFY_TOL_BY_LEVEL['quadra']}",
-            )
-
-    else:
-        title = "Lotes (filtrado por isócronas selecionadas)"
-
-        iso_data = build_iso_overlay_data()
-        g_lote = iso_data.get("g_lote")
-        lote_id_col = iso_data.get("lote_id_col", LOTE_ID)
-
-        m = make_carto_map(
-            center=st.session_state.get("view_center", (-23.55, -46.63)),
-            zoom=st.session_state.get("view_zoom", 11),
-        )
-
-        if g_lote is None or getattr(g_lote, "empty", True):
-            st.warning("Nenhum lote encontrado para as isócronas selecionadas.")
-        else:
-            if st.session_state.get("last_level") != "final":
-                set_view_to_gdf(g_lote, bump=0, zmax=19)
-                st.session_state["last_level"] = "final"
-
-            add_polygons_selectable(
-                m,
-                g_lote,
-                "Lotes",
-                lote_id_col,
-                tooltip_col=lote_id_col,
-                selected_ids=st.session_state.get("selected_lote_ids", set()),
-                fill_opacity=0.08,
-                selected_fill_opacity=0.0,
-                tooltip_prefix="Lote: " if lote_id_col == LOTE_ID else ("Quadra: " if lote_id_col == QUADRA_ID else "Isócrona: "),
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
-                cache_key=f"loteISO:{'|'.join(sorted(list(iso_data.get('iso_ids', set()))))}:{SIMPLIFY_TOL_BY_LEVEL['lote']}",
-            )
+            else:
+                st.warning("Nenhum lote encontrado para as isócronas selecionadas.")
 
     if m is not None and st.session_state.get("selection_draw_mode", False):
         add_draw_tools(m)
@@ -2837,9 +2150,23 @@ def render_map_panel() -> None:
     )
     st.session_state["_map_level_rendered"] = level
 
-# =============================================================================
-# APP (main)
-# =============================================================================
+def sanitize_level_state() -> None:
+    lvl = st.session_state.get("level", "subpref")
+
+    if lvl == "distrito" and _id_to_str(st.session_state.get("selected_subpref_id")) is None:
+        reset_to("subpref")
+        return
+
+    if lvl in ("isocrona", "quadra") and _id_to_str(st.session_state.get("selected_distrito_id")) is None:
+        reset_to("distrito")
+        return
+
+    if lvl == "quadra":
+        iso_ids = st.session_state.get("selected_iso_ids", set()) or set()
+        if not iso_ids:
+            reset_to("isocrona")
+            return
+
 def main() -> None:
     init_state()
     inject_css()
@@ -2880,7 +2207,6 @@ def main() -> None:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
         control_panel()
         st.markdown("</div>", unsafe_allow_html=True)
-
 
 if __name__ == "__main__":
     main()
