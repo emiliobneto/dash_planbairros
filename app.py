@@ -6,22 +6,24 @@ import base64
 import re
 
 import streamlit as st
+import pandas as pd  # type: ignore
 
 # geo
 try:
     import geopandas as gpd  # type: ignore
     import folium  # type: ignore
     from folium.features import GeoJsonTooltip  # type: ignore
+    from folium.plugins import Draw  # type: ignore
     from streamlit_folium import st_folium  # type: ignore
-    from shapely.geometry import Point  # type: ignore
+    from shapely.geometry import Point, shape  # type: ignore
 except Exception:
     gpd = None  # type: ignore
     folium = None  # type: ignore
     GeoJsonTooltip = None  # type: ignore
+    Draw = None  # type: ignore
     st_folium = None  # type: ignore
     Point = None  # type: ignore
-
-import pandas as pd  # type: ignore
+    shape = None  # type: ignore
 
 # =============================================================================
 # CONFIG / UI
@@ -58,14 +60,14 @@ PARENT_STROKE_OPACITY = 0.35
 PARENT_STROKE_WEIGHT = 0.7
 PARENT_STROKE_DASH = "2,6"
 
-# ✅ Simplificação > 0 para reduzir payload e evitar timeouts do componente em deploy
 SIMPLIFY_TOL_BY_LEVEL = {
-    "subpref": 0.0000,
-    "distrito": 0.0000,
-    "isocrona": 0.0000,
-    "censo": 0.00000,
-    "quadra": 0.00000,
-    "lote": 0.00000,
+    "subpref": 0.0008,
+    "distrito": 0.0006,
+    "isocrona": 0.0004,
+    "censo": 0.00015,
+    "od": 0.0002,
+    "quadra": 0.00008,
+    "lote": 0.00003,
 }
 
 # =============================================================================
@@ -80,7 +82,7 @@ LOGO_PATH = ASSETS_DIR / "logo_todos.jpg"
 LOGO_HEIGHT = 46
 
 # =============================================================================
-# VISUALIZAÇÕES (Clusters / Isócronas)
+# VISUALIZAÇÕES
 # =============================================================================
 QUADRAS_CSV_FILENAME = "quadras.csv"
 QUADRAS_CSV_SECRET_KEY = "PB_QUADRAS_CSV_FILE_ID"
@@ -122,38 +124,36 @@ ISO_DEFAULT_COLOR = "#ffffff"
 SUBPREF_ID = "subpref_id"
 DIST_ID = "distrito_id"
 ISO_ID = "iso_id"
+OD_ID = "od_id"
 QUADRA_ID = "quadra_id"
-QUADRA_UID = "quadra_uid"  # iso_id__quadra_id
+QUADRA_UID = "quadra_uid"
 LOTE_ID = "lote_id"
 CENSO_ID = "censo_id"
 
 DIST_PARENT = SUBPREF_ID
 ISO_PARENT = DIST_ID
-
-# ✅ Estrutura para filtrar quadras por duas vias
-QUADRA_PARENTS = {"iso": ISO_ID, "censo": CENSO_ID}
-
-LOTE_PARENT = QUADRA_ID
+OD_PARENT = ISO_ID
 CENSO_PARENT = ISO_ID
-
-LEVELS = ["subpref", "distrito", "isocrona", "censo", "quadra", "final"]
+LOTE_PARENT = QUADRA_ID
 
 LAYER_ID_COLS = {
     "subpref": [SUBPREF_ID],
     "dist": [DIST_ID, DIST_PARENT],
     "iso": [ISO_ID, ISO_PARENT],
+    "censo": [CENSO_ID, CENSO_PARENT, QUADRA_ID, ISO_ID],
+    "od": [OD_ID, OD_PARENT, ISO_ID],
     "quadra": [QUADRA_ID, ISO_ID, CENSO_ID, QUADRA_UID],
     "lote": [LOTE_ID, LOTE_PARENT, QUADRA_ID, ISO_ID],
-    "censo": [CENSO_ID, CENSO_PARENT, QUADRA_ID, ISO_ID],
 }
 
 LOCAL_FILENAMES = {
     "subpref": "Subprefeitura.parquet",
     "dist": "Distrito.parquet",
     "iso": "Isocronas.parquet",
+    "censo": "Setorcensitario.parquet",
+    "od": "ZonasOD.parquet",
     "quadra": "Quadras.parquet",
     "lote": "Lotes.parquet",
-    "censo": "Setorcensitario.parquet",
 }
 
 # =============================================================================
@@ -176,6 +176,7 @@ COL_ALIASES: Dict[str, Set[str]] = {
     SUBPREF_ID: _mk_aliases(SUBPREF_ID),
     DIST_ID: _mk_aliases(DIST_ID),
     ISO_ID: _mk_aliases(ISO_ID),
+    OD_ID: _mk_aliases(OD_ID) | {"OD_ID", "zona_od", "zonaod", "id_od", "od"},
     QUADRA_ID: _mk_aliases(QUADRA_ID),
     LOTE_ID: _mk_aliases(LOTE_ID),
     CENSO_ID: _mk_aliases(CENSO_ID) | {"cendo_id", "CENDO_ID", "setor_id", "id_setor", "codigo_setor", "cd_setor"},
@@ -183,12 +184,6 @@ COL_ALIASES: Dict[str, Set[str]] = {
 
 
 def standardize_columns(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
-    """
-    Padroniza nomes de colunas:
-    - strip
-    - colapsa múltiplos espaços
-    - resolve aliases para nomes canônicos
-    """
     if gdf is None or gdf.empty:
         return gdf
 
@@ -211,7 +206,6 @@ def standardize_columns(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
 
 
 def _id_to_str(v: Any) -> Optional[str]:
-    """Coerção estável para string (1.0 -> '1')."""
     if v is None:
         return None
     try:
@@ -265,37 +259,27 @@ def normalize_id_cols(gdf: "gpd.GeoDataFrame", cols: Iterable[str]) -> "gpd.GeoD
             g[c] = g[c].map(_id_to_str)
     return g
 
+
 def ensure_set_of_str(value: Any, *, drop_empty: bool = True) -> Set[str]:
-    """
-    Normaliza qualquer entrada razoável em `set[str]`.
-
-    Aceita:
-      - set/list/tuple de valores (str/int/float/None...)
-      - valor único (str/int/float) -> vira conjunto unitário
-      - None -> set()
-
-    Converte via `_id_to_str` e remove nulos/vazios.
-    """
     if value is None:
         return set()
 
-    # Se já for set/list/tuple, ok. Se for outra coisa, trate como item único.
     if isinstance(value, (set, list, tuple)):
         items: Iterable[Any] = value
     else:
-        items = (value,)  # item único
+        items = (value,)
 
     out: Set[str] = set()
     for x in items:
-        s = _id_to_str(x)  # usa a sua função existente
+        s = _id_to_str(x)
         if s is None:
             continue
         if drop_empty and s == "":
             continue
         out.add(s)
-
     return out
-    
+
+
 def choose_quadra_parent_col(
     g_quad: "gpd.GeoDataFrame",
     *,
@@ -304,11 +288,12 @@ def choose_quadra_parent_col(
 ) -> Optional[str]:
     if g_quad is None or getattr(g_quad, "empty", True):
         return None
-    if preferred in g_quad.columns:
+    if preferred in g_quad.columns and g_quad[preferred].notna().any():
         return preferred
     if fallback in g_quad.columns:
         return fallback
     return None
+
 
 def get_quadras_subset_for_mode(
     g_quad: "gpd.GeoDataFrame",
@@ -317,16 +302,9 @@ def get_quadras_subset_for_mode(
     iso_ids: Set[str],
     filter_censo_ids: Set[str],
 ) -> "gpd.GeoDataFrame":
-    """
-    Retorna o subset de quadras que deve estar 'clicável' e/ou renderizado
-    no nível quadra, respeitando o modo:
-      - mode == 'censo': tenta filtrar por censo_id; se não existir, fallback por iso_id
-      - mode != 'censo': filtra por iso_id
-    """
     if g_quad is None or g_quad.empty:
         return g_quad.iloc[0:0].copy()
 
-    # normaliza inputs
     iso_ids = ensure_set_of_str(iso_ids)
     filter_censo_ids = ensure_set_of_str(filter_censo_ids)
 
@@ -335,6 +313,8 @@ def get_quadras_subset_for_mode(
 
         if parent_col == CENSO_ID:
             if not filter_censo_ids:
+                if ISO_ID in g_quad.columns and iso_ids:
+                    return subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
                 return g_quad.iloc[0:0].copy()
             return subset_by_id_multi(g_quad, CENSO_ID, filter_censo_ids)
 
@@ -345,7 +325,6 @@ def get_quadras_subset_for_mode(
 
         return g_quad.iloc[0:0].copy()
 
-    # modo padrão (iso -> quadras)
     if not iso_ids:
         return g_quad.iloc[0:0].copy()
     return subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
@@ -420,11 +399,10 @@ def render_header() -> None:
         unsafe_allow_html=True,
     )
 
-
 # =============================================================================
 # STATE
 # =============================================================================
-MAP_KEY = "map_view"  # ✅ um único key para o componente (evita recarga de assets)
+MAP_KEY = "map_view"
 
 
 def init_state() -> None:
@@ -436,46 +414,39 @@ def init_state() -> None:
 
     st.session_state.setdefault("selected_iso_ids", set())
     st.session_state.setdefault("selected_censo_ids", set())
+    st.session_state.setdefault("selected_od_ids", set())
     st.session_state.setdefault("selected_quadra_ids", set())
 
-    st.session_state.setdefault("iso_next_mode", "quadra")  # "quadra" | "censo"
+    st.session_state.setdefault("iso_next_mode", "quadra")  # "quadra" | "censo" | "od"
 
-    # filtro usado para transição censo -> quadra
     st.session_state.setdefault("quadra_filter_col", CENSO_ID)
-    st.session_state.setdefault("quadra_filter_uids", set())
+    st.session_state.setdefault("quadra_filter_ids", set())
 
     st.session_state.setdefault("view_center", (-23.55, -46.63))
     st.session_state.setdefault("view_zoom", 11)
 
-    # dedupe de clique
     st.session_state.setdefault("last_click_sig", "")
+    st.session_state.setdefault("last_draw_sig", "")
 
-    # caches
     st.session_state.setdefault("_geojson_cache", {})
     st.session_state.setdefault("_geojson_cache_order", [])
     st.session_state.setdefault("_layer_cache", {})
     st.session_state.setdefault("_layer_cache_meta", {})
 
-    # UI action signature
     st.session_state.setdefault("_ui_action_sig", 0)
     st.session_state.setdefault("_ui_action_sig_seen", 0)
 
-    # nível que renderizou o mapa anterior
     st.session_state.setdefault("_map_level_rendered", None)
-
-    # qual ID está sendo usado para seleção de quadra no mapa atual
     st.session_state.setdefault("_quadra_id_col_map", QUADRA_UID)
 
-    # variável atual
     st.session_state.setdefault("variable", None)
 
-    # final (lotes)
     st.session_state.setdefault("final_load_sig", "")
     st.session_state.setdefault("final_loaded", False)
     st.session_state.setdefault("_final_lotes_gdf", None)
 
-    # debug
     st.session_state.setdefault("debug_schema", False)
+    st.session_state.setdefault("selection_draw_mode", False)
 
 
 def mark_ui_action() -> None:
@@ -494,10 +465,10 @@ def _final_reset() -> None:
 
 
 def reset_to(level: str, *, clear_click_sig: bool = True) -> None:
-    """Reset por nível mantendo otimizações."""
     st.session_state["level"] = level
     if clear_click_sig:
         st.session_state["last_click_sig"] = ""
+        st.session_state["last_draw_sig"] = ""
     _geojson_cache_reset()
     _final_reset()
 
@@ -506,10 +477,11 @@ def reset_to(level: str, *, clear_click_sig: bool = True) -> None:
         st.session_state["selected_distrito_id"] = None
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_censo_ids"] = set()
+        st.session_state["selected_od_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
         st.session_state["iso_next_mode"] = "quadra"
         st.session_state["quadra_filter_col"] = CENSO_ID
-        st.session_state["quadra_filter_uids"] = set()
+        st.session_state["quadra_filter_ids"] = set()
         st.session_state["view_center"] = (-23.55, -46.63)
         st.session_state["view_zoom"] = 11
         st.session_state["last_level"] = None
@@ -518,24 +490,29 @@ def reset_to(level: str, *, clear_click_sig: bool = True) -> None:
         st.session_state["selected_distrito_id"] = None
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_censo_ids"] = set()
+        st.session_state["selected_od_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
         st.session_state["iso_next_mode"] = "quadra"
         st.session_state["quadra_filter_col"] = CENSO_ID
-        st.session_state["quadra_filter_uids"] = set()
+        st.session_state["quadra_filter_ids"] = set()
 
     elif level == "isocrona":
         st.session_state["selected_iso_ids"] = set()
         st.session_state["selected_censo_ids"] = set()
+        st.session_state["selected_od_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
         st.session_state["iso_next_mode"] = "quadra"
         st.session_state["quadra_filter_col"] = CENSO_ID
-        st.session_state["quadra_filter_uids"] = set()
+        st.session_state["quadra_filter_ids"] = set()
 
     elif level == "censo":
         st.session_state["selected_censo_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
         st.session_state["quadra_filter_col"] = CENSO_ID
-        st.session_state["quadra_filter_uids"] = set()
+        st.session_state["quadra_filter_ids"] = set()
+
+    elif level == "od":
+        st.session_state["selected_od_ids"] = set()
 
     elif level == "quadra":
         st.session_state["selected_quadra_ids"] = set()
@@ -545,12 +522,17 @@ def reset_to(level: str, *, clear_click_sig: bool = True) -> None:
 
 
 def _prev_level(level: str) -> Optional[str]:
-    if level not in LEVELS:
+    if level == "subpref":
         return None
-    i = LEVELS.index(level)
-    if i <= 0:
-        return None
-    return LEVELS[i - 1]
+    if level == "distrito":
+        return "subpref"
+    if level == "isocrona":
+        return "distrito"
+    if level in ("censo", "od", "quadra"):
+        return "isocrona"
+    if level == "final":
+        return "quadra"
+    return None
 
 
 def _back_one_level() -> None:
@@ -570,7 +552,6 @@ def _toggle_in_set(key: str, value: Any) -> None:
 
 
 def debug_layer_schema(layer_key: str, g: Optional["gpd.GeoDataFrame"], *, path: Optional[Path] = None) -> None:
-    """Mostra no UI (Streamlit) o schema real carregado. Útil para debug em deploy."""
     if not st.session_state.get("debug_schema", False):
         return
     if g is None:
@@ -588,9 +569,8 @@ def debug_layer_schema(layer_key: str, g: Optional["gpd.GeoDataFrame"], *, path:
     except Exception:
         pass
 
-
 # =============================================================================
-# SANITIZE (evita estado inválido)
+# SANITIZE
 # =============================================================================
 def sanitize_level_state() -> None:
     lvl = st.session_state.get("level", "subpref")
@@ -599,11 +579,11 @@ def sanitize_level_state() -> None:
         reset_to("subpref")
         return
 
-    if lvl in ("isocrona", "censo", "quadra", "final") and _id_to_str(st.session_state.get("selected_distrito_id")) is None:
+    if lvl in ("isocrona", "censo", "od", "quadra", "final") and _id_to_str(st.session_state.get("selected_distrito_id")) is None:
         reset_to("distrito")
         return
 
-    if lvl in ("censo", "quadra", "final"):
+    if lvl in ("censo", "od", "quadra", "final"):
         iso_ids = st.session_state.get("selected_iso_ids", set()) or set()
         if not iso_ids:
             reset_to("isocrona")
@@ -614,9 +594,7 @@ def sanitize_level_state() -> None:
         if id_col_map == QUADRA_UID:
             qset = st.session_state.get("selected_quadra_ids", set()) or set()
             if any(isinstance(x, str) and "__" not in x for x in qset):
-                # evita misturar IDs simples com UID no modo iso
                 st.session_state["selected_quadra_ids"] = set()
-
 
 # =============================================================================
 # DRIVE / LOCAL IO
@@ -625,22 +603,21 @@ SECRETS_KEYS = {
     "subpref": "PB_SUBPREF_FILE_ID",
     "dist": "PB_DISTRITO_FILE_ID",
     "iso": "PB_ISOCRONAS_FILE_ID",
+    "censo": "PB_CENSO_FILE_ID",
+    "od": "PB_OD_FILE_ID",
     "quadra": "PB_QUADRAS_FILE_ID",
     "lote": "PB_LOTES_FILE_ID",
-    "censo": "PB_CENSO_FILE_ID",
 }
 
 FALLBACK_URLS = {
     "subpref": "https://drive.google.com/file/d/1vPY34cQLCoGfADpyOJjL9pNCYkVrmSZA/view?usp=drive_link",
     "dist": "https://drive.google.com/file/d/1K-t2BiSHN_D8De0oCFxzGdrEMhnGnh10/view?usp=drive_link",
     "iso": "https://drive.google.com/file/d/1UQkswArEB_1MmPhGW_TgvLahR6dPvZXn/view?usp=drive_link",
+    "censo": "https://drive.google.com/file/d/1APp7fxT2mgTpegVisVyQwjTRWOPz6Rgn/view?usp=drive_link",
+    "od": "",
     "quadra": "https://drive.google.com/file/d/1Ivy2PyGHqFgIxSMoK3N9oik2wr5v912U/view?usp=drive_link",
     "lote": "https://drive.google.com/file/d/1oTFAZff1mVAWD6KQTJSz45I6B6pi6ceP/view?usp=drive_link",
-    "censo": "https://drive.google.com/file/d/1APp7fxT2mgTpegVisVyQwjTRWOPz6Rgn/view?usp=drive_link",
 }
-
-_DRIVE_ID_RE_1 = re.compile(r"/file/d/([a-zA-Z0-9_-]+)")
-_DRIVE_ID_RE_2 = re.compile(r"[?&]id=([a-zA-Z0-9_-]+)")
 
 
 def _get_secret(key: str) -> str:
@@ -651,25 +628,13 @@ def _get_secret(key: str) -> str:
 
 
 def extract_drive_id(raw: str) -> str:
-    """
-    Extrai FILE_ID de:
-      - ID puro
-      - links /file/d/<id>/...
-      - links ?id=<id>
-      - links do tipo open?id=<id>
-      - links uc?export=download&id=<id>
-
-    Retorna "" se não conseguir extrair.
-    """
     raw = (raw or "").strip()
     if not raw:
         return ""
 
-    # ID puro
     if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", raw) and "http" not in raw.lower():
         return raw
 
-    # padrões comuns
     m = re.search(r"/file/d/([a-zA-Z0-9_-]+)", raw)
     if m:
         return m.group(1)
@@ -678,21 +643,12 @@ def extract_drive_id(raw: str) -> str:
     if m:
         return m.group(1)
 
-    # fallback agressivo: pega um token grande
     m = re.search(r"([a-zA-Z0-9_-]{20,})", raw)
     return m.group(1) if m else ""
 
 
 def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path:
-    """
-    Download via Google Drive com:
-      - diagnóstico (status/URL final/content-type)
-      - suporte a token de confirmação para arquivos grandes
-      - detecção de "HTML salvo no lugar do parquet" (permissão/link incorreto)
-
-    Levanta RuntimeError com mensagem útil quando falhar.
-    """
-    import requests  # local import
+    import requests
 
     file_id = extract_drive_id(file_id_or_url)
     if not file_id:
@@ -700,13 +656,10 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
 
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    # se já existe e tem tamanho, retorna
     if dst.exists() and dst.stat().st_size > 0:
         return dst
 
     session = requests.Session()
-
-    # Endpoint mais estável para download
     url = "https://drive.google.com/uc"
     params = {"export": "download", "id": file_id}
 
@@ -716,27 +669,24 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
                 return v
         return None
 
-    # 1) primeira tentativa
     resp = session.get(url, params=params, stream=True, allow_redirects=True, timeout=120)
     token = get_confirm_token(resp)
 
-    # 2) se houver token de confirmação (arquivos grandes), tenta com confirm
     if token:
         params2 = {"export": "download", "id": file_id, "confirm": token}
         resp = session.get(url, params=params2, stream=True, allow_redirects=True, timeout=120)
 
-    # 3) valida status
     if resp.status_code != 200:
         final_url = getattr(resp, "url", url)
         ct = resp.headers.get("Content-Type", "")
         raise RuntimeError(
             f"Download falhou para '{label or dst.name}' (HTTP {resp.status_code}). "
             f"URL={final_url} Content-Type={ct}. "
-            f"Possíveis causas: link/ID incorreto, arquivo removido/movido, ou permissões (não público)."
+            f"Possíveis causas: link/ID incorreto, arquivo removido/movido, ou permissões."
         )
 
     total = int(resp.headers.get("Content-Length", 0) or 0)
-    chunk = 1024 * 1024  # 1MB
+    chunk = 1024 * 1024
 
     ui_label = label or dst.name
     prog = st.progress(0, text=f"Baixando {ui_label}…")
@@ -754,19 +704,16 @@ def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path
 
     prog.empty()
 
-    # 4) sanity check: às vezes o Drive devolve HTML (página de erro) e salva como arquivo "parquet"
     try:
         size = dst.stat().st_size
-        if size < 300_000:  # 300KB (parquet real costuma ser maior; ajuste se necessário)
+        if size < 300_000:
             head = dst.read_bytes()[:512].lower()
             if b"<!doctype html" in head or b"<html" in head:
                 dst.unlink(missing_ok=True)
                 raise RuntimeError(
-                    f"Download de '{ui_label}' retornou HTML (não é parquet). "
-                    f"Verifique se o arquivo está público e se o ID do Drive está correto."
+                    f"Download de '{ui_label}' retornou HTML. Verifique permissões e ID do Drive."
                 )
     except Exception:
-        # se o check falhar, prefira falhar explicitamente em vez de aceitar arquivo inválido
         raise
 
     return dst
@@ -796,10 +743,6 @@ def layer_available_locally(layer_key: str) -> bool:
 
 
 def ensure_local_layer(layer_key: str, *, force_redownload: bool = False) -> Path:
-    """
-    Garante que o layer esteja no cache local.
-    Ajuste: permite forçar re-download (útil quando o arquivo local ficou incompleto/corrompido).
-    """
     dst = local_layer_path(layer_key)
 
     if force_redownload:
@@ -851,7 +794,6 @@ def ensure_local_quadras_csv() -> Path:
         st.warning(f"Não foi possível baixar {QUADRAS_CSV_FILENAME} do Drive: {e}")
         return dst
 
-
 # =============================================================================
 # READ / FILTER
 # =============================================================================
@@ -879,7 +821,6 @@ def read_gdf_parquet_filtered(
     columns: Optional[List[str]] = None,
     filters: Optional[Any] = None,
 ) -> Optional["gpd.GeoDataFrame"]:
-    """Leitura parcial para acelerar nível final (lotes)."""
     if gpd is None:
         return None
     p = Path(path)
@@ -945,22 +886,12 @@ def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
     g = normalize_id_cols(g, LAYER_ID_COLS.get(layer_key, []))
 
     if layer_key == "quadra":
-        # quadra_id padronizado
         if QUADRA_ID in g.columns:
             g[QUADRA_ID] = g[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
-
-        # iso_id em string “limpa”
         if ISO_ID in g.columns:
             g[ISO_ID] = g[ISO_ID].map(_id_to_str)
-
-        # gera UID se possível
         if ISO_ID in g.columns and QUADRA_ID in g.columns:
             g[QUADRA_UID] = [make_quadra_uid(i, q) for i, q in zip(g[ISO_ID], g[QUADRA_ID])]
-
-        # ✅ validação (apenas debug) para detectar incompatibilidade de iso_id
-        if st.session_state.get("debug_schema", False) and ISO_ID in g.columns:
-            sample = g[ISO_ID].dropna().astype(str).head(10).tolist()
-            st.write("[debug] quadra iso_id sample:", sample)
 
     cache[layer_key] = g
     cache_meta[layer_key] = meta
@@ -1014,9 +945,8 @@ def subset_by_id_multi(gdf: "gpd.GeoDataFrame", id_col: str, ids: Set[Any]) -> "
         return gdf.iloc[0:0].copy()
     return gdf[gdf[id_col].isin(list(iset))]
 
-
 # =============================================================================
-# CSV clusters (quadras.csv)
+# CSV clusters
 # =============================================================================
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
 def read_df_csv(path: str) -> Optional[pd.DataFrame]:
@@ -1102,7 +1032,6 @@ def iso_label_color(nova_class: Any) -> Tuple[str, str]:
         return (f"Classe {k}", ISO_CLASSNUM_TO_COLOR.get(k, ISO_DEFAULT_COLOR))
     return ("Outros", ISO_DEFAULT_COLOR)
 
-
 # =============================================================================
 # GEOJSON cache LRU
 # =============================================================================
@@ -1139,15 +1068,11 @@ def _simplify_to_geojson(
     simplify_tol: float,
     keep_cols: Optional[List[str]] = None,
 ) -> str:
-    """
-    Converte GeoDataFrame em GeoJSON (string) com simplificação opcional.
-    Versão defensiva: ignora colunas inexistentes para não retornar "" silenciosamente.
-    """
     if gdf is None or gdf.empty:
         return ""
 
     keep_cols = keep_cols or []
-    keep_cols = [c for c in keep_cols if c in gdf.columns]  # evita KeyError
+    keep_cols = [c for c in keep_cols if c in gdf.columns]
 
     cols = keep_cols + ["geometry"]
     try:
@@ -1168,12 +1093,10 @@ def _simplify_to_geojson(
     except Exception:
         return ""
 
-
 # =============================================================================
-# CLICK HITTEST
+# CLICK HITTEST / DRAW
 # =============================================================================
 def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_col: str) -> Optional[str]:
-    """Retorna o id_col do primeiro polígono que contém/intersecta o ponto do clique."""
     if gdf is None or gdf.empty or not click_latlon:
         return None
     if id_col not in gdf.columns:
@@ -1205,6 +1128,93 @@ def pick_feature_id(gdf: "gpd.GeoDataFrame", click_latlon: Dict[str, float], id_
     except Exception:
         return None
 
+
+def add_draw_tools(m) -> None:
+    if folium is None or Draw is None or m is None:
+        return
+
+    Draw(
+        export=False,
+        position="topleft",
+        draw_options={
+            "polyline": False,
+            "marker": False,
+            "circle": False,
+            "circlemarker": False,
+            "polygon": True,
+            "rectangle": True,
+        },
+        edit_options={"edit": False, "remove": True},
+    ).add_to(m)
+
+
+def _extract_drawn_geometry(map_state: Dict[str, Any]):
+    if not isinstance(map_state, dict):
+        return None
+
+    candidates = [
+        map_state.get("all_drawings"),
+        map_state.get("last_active_drawing"),
+        map_state.get("last_drawing"),
+    ]
+
+    for cand in candidates:
+        if not cand:
+            continue
+
+        if isinstance(cand, list) and len(cand) > 0:
+            last = cand[-1]
+            geom = last.get("geometry") if isinstance(last, dict) else None
+            if geom and shape is not None:
+                try:
+                    return shape(geom)
+                except Exception:
+                    pass
+
+        if isinstance(cand, dict):
+            geom = cand.get("geometry", cand)
+            if geom and shape is not None:
+                try:
+                    return shape(geom)
+                except Exception:
+                    pass
+
+    return None
+
+
+def select_features_by_geometry(
+    gdf: "gpd.GeoDataFrame",
+    geom,
+    id_col: str,
+    selection_state_key: str,
+    mode: str = "add",
+) -> None:
+    if gdf is None or gdf.empty or geom is None or id_col not in gdf.columns:
+        return
+
+    try:
+        hits = gdf[gdf.geometry.intersects(geom)]
+    except Exception:
+        return
+
+    ids = {_id_to_str(v) for v in hits[id_col].tolist()}
+    ids = {v for v in ids if v is not None}
+
+    if mode == "replace":
+        st.session_state[selection_state_key] = ids
+        return
+
+    current = ensure_set_of_str(st.session_state.get(selection_state_key, set()))
+    if mode == "toggle":
+        for v in ids:
+            if v in current:
+                current.remove(v)
+            else:
+                current.add(v)
+        st.session_state[selection_state_key] = current
+        return
+
+    st.session_state[selection_state_key] = current | ids
 
 # =============================================================================
 # FOLIUM HELPERS
@@ -1361,7 +1371,6 @@ def add_polygons_selectable(
     ).add_to(fg_base)
     fg_base.add_to(m)
 
-    # camada selecionados (sem tooltip)
     if sel:
         sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
         if not sel_gdf.empty:
@@ -1384,7 +1393,6 @@ def add_polygons_selectable(
                     },
                 ).add_to(fg_sel)
                 fg_sel.add_to(m)
-
 
 
 def add_polygons_selectable_colored(
@@ -1461,7 +1469,6 @@ def add_polygons_selectable_colored(
     ).add_to(fg_base)
     fg_base.add_to(m)
 
-    # camada selecionados (sem tooltip)
     selected_ids = selected_ids or set()
     sel = {v for v in (_id_to_str(x) for x in selected_ids) if v is not None}
     if sel:
@@ -1487,9 +1494,8 @@ def add_polygons_selectable_colored(
                 ).add_to(fg_sel)
                 fg_sel.add_to(m)
 
-
 # =============================================================================
-# CLICK consumption (pré-render)
+# CLICK / DRAW consumption
 # =============================================================================
 def _pick_id_from_last_object(map_state: Dict[str, Any], id_col: str) -> Optional[str]:
     obj = (map_state or {}).get("last_object_clicked")
@@ -1535,10 +1541,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
     tooltip_raw = (map_state or {}).get("last_object_clicked_tooltip") or None
     click = (map_state or {}).get("last_clicked") if isinstance((map_state or {}).get("last_clicked"), dict) else None
 
-
-    # ------------------------------------------------------------------
-    # SUBPREF / DISTRITO / ISO / CENSO
-    # ------------------------------------------------------------------
     if level in ("subpref", "distrito", "isocrona", "censo"):
         if level == "subpref":
             id_col = SUBPREF_ID
@@ -1551,7 +1553,6 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
 
         picked = _pick_id_from_last_object(map_state, id_col) or parse_tooltip_id(tooltip_raw)
 
-        # Fallback geométrico
         if not picked and isinstance(click, dict):
             if level == "subpref":
                 g = read_layer("subpref")
@@ -1605,22 +1606,44 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             return
 
         if level == "censo":
+            _toggle_in_set("selected_censo_ids", picked)
+            _final_reset()
             return
 
-    # ------------------------------------------------------------------
-    # QUADRA
-    # ------------------------------------------------------------------
+    if level == "od":
+        iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v}
+        if not iso_ids:
+            return
+
+        picked = _pick_id_from_last_object(map_state, OD_ID) or parse_tooltip_id(tooltip_raw)
+
+        if not picked and isinstance(click, dict):
+            g_od = read_layer("od")
+            if g_od is not None:
+                picked = pick_feature_id(subset_by_parent_multi(g_od, ISO_ID, iso_ids), click, OD_ID)
+
+        if not picked:
+            return
+
+        sig = _click_signature(picked, click)
+        if sig == st.session_state.get("last_click_sig", ""):
+            return
+        st.session_state["last_click_sig"] = sig
+
+        _toggle_in_set("selected_od_ids", picked)
+        _final_reset()
+        return
+
     if level == "quadra":
         iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v is not None}
         if not iso_ids:
             return
-    
+
         mode = st.session_state.get("iso_next_mode", "quadra")
         id_col_map = st.session_state.get("_quadra_id_col_map", QUADRA_UID)
-    
+
         picked: Optional[str] = None
-    
-        # 1) tenta obter do objeto clicado (mais rápido)
+
         obj = (map_state or {}).get("last_object_clicked") or None
         if isinstance(obj, dict):
             props = obj.get("properties") if isinstance(obj.get("properties"), dict) else obj
@@ -1629,24 +1652,22 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                     picked = _id_to_str(props.get(QUADRA_UID)) or make_quadra_uid(props.get(ISO_ID), props.get(QUADRA_ID))
                 else:
                     picked = _id_to_str(props.get(id_col_map)) or _id_to_str(props.get(QUADRA_ID))
-    
-        # 2) hittest geométrico no subset correto (✅ faltava isso funcionar de ponta a ponta)
+
         g_show: Optional["gpd.GeoDataFrame"] = None
         if not picked and isinstance(click, dict):
             g_quad = read_layer("quadra")
             if g_quad is not None:
-                filter_censo_ids = ensure_set_of_str(st.session_state.get("quadra_filter_uids", set()))
+                filter_censo_ids = ensure_set_of_str(st.session_state.get("quadra_filter_ids", set()))
                 g_show = get_quadras_subset_for_mode(
                     g_quad,
                     mode=mode,
                     iso_ids=iso_ids,
                     filter_censo_ids=filter_censo_ids,
                 )
-    
+
                 if g_show is not None and not g_show.empty and id_col_map in g_show.columns:
                     picked = pick_feature_id(g_show, click, id_col_map)
-    
-        # 3) tooltip fallback (mantém sua lógica, mas só faz sentido se g_show existir)
+
         picked_tooltip = parse_tooltip_id(tooltip_raw)
         if not picked and picked_tooltip and g_show is not None and not g_show.empty:
             if id_col_map == QUADRA_UID and QUADRA_UID in g_show.columns and QUADRA_ID in g_show.columns:
@@ -1657,16 +1678,81 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                         picked = _id_to_str(cand.iloc[0][QUADRA_UID])
             elif id_col_map == QUADRA_ID and QUADRA_ID in g_show.columns:
                 picked = _id_to_str(picked_tooltip)
-    
+
         if not picked:
             return
-    
+
         sig = _click_signature(picked, click)
         if sig == st.session_state.get("last_click_sig", ""):
             return
         st.session_state["last_click_sig"] = sig
+
+        _toggle_in_set("selected_quadra_ids", picked)
+        _final_reset()
         return
 
+
+def consume_draw_selection(level: str, map_state: Dict[str, Any]) -> None:
+    geom = _extract_drawn_geometry(map_state)
+    if geom is None:
+        return
+
+    sig = str(getattr(geom, "wkt", ""))
+    if not sig or sig == st.session_state.get("last_draw_sig", ""):
+        return
+    st.session_state["last_draw_sig"] = sig
+
+    if level == "isocrona":
+        g = read_layer("iso")
+        d = _id_to_str(st.session_state.get("selected_distrito_id"))
+        if g is None or d is None:
+            return
+        g_show = subset_by_parent(g, ISO_PARENT, d)
+        select_features_by_geometry(g_show, geom, ISO_ID, "selected_iso_ids", mode="add")
+        return
+
+    if level == "censo":
+        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
+        g = read_layer("censo")
+        if g is None:
+            return
+        if CENSO_PARENT in g.columns:
+            g_show = subset_by_parent_multi(g, CENSO_PARENT, iso_ids)
+        else:
+            g_show = subset_by_parent_multi(g, ISO_ID, iso_ids)
+        select_features_by_geometry(g_show, geom, CENSO_ID, "selected_censo_ids", mode="add")
+        return
+
+    if level == "od":
+        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
+        g = read_layer("od")
+        if g is None:
+            return
+        g_show = subset_by_parent_multi(g, ISO_ID, iso_ids)
+        select_features_by_geometry(g_show, geom, OD_ID, "selected_od_ids", mode="add")
+        return
+
+    if level == "quadra":
+        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
+        g = read_layer("quadra")
+        if g is None:
+            return
+
+        mode = st.session_state.get("iso_next_mode", "quadra")
+        filter_censo_ids = ensure_set_of_str(st.session_state.get("quadra_filter_ids", set()))
+        g_show = get_quadras_subset_for_mode(
+            g,
+            mode=mode,
+            iso_ids=iso_ids,
+            filter_censo_ids=filter_censo_ids,
+        )
+
+        id_col_map = st.session_state.get("_quadra_id_col_map", QUADRA_UID)
+        if id_col_map not in g_show.columns:
+            id_col_map = QUADRA_ID
+
+        select_features_by_geometry(g_show, geom, id_col_map, "selected_quadra_ids", mode="add")
+        return
 
 # =============================================================================
 # UI: variável e navegação
@@ -1680,6 +1766,8 @@ def _variables_for_level(level: str) -> List[str]:
         return ["Isócronas", "Isócronas (classes)"]
     if level == "censo":
         return ["Setor censitário"]
+    if level == "od":
+        return ["Zonas OD"]
     if level == "quadra":
         return ["Quadras", "Cluster"]
     if level == "final":
@@ -1748,6 +1836,16 @@ def _fit_selected_censos() -> None:
     set_view_to_gdf(subset_by_id_multi(g_censo, CENSO_ID, cids), bump=0, zmax=18)
 
 
+def _fit_selected_ods() -> None:
+    od_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_od_ids", set())) if v}
+    if not od_ids:
+        return
+    g_od = read_layer("od")
+    if g_od is None:
+        return
+    set_view_to_gdf(subset_by_id_multi(g_od, OD_ID, od_ids), bump=0, zmax=18)
+
+
 def _fit_selected_quadras() -> None:
     qids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_quadra_ids", set())) if v}
     if not qids:
@@ -1760,47 +1858,48 @@ def _fit_selected_quadras() -> None:
         id_col = QUADRA_ID if QUADRA_ID in g_quad.columns else id_col
     set_view_to_gdf(subset_by_id_multi(g_quad, id_col, qids), bump=1, zmax=19)
 
-
 # =============================================================================
 # Fluxo (botões do painel)
 # =============================================================================
 def _go_from_isos_next() -> None:
     mode = st.session_state.get("iso_next_mode", "quadra")
+
     if mode == "censo":
         st.session_state["level"] = "censo"
         st.session_state["selected_censo_ids"] = set()
+        st.session_state["selected_od_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
         st.session_state["quadra_filter_col"] = CENSO_ID
-        st.session_state["quadra_filter_uids"] = set()
+        st.session_state["quadra_filter_ids"] = set()
         _final_reset()
-    else:
-        st.session_state["level"] = "quadra"
+        return
+
+    if mode == "od":
+        st.session_state["level"] = "od"
+        st.session_state["selected_censo_ids"] = set()
+        st.session_state["selected_od_ids"] = set()
         st.session_state["selected_quadra_ids"] = set()
         st.session_state["quadra_filter_col"] = CENSO_ID
-        st.session_state["quadra_filter_uids"] = set()
+        st.session_state["quadra_filter_ids"] = set()
         _final_reset()
+        return
+
+    st.session_state["level"] = "quadra"
+    st.session_state["selected_quadra_ids"] = set()
+    st.session_state["quadra_filter_col"] = CENSO_ID
+    st.session_state["quadra_filter_ids"] = set()
+    _final_reset()
 
 
 def _go_from_censo_to_quadras() -> None:
     sel_censo: Set[str] = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
-
-    # Mantém o modo de navegação como "censo" para que o nível quadra saiba que veio desse caminho.
     st.session_state["iso_next_mode"] = "censo"
-
-    # Define o filtro (pode ser vazio agora)
     st.session_state["quadra_filter_col"] = CENSO_ID
-    st.session_state["quadra_filter_uids"] = sel_censo
-
-    # Limpa seleção de quadras ao entrar no nível
+    st.session_state["quadra_filter_ids"] = sel_censo
     st.session_state["selected_quadra_ids"] = set()
-
-    # Vai para quadra sempre
     st.session_state["level"] = "quadra"
     _final_reset()
 
-    # Feedback opcional
-    if not sel_censo:
-        st.info("Nenhum setor selecionado. Exibindo quadras pelo recorte das isócronas (fallback por iso_id).")
 
 def _go_to_final() -> None:
     st.session_state["level"] = "final"
@@ -1835,6 +1934,14 @@ def control_panel() -> None:
     variable_panel()
 
     st.divider()
+    st.subheader("Ferramentas de seleção", anchor=False)
+    st.checkbox(
+        "Habilitar seleção por caixa/laço",
+        key="selection_draw_mode",
+        on_change=mark_ui_action,
+    )
+
+    st.divider()
     st.subheader("Debug", anchor=False)
     st.checkbox("Mostrar schema/colunas carregadas (debug)", key="debug_schema")
 
@@ -1851,12 +1958,21 @@ def control_panel() -> None:
         )
         st.radio(
             "Próximo nível",
-            options=["Quadras", "Setor censitário"],
-            index=0 if st.session_state.get("iso_next_mode") == "quadra" else 1,
+            options=["Quadras", "Setor censitário", "Zonas OD"],
+            index={
+                "quadra": 0,
+                "censo": 1,
+                "od": 2,
+            }.get(st.session_state.get("iso_next_mode", "quadra"), 0),
             key="_iso_next_ui",
             on_change=mark_ui_action,
         )
-        st.session_state["iso_next_mode"] = "quadra" if st.session_state["_iso_next_ui"] == "Quadras" else "censo"
+        _map_next = {
+            "Quadras": "quadra",
+            "Setor censitário": "censo",
+            "Zonas OD": "od",
+        }
+        st.session_state["iso_next_mode"] = _map_next[st.session_state["_iso_next_ui"]]
         st.button(
             "Prosseguir",
             use_container_width=True,
@@ -1866,15 +1982,12 @@ def control_panel() -> None:
 
     if lvl == "censo":
         okc = len(st.session_state.get("selected_censo_ids", set()) or set()) > 0
-    
         st.button(
             "Ajustar ao selecionado",
             use_container_width=True,
             disabled=not okc,
             on_click=lambda: (mark_ui_action(), _fit_selected_censos()),
         )
-    
-        # ✅ sempre habilitado, seleção de setores é opcional
         st.button(
             "Visualizar Quadras",
             use_container_width=True,
@@ -1882,6 +1995,14 @@ def control_panel() -> None:
             on_click=lambda: (mark_ui_action(), _go_from_censo_to_quadras()),
         )
 
+    if lvl == "od":
+        okod = len(st.session_state.get("selected_od_ids", set()) or set()) > 0
+        st.button(
+            "Ajustar ao selecionado",
+            use_container_width=True,
+            disabled=not okod,
+            on_click=lambda: (mark_ui_action(), _fit_selected_ods()),
+        )
 
     if lvl == "quadra":
         okq = len(st.session_state.get("selected_quadra_ids", set()) or set()) > 0
@@ -1899,114 +2020,28 @@ def control_panel() -> None:
         )
 
     if lvl == "final":
-        okq = len(st.session_state.get("selected_quadra_ids", set()) or set()) > 0
-        st.caption("Lotes.")
+        st.caption("Lotes filtrados pelas isócronas selecionadas.")
         st.button(
-            "Carregar Lotes", 
+            "Recarregar Lotes",
             use_container_width=True,
             disabled=False,
             on_click=lambda: (mark_ui_action(), _final_reset()),
         )
 
-
 # =============================================================================
-# FINAL: lotes filtrados
+# FINAL: lotes filtrados por isócronas
 # =============================================================================
-def _quadra_ids_from_selected(uids_or_ids: Set[str]) -> Set[str]:
-    """
-    Converte a seleção de quadras (que pode vir como quadra_uid 'iso__quadra')
-    para um conjunto de quadra_id canônicos (string), com normalização (zfill=6 quando numérico).
-    """
-    out: Set[str] = set()
-    for x in uids_or_ids or set():
-        s = _id_to_str(x)
-        if not s:
-            continue
-
-        # Seleção pode vir como UID: iso__quadra
-        if "__" in s:
-            _iso, q = split_quadra_uid(s)
-            qid = _id_to_str(q)
-        else:
-            qid = s
-
-        if not qid:
-            continue
-
-        # Normaliza padding quando for numérico (compatível com quadras)
-        nq = normalize_quadra_id(qid, 6) if isinstance(qid, str) else _id_to_str(qid)
-        if nq:
-            out.add(nq)
-
-    return out
-
-
-def _make_parquet_filters_for_quadras(quadra_ids: Set[str]) -> Any:
-    """
-    Monta filtros no formato aceito por pyarrow/geopandas.read_parquet(filters=...).
-    Nem todo ambiente suporta; por isso temos fallback em _read_lotes_for_selected_quadras.
-    """
-    vals = sorted({v for v in (quadra_ids or set()) if v})
-    if not vals:
-        return None
-    return [(QUADRA_ID, "in", vals)]
-
-
-def _detect_geometry_unit(g: "gpd.GeoDataFrame") -> Dict[str, Any]:
-    """
-    Identifica informações básicas da geometria (para debug):
-    - coluna geometry
-    - quantidade de geometrias não nulas
-    - se parece ser uma unidade única (1 registro)
-    - tipo de geometria predominante
-    """
-    out: Dict[str, Any] = {"geometry_col": None, "n_geoms": 0, "single_geometry": False, "geom_type": None}
-    if g is None or g.empty:
-        return out
-
-    try:
-        out["geometry_col"] = g.geometry.name
-    except Exception:
-        out["geometry_col"] = "geometry"
-
-    try:
-        n = int(g.geometry.notna().sum())
-        out["n_geoms"] = n
-        out["single_geometry"] = (len(g) == 1) or (n == 1)
-    except Exception:
-        pass
-
-    try:
-        gt = g.geometry.geom_type.dropna().iloc[0]
-        out["geom_type"] = str(gt)
-    except Exception:
-        pass
-
-    return out
-
-
 def _canonicalize_lote_schema(g: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
-    """
-    Normaliza o schema do layer de lotes para:
-    - padronização de colunas
-    - remoção de geometrias ruins
-    - normalização dos IDs relevantes
-    - CRS 4326
-    """
     if g is None or g.empty:
         return g
 
     g = standardize_columns(g)
     g = _drop_bad_geoms(g)
+    g = normalize_id_cols(g, [ISO_ID, QUADRA_ID, LOTE_ID])
 
-    # Normaliza IDs como string
-    g = normalize_id_cols(g, [QUADRA_ID, LOTE_ID])
-
-    # Normaliza quadra_id com zfill(6) quando aplicável (evita mismatch)
     if QUADRA_ID in g.columns:
         g[QUADRA_ID] = g[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
 
-    # CRS -> 4326 (mantém compatível com o resto do app)
     try:
         if g.crs is None:
             g = g.set_crs(4326, allow_override=True)
@@ -2019,9 +2054,6 @@ def _canonicalize_lote_schema(g: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
 
 
 def _read_lotes_for_selected_isos(selected_iso_ids: Set[str]) -> Optional["gpd.GeoDataFrame"]:
-    """
-    Carrega lotes filtrando por iso_id (único modo a partir de agora).
-    """
     try:
         p = ensure_local_layer("lote")
     except Exception as e:
@@ -2043,7 +2075,6 @@ def _read_lotes_for_selected_isos(selected_iso_ids: Set[str]) -> Optional["gpd.G
 
     g = _canonicalize_lote_schema(g)
 
-    # garante iso_id normalizado e filtra (garantia)
     if ISO_ID not in g.columns:
         st.error(f"Lotes.parquet não contém a coluna obrigatória '{ISO_ID}'. Colunas: {list(g.columns)}")
         return None
@@ -2053,7 +2084,7 @@ def _read_lotes_for_selected_isos(selected_iso_ids: Set[str]) -> Optional["gpd.G
     return g
 
 # =============================================================================
-# MAP RENDER (todos os níveis)
+# MAP RENDER
 # =============================================================================
 def render_map_panel() -> None:
     level = st.session_state.get("level", "subpref")
@@ -2062,9 +2093,6 @@ def render_map_panel() -> None:
     title = ""
     m = None
 
-    # -----------------------------
-    # SUBPREF (FIX UnboundLocalError)
-    # -----------------------------
     if level == "subpref":
         title = "Subprefeituras"
         g_sub = read_layer("subpref")
@@ -2164,19 +2192,14 @@ def render_map_panel() -> None:
         )
 
         g_show_viz = g_show.copy()
-
-        # Gera cor por classe de forma robusta (sem depender de apply->DataFrame)
         if ISO_CLASS_COL in g_show_viz.columns:
-            pairs = g_show_viz[ISO_CLASS_COL].map(iso_label_color)  # retorna (label, color)
-
-            # pairs pode ter NaN/None inesperado; protege
+            pairs = g_show_viz[ISO_CLASS_COL].map(iso_label_color)
             safe_pairs = []
             for p in pairs.tolist():
                 if isinstance(p, (tuple, list)) and len(p) == 2:
                     safe_pairs.append((str(p[0]), str(p[1])))
                 else:
                     safe_pairs.append(("Sem classe", ISO_DEFAULT_COLOR))
-
             labels, colors = zip(*safe_pairs) if safe_pairs else ([], [])
             g_show_viz["__iso_label"] = list(labels)
             g_show_viz["__iso_color"] = list(colors)
@@ -2216,8 +2239,7 @@ def render_map_panel() -> None:
             )
 
     elif level == "censo":
-        raw_iso_ids = st.session_state.get("selected_iso_ids")  # sem default
-        iso_ids = ensure_set_of_str(raw_iso_ids)
+        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids"))
         if not iso_ids:
             reset_to("isocrona")
             return
@@ -2230,7 +2252,6 @@ def render_map_panel() -> None:
         if g_censo is None or g_iso is None:
             st.stop()
 
-        # setor->iso pode estar em CENSO_PARENT ou ISO_ID
         if CENSO_PARENT in g_censo.columns:
             g_show = subset_by_parent_multi(g_censo, CENSO_PARENT, iso_ids)
         elif ISO_ID in g_censo.columns:
@@ -2267,18 +2288,65 @@ def render_map_panel() -> None:
             cache_key=f"censo:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['censo']}",
         )
 
-    # -----------------------------
-    # QUADRA (FIX: filtro por censo_id OU iso_id)
-    # -----------------------------
-    elif level == "quadra":
-        raw_iso_ids = st.session_state.get("selected_iso_ids")  # sem default
-        iso_ids = ensure_set_of_str(raw_iso_ids)
+    elif level == "od":
+        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids"))
         if not iso_ids:
             reset_to("isocrona")
             return
 
-        mode = st.session_state.get("iso_next_mode", "quadra")  # "quadra" | "censo"
-        filter_ids: Set[str] = ensure_set_of_str(st.session_state.get("quadra_filter_uids", set()))
+        sel_od = len(st.session_state.get("selected_od_ids", set()) or set())
+        title = f"Zonas OD — selecionadas: {sel_od}"
+
+        g_od = read_layer("od")
+        g_iso = read_layer("iso")
+        if g_od is None or g_iso is None:
+            st.stop()
+
+        if ISO_ID not in g_od.columns:
+            st.error(f"ZonasOD.parquet não contém '{ISO_ID}'. Colunas: {list(g_od.columns)}")
+            st.stop()
+
+        if OD_ID not in g_od.columns:
+            st.error(f"ZonasOD.parquet não contém '{OD_ID}'. Colunas: {list(g_od.columns)}")
+            st.stop()
+
+        g_show = subset_by_parent_multi(g_od, ISO_ID, iso_ids)
+        g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
+
+        if st.session_state.get("last_level") != "od":
+            set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=0)
+            st.session_state["last_level"] = "od"
+
+        m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
+        add_parent_fill(
+            m,
+            g_parent,
+            "Isócronas selecionadas (sombra)",
+            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
+            cache_key=f"parent:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
+        )
+        add_polygons_selectable(
+            m,
+            g_show,
+            "Zonas OD",
+            OD_ID,
+            tooltip_col=OD_ID,
+            selected_ids=st.session_state.get("selected_od_ids", set()),
+            fill_opacity=0.10,
+            selected_fill_opacity=0.0,
+            tooltip_prefix="Zona OD: ",
+            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["od"],
+            cache_key=f"od:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['od']}",
+        )
+
+    elif level == "quadra":
+        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids"))
+        if not iso_ids:
+            reset_to("isocrona")
+            return
+
+        mode = st.session_state.get("iso_next_mode", "quadra")
+        filter_ids: Set[str] = ensure_set_of_str(st.session_state.get("quadra_filter_ids", set()))
 
         sel_nq = len(st.session_state.get("selected_quadra_ids", set()) or set())
         title = (
@@ -2294,39 +2362,26 @@ def render_map_panel() -> None:
 
         g_parent = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
 
-        # FIX: coluna de clique/seleção no mapa
         if mode == "censo":
-            # Em modo censo, a seleção por quadra pode ser só QUADRA_ID mesmo.
             id_col_map = QUADRA_ID if QUADRA_ID in g_quad.columns else (QUADRA_UID if QUADRA_UID in g_quad.columns else QUADRA_ID)
         else:
             id_col_map = QUADRA_UID if QUADRA_UID in g_quad.columns else QUADRA_ID
         st.session_state["_quadra_id_col_map"] = id_col_map
 
-        # FIX: escolher parent col corretamente
         if mode == "censo":
-            # preferir CENSO_ID; se não existir, cair para ISO_ID
             parent_col = choose_quadra_parent_col(g_quad, preferred=CENSO_ID, fallback=ISO_ID)
 
-            # debug opcional
-            if st.session_state.get("debug_schema", False):
-                st.write("[debug] quadra mode=censo parent_col escolhido:", parent_col)
-                st.write("[debug] quadra filter_ids (setores):", len(filter_ids))
-                st.write("[debug] quadra iso_ids:", len(iso_ids))
-        
             if parent_col is None:
                 st.error(f"Quadras.parquet precisa ter '{CENSO_ID}' ou '{ISO_ID}'. Colunas: {list(g_quad.columns)}")
                 st.stop()
 
             if parent_col == CENSO_ID:
                 if not filter_ids:
-                    # ✅ seleção opcional: sem setores, exibir por iso_id
                     g_show = subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
                     st.info("Nenhum setor selecionado. Exibindo quadras pelo recorte das isócronas (fallback por iso_id).")
                 else:
                     g_show = subset_by_id_multi(g_quad, CENSO_ID, filter_ids)
-
             else:
-                # fallback: se não há censo_id nas quadras, filtramos por iso_id (mantém o app operável)
                 g_show = subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
         else:
             if ISO_ID not in g_quad.columns:
@@ -2347,13 +2402,11 @@ def render_map_panel() -> None:
             cache_key=f"parent:iso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}",
         )
 
-        # visualização cluster
         g_show_viz = attach_quadras_csv(g_show)
         if CLUSTER_COL in g_show_viz.columns:
             g_show_viz["__cluster_code"] = g_show_viz[CLUSTER_COL].apply(_coerce_int)
             g_show_viz["__cluster_color"] = g_show_viz["__cluster_code"].apply(cluster_color)
 
-        # FIX: incluir CENSO_ID no GeoJSON quando aplicável (para clique/props)
         extra_props = [CENSO_ID] if (mode == "censo" and CENSO_ID in g_show.columns) else []
 
         if st.session_state.get("variable") == "Cluster" and "__cluster_color" in g_show_viz.columns:
@@ -2389,14 +2442,15 @@ def render_map_panel() -> None:
             )
 
     else:
-        # FINAL (apenas por isócronas selecionadas)
         title = "Lotes (filtrado por isócronas selecionadas)"
 
         iso_ids: Set[str] = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
-        iso_ids_sorted = sorted([v for v in iso_ids if v])  # garante lista estável/sem vazios
+        iso_ids_sorted = sorted([v for v in iso_ids if v])
 
-        m = make_carto_map(center=st.session_state.get("view_center", (-23.55, -46.63)),
-                           zoom=st.session_state.get("view_zoom", 11))
+        m = make_carto_map(
+            center=st.session_state.get("view_center", (-23.55, -46.63)),
+            zoom=st.session_state.get("view_zoom", 11),
+        )
 
         if not iso_ids_sorted:
             st.warning("Selecione ao menos uma isócrona para visualizar lotes.")
@@ -2406,12 +2460,10 @@ def render_map_panel() -> None:
             if g_lote is None or getattr(g_lote, "empty", True):
                 st.warning("Nenhum lote encontrado para as isócronas selecionadas (ou falha de leitura).")
             else:
-                # ajusta visão ao entrar no nível final (ou na primeira renderização com dados)
                 if st.session_state.get("last_level") != "final":
                     set_view_to_gdf(g_lote, bump=0, zmax=19)
                     st.session_state["last_level"] = "final"
 
-                # id/tooltip robustos
                 lote_id_col = LOTE_ID if (LOTE_ID in g_lote.columns) else (QUADRA_ID if QUADRA_ID in g_lote.columns else ISO_ID)
                 tooltip_col = lote_id_col
 
@@ -2424,14 +2476,17 @@ def render_map_panel() -> None:
                     selected_ids=set(),
                     fill_opacity=0.08,
                     tooltip_prefix="Lote: " if lote_id_col == LOTE_ID else ("Quadra: " if lote_id_col == QUADRA_ID else "Isócrona: "),
-                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL.get("lote", 0.00012),
-                    cache_key=f"loteISO:{'|'.join(iso_ids_sorted)}:{SIMPLIFY_TOL_BY_LEVEL.get('lote', 0.00012)}",
+                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
+                    cache_key=f"loteISO:{'|'.join(iso_ids_sorted)}:{SIMPLIFY_TOL_BY_LEVEL['lote']}",
                 )
+
+    if m is not None and st.session_state.get("selection_draw_mode", False):
+        add_draw_tools(m)
 
     st.markdown(f"### {title}")
 
     if st_folium is None:
-        st.error("Falha ao importar `streamlit_folium` (dependência ausente ou quebrada).")
+        st.error("Falha ao importar `streamlit_folium`.")
         return
 
     _ = st_folium(
@@ -2439,7 +2494,13 @@ def render_map_panel() -> None:
         height=780,
         use_container_width=True,
         key=MAP_KEY,
-        returned_objects=["last_clicked", "last_object_clicked", "last_object_clicked_tooltip"],
+        returned_objects=[
+            "last_clicked",
+            "last_object_clicked",
+            "last_object_clicked_tooltip",
+            "all_drawings",
+            "last_active_drawing",
+        ],
     )
     st.session_state["_map_level_rendered"] = level
 
@@ -2455,19 +2516,14 @@ def main() -> None:
         st.error("Este app requer `geopandas`, `folium` e `streamlit-folium`.")
         return
 
-    # ------------------------------------------------------------
-    # Pré-consumo do clique do mapa:
-    # - Consome o clique do RUN anterior antes do render do mapa.
-    # - Só consome se o mapa anterior foi renderizado no mesmo nível atual.
-    # ------------------------------------------------------------
     ui_sig = int(st.session_state.get("_ui_action_sig", 0))
     ui_seen = int(st.session_state.get("_ui_action_sig_seen", 0))
     ui_action = ui_sig != ui_seen
     st.session_state["_ui_action_sig_seen"] = ui_sig
 
-    # Se houve ação de UI (botões, selectbox, radio), limpamos dedupe de clique
     if ui_action:
         st.session_state["last_click_sig"] = ""
+        st.session_state["last_draw_sig"] = ""
 
     cur_level = st.session_state.get("level", "subpref")
     rendered_level = st.session_state.get("_map_level_rendered")
@@ -2477,6 +2533,7 @@ def main() -> None:
 
     if allow_click and isinstance(map_state_prev, dict) and map_state_prev:
         consume_map_event(cur_level, map_state_prev, allow_click=True)
+        consume_draw_selection(cur_level, map_state_prev)
 
     sanitize_level_state()
 
@@ -2494,36 +2551,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
