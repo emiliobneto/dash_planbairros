@@ -639,76 +639,113 @@ def extract_drive_id(raw: str) -> str:
     return m.group(1) if m else ""
 
 
+def _drive_download_candidates(file_id_or_url: str) -> List[str]:
+    raw = (file_id_or_url or "").strip()
+    file_id = extract_drive_id(raw)
+    urls: List[str] = []
+
+    if file_id:
+        urls.append(f"https://drive.google.com/uc?export=download&id={file_id}")
+        urls.append(f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t")
+
+    if raw.lower().startswith("http"):
+        urls.append(raw)
+
+    seen = set()
+    out = []
+    for u in urls:
+        if u not in seen:
+            out.append(u)
+            seen.add(u)
+    return out
+
+
+def _looks_like_html(path: Path) -> bool:
+    try:
+        head = path.read_bytes()[:2048].lower()
+        return b"<!doctype html" in head or b"<html" in head or b"<head" in head
+    except Exception:
+        return False
+
+
 def download_drive_file(file_id_or_url: str, dst: Path, label: str = "") -> Path:
     import requests
 
-    file_id = extract_drive_id(file_id_or_url)
-    if not file_id:
+    raw = (file_id_or_url or "").strip()
+    file_id = extract_drive_id(raw)
+    if not raw and not file_id:
         raise RuntimeError(f"FILE_ID inválido: não foi possível extrair ID de: {file_id_or_url!r}")
 
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    if dst.exists() and dst.stat().st_size > 0:
+    if dst.exists() and dst.stat().st_size > 0 and not _looks_like_html(dst):
         return dst
 
     session = requests.Session()
-    url = "https://drive.google.com/uc"
-    params = {"export": "download", "id": file_id}
-
-    def get_confirm_token(resp) -> Optional[str]:
-        for k, v in resp.cookies.items():
-            if k.startswith("download_warning"):
-                return v
-        return None
-
-    resp = session.get(url, params=params, stream=True, allow_redirects=True, timeout=120)
-    token = get_confirm_token(resp)
-
-    if token:
-        params2 = {"export": "download", "id": file_id, "confirm": token}
-        resp = session.get(url, params=params2, stream=True, allow_redirects=True, timeout=120)
-
-    if resp.status_code != 200:
-        final_url = getattr(resp, "url", url)
-        ct = resp.headers.get("Content-Type", "")
-        raise RuntimeError(
-            f"Download falhou para '{label or dst.name}' (HTTP {resp.status_code}). "
-            f"URL={final_url} Content-Type={ct}. "
-            f"Possíveis causas: link/ID incorreto, arquivo removido/movido, ou permissões."
-        )
-
-    total = int(resp.headers.get("Content-Length", 0) or 0)
-    chunk = 1024 * 1024
-
     ui_label = label or dst.name
-    prog = st.progress(0, text=f"Baixando {ui_label}…")
-    downloaded = 0
+    candidates = _drive_download_candidates(file_id_or_url)
+    last_error = None
 
-    with open(dst, "wb") as f:
-        for part in resp.iter_content(chunk_size=chunk):
-            if not part:
+    for base_url in candidates:
+        try:
+            resp = session.get(base_url, stream=True, allow_redirects=True, timeout=120)
+
+            if "drive.google.com/uc" in base_url and file_id:
+                token = None
+                for k, v in resp.cookies.items():
+                    if k.startswith("download_warning"):
+                        token = v
+                        break
+                if token:
+                    confirm_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={token}"
+                    resp = session.get(confirm_url, stream=True, allow_redirects=True, timeout=120)
+
+            if resp.status_code != 200:
+                last_error = RuntimeError(
+                    f"Download falhou para '{ui_label}' (HTTP {resp.status_code}). URL={getattr(resp, 'url', base_url)}"
+                )
                 continue
-            f.write(part)
-            downloaded += len(part)
-            if total > 0:
-                pct = min(int(downloaded * 100 / total), 100)
-                prog.progress(pct, text=f"Baixando {ui_label}… {pct}%")
 
-    prog.empty()
+            total = int(resp.headers.get("Content-Length", 0) or 0)
+            chunk = 1024 * 1024
+            downloaded = 0
+            prog = st.progress(0, text=f"Baixando {ui_label}…")
 
-    try:
-        size = dst.stat().st_size
-        if size < 300_000:
-            head = dst.read_bytes()[:512].lower()
-            if b"<!doctype html" in head or b"<html" in head:
+            with open(dst, "wb") as f:
+                for part in resp.iter_content(chunk_size=chunk):
+                    if not part:
+                        continue
+                    f.write(part)
+                    downloaded += len(part)
+                    if total > 0:
+                        pct = min(int(downloaded * 100 / total), 100)
+                        prog.progress(pct, text=f"Baixando {ui_label}… {pct}%")
+
+            prog.empty()
+
+            if dst.stat().st_size <= 0:
                 dst.unlink(missing_ok=True)
-                raise RuntimeError(
+                last_error = RuntimeError(f"Download de '{ui_label}' resultou em arquivo vazio.")
+                continue
+
+            if _looks_like_html(dst):
+                dst.unlink(missing_ok=True)
+                last_error = RuntimeError(
                     f"Download de '{ui_label}' retornou HTML. Verifique permissões e ID do Drive."
                 )
-    except Exception:
-        raise
+                continue
 
-    return dst
+            return dst
+
+        except Exception as e:
+            try:
+                if dst.exists() and _looks_like_html(dst):
+                    dst.unlink(missing_ok=True)
+            except Exception:
+                pass
+            last_error = e
+
+    raise RuntimeError(str(last_error) if last_error else f"Falha ao baixar '{ui_label}'.")
 
 
 def get_drive_raw(layer_key: str) -> str:
@@ -731,7 +768,7 @@ def local_layer_path(layer_key: str) -> Path:
 
 def layer_available_locally(layer_key: str) -> bool:
     p = local_layer_path(layer_key)
-    return p.exists() and p.stat().st_size > 0
+    return p.exists() and p.stat().st_size > 0 and not _looks_like_html(p)
 
 
 def ensure_local_layer(layer_key: str, *, force_redownload: bool = False) -> Path:
@@ -752,7 +789,14 @@ def ensure_local_layer(layer_key: str, *, force_redownload: bool = False) -> Pat
             f"Layer '{layer_key}' não encontrada localmente ({dst.name}) e não há FILE_ID/link configurado."
         )
 
-    return download_drive_file(raw, dst, label=dst.name)
+    try:
+        return download_drive_file(raw, dst, label=dst.name)
+    except Exception as e:
+        raise RuntimeError(
+            f"Falha ao obter '{dst.name}'. "
+            f"Coloque o arquivo manualmente em '{dst}' ou corrija o link/ID do Google Drive. "
+            f"Detalhe: {e}"
+        )
 
 
 def get_quadras_csv_raw() -> str:
