@@ -176,7 +176,7 @@ COL_ALIASES: Dict[str, Set[str]] = {
     SUBPREF_ID: _mk_aliases(SUBPREF_ID),
     DIST_ID: _mk_aliases(DIST_ID),
     ISO_ID: _mk_aliases(ISO_ID),
-    OD_ID: _mk_aliases(OD_ID) | {"OD_ID", "zona_od", "zonaod", "id_od", "od"},
+    OD_ID: _mk_aliases(OD_ID) | {"OD_ID", "zona_od", "zonaod", "id_od", "od", "od_id},
     QUADRA_ID: _mk_aliases(QUADRA_ID),
     LOTE_ID: _mk_aliases(LOTE_ID),
     CENSO_ID: _mk_aliases(CENSO_ID) | {"cendo_id", "CENDO_ID", "setor_id", "id_setor", "codigo_setor", "cd_setor"},
