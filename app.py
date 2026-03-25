@@ -414,7 +414,7 @@ def inject_css() -> None:
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
         html, body, .stApp {{
-            font-family: 'Roboto', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+            font-family: 'Roboto', Arial, sans-serif;
         }}
         .main .block-container {{
             padding-top: .15rem !important;
@@ -1287,6 +1287,75 @@ def add_parent_fill(
     fg.add_to(m)
 
 
+def add_labels_on_map(
+    m,
+    gdf: "gpd.GeoDataFrame",
+    label_col: str,
+    *,
+    font_size: int = 12,
+    color: str = "#000000",
+    weight: str = "700",
+) -> None:
+    if folium is None or gdf is None or gdf.empty:
+        return
+    if label_col not in gdf.columns:
+        return
+
+    try:
+        g = gdf.copy()
+        g = g[g.geometry.notna()].copy()
+        if g.empty:
+            return
+
+        points = g.geometry.representative_point()
+
+        for idx, row in g.iterrows():
+            label = row.get(label_col)
+            if pd.isna(label):
+                continue
+
+            txt = str(label).strip()
+            if not txt:
+                continue
+
+            pt = points.loc[idx]
+            if pt is None or getattr(pt, "is_empty", False):
+                continue
+
+            safe_txt = (
+                txt.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+
+            folium.Marker(
+                location=[pt.y, pt.x],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="
+                        font-family: Roboto, Arial, sans-serif;
+                        font-size: {font_size}px;
+                        color: {color};
+                        font-weight: {weight};
+                        text-align: center;
+                        white-space: nowrap;
+                        line-height: 1.1;
+                        text-shadow:
+                            -1px -1px 0 #ffffff,
+                             1px -1px 0 #ffffff,
+                            -1px  1px 0 #ffffff,
+                             1px  1px 0 #ffffff,
+                             0px  0px 3px #ffffff;
+                    ">
+                        {safe_txt}
+                    </div>
+                    """
+                ),
+            ).add_to(m)
+    except Exception:
+        pass
+
+
 def add_polygons_selectable(
     m,
     gdf: "gpd.GeoDataFrame",
@@ -1927,6 +1996,16 @@ def render_map_panel() -> None:
             cache_key=f"subpref:{SIMPLIFY_TOL_BY_LEVEL['subpref']}",
         )
 
+        if "sp_nome" in g_sub.columns:
+            add_labels_on_map(
+                m,
+                g_sub,
+                "sp_nome",
+                font_size=13,
+                color="#000000",
+                weight="700",
+            )
+
     elif level == "distrito":
         sp = _id_to_str(st.session_state.get("selected_subpref_id"))
         if sp is None:
@@ -1971,6 +2050,16 @@ def render_map_panel() -> None:
             simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
             cache_key=f"dist:sp:{sp}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}",
         )
+
+        if "ds_nome" in g_show.columns:
+            add_labels_on_map(
+                m,
+                g_show,
+                "ds_nome",
+                font_size=12,
+                color="#000000",
+                weight="700",
+            )
 
     elif level == "isocrona":
         d = _id_to_str(st.session_state.get("selected_distrito_id"))
