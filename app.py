@@ -139,7 +139,7 @@ LOTE_PARENT = QUADRA_ID
 LAYER_ID_COLS = {
     "subpref": [SUBPREF_ID],
     "dist": [DIST_ID, DIST_PARENT],
-    "iso": [ISO_ID, ISO_PARENT],
+    "iso": [ISO_ID, ISO_PARENT, SUBPREF_ID],
     "censo": [CENSO_ID, CENSO_PARENT, QUADRA_ID, ISO_ID],
     "od": [OD_ID, OD_PARENT, ISO_ID],
     "quadra": [QUADRA_ID, ISO_ID, CENSO_ID, QUADRA_UID],
@@ -208,22 +208,34 @@ def standardize_columns(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
 def _id_to_str(v: Any) -> Optional[str]:
     if v is None:
         return None
+
+    if isinstance(v, str):
+        s = v.strip()
+        return s if s != "" else None
+
     try:
         if pd.isna(v):
             return None
     except Exception:
         pass
 
+    if isinstance(v, bool):
+        return str(v)
+
+    if isinstance(v, int):
+        return str(v)
+
     if isinstance(v, float):
         if v.is_integer():
             return str(int(v))
         return str(v).strip()
-    if isinstance(v, int):
-        return str(v)
+
     s = str(v).strip()
+    if s == "":
+        return None
     if s.endswith(".0"):
         core = s[:-2]
-        if core.isdigit():
+        if core.replace("-", "").isdigit():
             return core
     return s
 
@@ -417,7 +429,7 @@ def init_state() -> None:
     st.session_state.setdefault("selected_od_ids", set())
     st.session_state.setdefault("selected_quadra_ids", set())
 
-    st.session_state.setdefault("iso_next_mode", "quadra")  # "quadra" | "censo" | "od"
+    st.session_state.setdefault("iso_next_mode", "quadra")
 
     st.session_state.setdefault("quadra_filter_col", CENSO_ID)
     st.session_state.setdefault("quadra_filter_ids", set())
@@ -445,7 +457,6 @@ def init_state() -> None:
     st.session_state.setdefault("final_loaded", False)
     st.session_state.setdefault("_final_lotes_gdf", None)
 
-    st.session_state.setdefault("debug_schema", False)
     st.session_state.setdefault("selection_draw_mode", False)
 
 
@@ -549,25 +560,6 @@ def _toggle_in_set(key: str, value: Any) -> None:
     else:
         s.add(value)
     st.session_state[key] = s
-
-
-def debug_layer_schema(layer_key: str, g: Optional["gpd.GeoDataFrame"], *, path: Optional[Path] = None) -> None:
-    if not st.session_state.get("debug_schema", False):
-        return
-    if g is None:
-        st.write(f"[debug] layer={layer_key}: None")
-        return
-    if path is not None:
-        try:
-            st.write(f"[debug] layer={layer_key} path={path} mtime={path.stat().st_mtime} size={path.stat().st_size}")
-        except Exception:
-            st.write(f"[debug] layer={layer_key} path={path}")
-    st.write(f"[debug] layer={layer_key} shape={g.shape}")
-    st.write(f"[debug] layer={layer_key} cols={list(g.columns)}")
-    try:
-        st.write(f"[debug] layer={layer_key} crs={getattr(g, 'crs', None)}")
-    except Exception:
-        pass
 
 # =============================================================================
 # SANITIZE
@@ -897,8 +889,6 @@ def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
     cache_meta[layer_key] = meta
     st.session_state["_layer_cache"] = cache
     st.session_state["_layer_cache_meta"] = cache_meta
-
-    debug_layer_schema(layer_key, g, path=p)
     return g
 
 
@@ -1569,7 +1559,12 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
                 if d is not None:
                     g = read_layer("iso")
                     if g is not None:
-                        picked = pick_feature_id(subset_by_parent(g, ISO_PARENT, d), click, ISO_ID)
+                        g_show = subset_by_parent(g, ISO_PARENT, d)
+                        if g_show.empty and DIST_ID in g.columns:
+                            g2 = g.copy()
+                            g2[DIST_ID] = g2[DIST_ID].astype(str).str.strip()
+                            g_show = g2[g2[DIST_ID] == str(d).strip()].copy()
+                        picked = pick_feature_id(g_show, click, ISO_ID)
             elif level == "censo":
                 iso_ids = {v for v in (_id_to_str(x) for x in st.session_state.get("selected_iso_ids", set())) if v}
                 g = read_layer("censo")
@@ -1708,6 +1703,10 @@ def consume_draw_selection(level: str, map_state: Dict[str, Any]) -> None:
         if g is None or d is None:
             return
         g_show = subset_by_parent(g, ISO_PARENT, d)
+        if g_show.empty and DIST_ID in g.columns:
+            g2 = g.copy()
+            g2[DIST_ID] = g2[DIST_ID].astype(str).str.strip()
+            g_show = g2[g2[DIST_ID] == str(d).strip()].copy()
         select_features_by_geometry(g_show, geom, ISO_ID, "selected_iso_ids", mode="add")
         return
 
@@ -1934,19 +1933,7 @@ def control_panel() -> None:
     variable_panel()
 
     st.divider()
-    st.subheader("Ferramentas de seleção", anchor=False)
-    st.checkbox(
-        "Habilitar seleção por caixa/laço",
-        key="selection_draw_mode",
-        on_change=mark_ui_action,
-    )
-
-    st.divider()
-    st.subheader("Debug", anchor=False)
-    st.checkbox("Mostrar schema/colunas carregadas (debug)", key="debug_schema")
-
-    st.divider()
-    st.subheader("Ações", anchor=False)
+    st.subheader("Ações e seleção", anchor=False)
 
     if lvl == "isocrona":
         ok = len(st.session_state.get("selected_iso_ids", set()) or set()) > 0
@@ -2027,6 +2014,12 @@ def control_panel() -> None:
             disabled=False,
             on_click=lambda: (mark_ui_action(), _final_reset()),
         )
+
+    st.checkbox(
+        "Habilitar seleção por caixa/laço",
+        key="selection_draw_mode",
+        on_change=mark_ui_action,
+    )
 
 # =============================================================================
 # FINAL: lotes filtrados por isócronas
@@ -2176,7 +2169,21 @@ def render_map_panel() -> None:
             st.stop()
 
         g_parent = subset_by_id(g_dist, DIST_ID, d)
+
+        if DIST_ID not in g_iso.columns:
+            st.error(f"Isocronas.parquet não contém '{DIST_ID}'. Colunas: {list(g_iso.columns)}")
+            st.stop()
+
+        if ISO_ID not in g_iso.columns:
+            st.error(f"Isocronas.parquet não contém '{ISO_ID}'. Colunas: {list(g_iso.columns)}")
+            st.stop()
+
         g_show = subset_by_parent(g_iso, ISO_PARENT, d)
+
+        if g_show.empty and DIST_ID in g_iso.columns:
+            g_iso2 = g_iso.copy()
+            g_iso2[DIST_ID] = g_iso2[DIST_ID].astype(str).str.strip()
+            g_show = g_iso2[g_iso2[DIST_ID] == str(d).strip()].copy()
 
         if st.session_state.get("last_level") != "isocrona":
             set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=0)
@@ -2231,7 +2238,7 @@ def render_map_panel() -> None:
                 ISO_ID,
                 selected_ids=st.session_state.get("selected_iso_ids", set()),
                 tooltip_col=ISO_ID,
-                fill_opacity=0.14,
+                fill_opacity=0.30,
                 selected_fill_opacity=0.0,
                 tooltip_prefix="Isócrona: ",
                 simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
