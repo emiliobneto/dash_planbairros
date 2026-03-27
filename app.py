@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import base64
+import json
 import re
 
 import streamlit as st
@@ -833,6 +834,25 @@ def get_lotes_folder_raw() -> str:
     return LOTES_DRIVE_FOLDER_URL
 
 
+def extract_drive_folder_id(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+
+    m = re.search(r"/folders/([a-zA-Z0-9_-]+)", raw)
+    if m:
+        return m.group(1)
+
+    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", raw)
+    if m:
+        return m.group(1)
+
+    if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", raw) and "http" not in raw.lower():
+        return raw
+
+    return ""
+
+
 def lotes_local_dir() -> Path:
     p = DATA_CACHE_DIR / "lotes"
     p.mkdir(parents=True, exist_ok=True)
@@ -844,17 +864,86 @@ def lote_local_path_for_distrito(distrito_id: Any) -> Path:
     return lotes_local_dir() / f"distrito_{did}.parquet"
 
 
-def _drive_folder_file_candidates(folder_raw: str, filename: str) -> List[str]:
-    folder_raw = (folder_raw or "").strip()
-    candidates: List[str] = []
+def _download_url_from_file_id(file_id: str) -> str:
+    return f"https://drive.google.com/uc?export=download&id={file_id}"
 
-    if folder_raw.lower().startswith("http"):
-        if folder_raw.endswith("/"):
-            candidates.append(f"{folder_raw}{filename}")
-        else:
-            candidates.append(f"{folder_raw}/{filename}")
 
-    return candidates
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
+def list_drive_folder_files(folder_id: str) -> Dict[str, str]:
+    import requests
+
+    folder_id = (folder_id or "").strip()
+    if not folder_id:
+        return {}
+
+    urls = [
+        f"https://drive.google.com/drive/folders/{folder_id}?usp=sharing",
+        f"https://drive.google.com/drive/u/0/folders/{folder_id}",
+    ]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    found: Dict[str, str] = {}
+
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=60)
+            if resp.status_code != 200:
+                continue
+
+            html = resp.text
+
+            matches = re.findall(r'\["([a-zA-Z0-9_-]{20,})","([^"]+\.parquet)"', html)
+            for file_id, name in matches:
+                found[name] = file_id
+
+            matches2 = re.findall(r'\["([^"]+\.parquet)","([a-zA-Z0-9_-]{20,})"', html)
+            for name, file_id in matches2:
+                found[name] = file_id
+
+            blob_matches = re.findall(r'(\[\["[^<]{0,50000}?\]\])', html)
+            for blob in blob_matches[:5]:
+                try:
+                    arr = json.loads(blob)
+                    stack = [arr]
+                    while stack:
+                        cur = stack.pop()
+                        if isinstance(cur, list):
+                            if len(cur) >= 2:
+                                a, b = cur[0], cur[1]
+                                if isinstance(a, str) and isinstance(b, str):
+                                    if a.endswith(".parquet") and re.fullmatch(r"[a-zA-Z0-9_-]{20,}", b):
+                                        found[a] = b
+                                    elif b.endswith(".parquet") and re.fullmatch(r"[a-zA-Z0-9_-]{20,}", a):
+                                        found[b] = a
+                            stack.extend(cur)
+                except Exception:
+                    pass
+
+            if found:
+                return found
+
+        except Exception:
+            continue
+
+    return found
+
+
+def find_lote_file_id_in_folder(distrito_id: Any) -> str:
+    did = _id_to_str(distrito_id)
+    if not did:
+        return ""
+
+    folder_raw = get_lotes_folder_raw()
+    folder_id = extract_drive_folder_id(folder_raw)
+    if not folder_id:
+        return ""
+
+    target_name = f"distrito_{did}.parquet"
+    files_map = list_drive_folder_files(folder_id)
+    return files_map.get(target_name, "")
 
 
 def ensure_local_lote_file(distrito_id: Any, *, force_redownload: bool = False) -> Path:
@@ -875,7 +964,6 @@ def ensure_local_lote_file(distrito_id: Any, *, force_redownload: bool = False) 
 
     filename = f"distrito_{did}.parquet"
 
-    # Prioridade 1: arquivo já colocado localmente
     repo_candidates = [
         REPO_ROOT / filename,
         REPO_ROOT / "data" / filename,
@@ -889,22 +977,20 @@ def ensure_local_lote_file(distrito_id: Any, *, force_redownload: bool = False) 
                 dst.write_bytes(p.read_bytes())
             return dst
 
-    # Prioridade 2: tentativa via link configurado da pasta
-    folder_raw = get_lotes_folder_raw()
-    candidates = _drive_folder_file_candidates(folder_raw, filename)
-
-    last_error = None
-    for cand in candidates:
+    file_id = find_lote_file_id_in_folder(did)
+    if file_id:
         try:
-            return download_drive_file(cand, dst, label=filename)
+            return download_drive_file(_download_url_from_file_id(file_id), dst, label=filename)
         except Exception as e:
-            last_error = e
+            raise RuntimeError(
+                f"Falha ao baixar o arquivo de lotes '{filename}' a partir do Google Drive. Detalhe: {e}"
+            )
 
     raise RuntimeError(
-        f"Não foi possível obter o arquivo de lotes '{filename}'. "
-        f"Coloque-o localmente em uma destas pastas: "
-        f"'{REPO_ROOT}', '{REPO_ROOT / 'data'}', '{REPO_ROOT / 'lotes'}' ou '{lotes_local_dir()}'. "
-        f"Detalhe: {last_error if last_error else 'arquivo não encontrado'}"
+        f"Não foi possível localizar o arquivo de lotes '{filename}' dentro da pasta do Google Drive. "
+        f"Verifique se a pasta está pública e se o arquivo existe com esse nome exato. "
+        f"Alternativamente, coloque-o localmente em uma destas pastas: "
+        f"'{REPO_ROOT}', '{REPO_ROOT / 'data'}', '{REPO_ROOT / 'lotes'}' ou '{lotes_local_dir()}'."
     )
 
 # =============================================================================
