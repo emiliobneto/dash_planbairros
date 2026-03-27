@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import base64
+import json
 import re
 
 import streamlit as st
@@ -145,7 +146,7 @@ LAYER_ID_COLS = {
     "censo": [CENSO_ID, CENSO_PARENT, QUADRA_ID, ISO_ID],
     "od": [OD_ID, OD_PARENT, ISO_ID],
     "quadra": [QUADRA_ID, ISO_ID, CENSO_ID, QUADRA_UID],
-    "lote": [LOTE_ID, ISO_ID, DIST_ID],
+    "lote": [LOTE_ID, LOTE_PARENT, DIST_ID],
 }
 
 LOCAL_FILENAMES = {
@@ -155,13 +156,13 @@ LOCAL_FILENAMES = {
     "censo": "Setorcensitario.parquet",
     "od": "ZonasOD.parquet",
     "quadra": "Quadras.parquet",
-    "lote": "Lotes.parquet",
 }
 
 # =============================================================================
 # LOTES
 # =============================================================================
 LOTES_DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/17-lA2P_D4oV1joysDf7BOAgp358IcoEG?usp=drive_link"
+LOTES_SECRET_KEY = "PB_LOTES_FOLDER_URL"
 
 # =============================================================================
 # NORMALIZAÇÃO
@@ -181,7 +182,7 @@ def _mk_aliases(base: str) -> Set[str]:
 
 COL_ALIASES: Dict[str, Set[str]] = {
     SUBPREF_ID: _mk_aliases(SUBPREF_ID),
-    DIST_ID: _mk_aliases(DIST_ID),
+    DIST_ID: _mk_aliases(DIST_ID) | {"id_distrito", "dist_id", "codigo_distrito", "cd_distrito"},
     ISO_ID: _mk_aliases(ISO_ID),
     OD_ID: _mk_aliases(OD_ID) | {"OD_ID", "zona_od", "zonaod", "id_od", "od", "od_id"},
     QUADRA_ID: _mk_aliases(QUADRA_ID),
@@ -821,76 +822,176 @@ def ensure_local_layer(layer_key: str, *, force_redownload: bool = False) -> Pat
 # =============================================================================
 # LOTES / IO ESPECÍFICO
 # =============================================================================
+def get_lotes_folder_raw() -> str:
+    raw_ui = str(st.session_state.get("drive_lotes_folder_raw", "")).strip()
+    if raw_ui:
+        return raw_ui
+
+    raw_secret = _get_secret(LOTES_SECRET_KEY)
+    if raw_secret:
+        return raw_secret
+
+    return LOTES_DRIVE_FOLDER_URL
+
+
+def extract_drive_folder_id(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+
+    m = re.search(r"/folders/([a-zA-Z0-9_-]+)", raw)
+    if m:
+        return m.group(1)
+
+    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", raw)
+    if m:
+        return m.group(1)
+
+    if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", raw) and "http" not in raw.lower():
+        return raw
+
+    return ""
+
+
 def lotes_local_dir() -> Path:
     p = DATA_CACHE_DIR / "lotes"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
-def local_lotes_candidates() -> List[Path]:
-    return [
-        REPO_ROOT / "Lotes.parquet",
-        REPO_ROOT / "data" / "Lotes.parquet",
-        REPO_ROOT / "lotes" / "Lotes.parquet",
-        DATA_CACHE_DIR / "Lotes.parquet",
-        lotes_local_dir() / "Lotes.parquet",
+def lote_local_path_for_distrito(distrito_id: Any) -> Path:
+    did = _id_to_str(distrito_id) or ""
+    return lotes_local_dir() / f"Distrito_{did}.parquet"
+
+
+def _download_url_from_file_id(file_id: str) -> str:
+    return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
+def list_drive_folder_files(folder_id: str) -> Dict[str, str]:
+    import requests
+
+    folder_id = (folder_id or "").strip()
+    if not folder_id:
+        return {}
+
+    urls = [
+        f"https://drive.google.com/drive/folders/{folder_id}?usp=sharing",
+        f"https://drive.google.com/drive/u/0/folders/{folder_id}",
     ]
 
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+    }
 
-def ensure_local_lotes_layer() -> Path:
-    for p in local_lotes_candidates():
+    found: Dict[str, str] = {}
+
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=60)
+            if resp.status_code != 200:
+                continue
+
+            html = resp.text
+
+            matches = re.findall(r'\["([a-zA-Z0-9_-]{20,})","([^"]+\.parquet)"', html)
+            for file_id, name in matches:
+                found[name] = file_id
+
+            matches2 = re.findall(r'\["([^"]+\.parquet)","([a-zA-Z0-9_-]{20,})"', html)
+            for name, file_id in matches2:
+                found[name] = file_id
+
+            blob_matches = re.findall(r'(\[\["[^<]{0,50000}?\]\])', html)
+            for blob in blob_matches[:5]:
+                try:
+                    arr = json.loads(blob)
+                    stack = [arr]
+                    while stack:
+                        cur = stack.pop()
+                        if isinstance(cur, list):
+                            if len(cur) >= 2:
+                                a, b = cur[0], cur[1]
+                                if isinstance(a, str) and isinstance(b, str):
+                                    if a.endswith(".parquet") and re.fullmatch(r"[a-zA-Z0-9_-]{20,}", b):
+                                        found[a] = b
+                                    elif b.endswith(".parquet") and re.fullmatch(r"[a-zA-Z0-9_-]{20,}", a):
+                                        found[b] = a
+                            stack.extend(cur)
+                except Exception:
+                    pass
+
+            if found:
+                return found
+
+        except Exception:
+            continue
+
+    return found
+
+
+def find_lote_file_id_in_folder(distrito_id: Any) -> str:
+    did = _id_to_str(distrito_id)
+    if not did:
+        return ""
+
+    folder_raw = get_lotes_folder_raw()
+    folder_id = extract_drive_folder_id(folder_raw)
+    if not folder_id:
+        return ""
+
+    target_name = f"Distrito_{did}.parquet"
+    files_map = list_drive_folder_files(folder_id)
+    return files_map.get(target_name, "")
+
+
+def ensure_local_lote_file(distrito_id: Any, *, force_redownload: bool = False) -> Path:
+    did = _id_to_str(distrito_id)
+    if not did:
+        raise RuntimeError("distrito_id inválido para carregar arquivo de lotes.")
+
+    dst = lote_local_path_for_distrito(did)
+
+    if force_redownload:
+        try:
+            dst.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if dst.exists() and dst.stat().st_size > 0 and not _looks_like_html(dst):
+        return dst
+
+    filename = f"Distrito_{did}.parquet"
+
+    repo_candidates = [
+        REPO_ROOT / filename,
+        REPO_ROOT / "data" / filename,
+        REPO_ROOT / "lotes" / filename,
+        DATA_CACHE_DIR / filename,
+        lotes_local_dir() / filename,
+    ]
+    for p in repo_candidates:
         if p.exists() and p.stat().st_size > 0 and not _looks_like_html(p):
-            return p
+            if p != dst:
+                dst.write_bytes(p.read_bytes())
+            return dst
+
+    file_id = find_lote_file_id_in_folder(did)
+    if file_id:
+        try:
+            return download_drive_file(_download_url_from_file_id(file_id), dst, label=filename)
+        except Exception as e:
+            raise RuntimeError(
+                f"Falha ao baixar o arquivo de lotes '{filename}' a partir do Google Drive. Detalhe: {e}"
+            )
 
     raise RuntimeError(
-        f"Não foi possível localizar 'Lotes.parquet'. "
-        f"Coloque o arquivo em uma destas pastas: "
-        f"'{REPO_ROOT}', '{REPO_ROOT / 'data'}', '{REPO_ROOT / 'lotes'}', "
-        f"'{DATA_CACHE_DIR}' ou '{lotes_local_dir()}'. "
-        f"Referência da pasta de origem dos lotes: {LOTES_DRIVE_FOLDER_URL}"
+        f"Não foi possível localizar o arquivo de lotes '{filename}' dentro da pasta do Google Drive. "
+        f"Verifique se a pasta está pública e se o arquivo existe com esse nome exato. "
+        f"Alternativamente, coloque-o localmente em uma destas pastas: "
+        f"'{REPO_ROOT}', '{REPO_ROOT / 'data'}', '{REPO_ROOT / 'lotes'}' ou '{lotes_local_dir()}'."
     )
-
-
-def read_lotes_layer() -> Optional["gpd.GeoDataFrame"]:
-    cache_key = "lote_consolidado"
-
-    try:
-        p = ensure_local_lotes_layer()
-    except Exception as e:
-        st.error(str(e))
-        return None
-
-    try:
-        meta = (str(p), float(p.stat().st_mtime), int(p.stat().st_size))
-    except Exception:
-        meta = (str(p), 0.0, 0)
-
-    cache: Dict[str, Any] = st.session_state.get("_layer_cache", {})
-    cache_meta: Dict[str, Any] = st.session_state.get("_layer_cache_meta", {})
-
-    if cache_key in cache and cache_meta.get(cache_key) == meta:
-        g_cached = cache.get(cache_key)
-        if g_cached is not None:
-            return g_cached
-
-    g = read_gdf_parquet(str(p))
-    if g is None or g.empty:
-        st.error("Lotes.parquet vazio ou inválido.")
-        return None
-
-    g = standardize_columns(g)
-    g = _drop_bad_geoms(g)
-    g = normalize_id_cols(g, LAYER_ID_COLS.get("lote", []))
-
-    if ISO_ID not in g.columns:
-        st.error(f"Lotes.parquet não contém a coluna '{ISO_ID}'.")
-        return None
-
-    cache[cache_key] = g
-    cache_meta[cache_key] = meta
-    st.session_state["_layer_cache"] = cache
-    st.session_state["_layer_cache_meta"] = cache_meta
-    return g
 
 # =============================================================================
 # READ / FILTER
@@ -927,9 +1028,6 @@ def _drop_bad_geoms(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
 
 def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
     try:
-        if layer_key == "lote":
-            return read_lotes_layer()
-
         p = ensure_local_layer(layer_key)
     except Exception as e:
         st.error(str(e))
@@ -967,6 +1065,48 @@ def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
 
     cache[layer_key] = g
     cache_meta[layer_key] = meta
+    st.session_state["_layer_cache"] = cache
+    st.session_state["_layer_cache_meta"] = cache_meta
+    return g
+
+
+def read_lotes_by_distrito(distrito_id: Any) -> Optional["gpd.GeoDataFrame"]:
+    did = _id_to_str(distrito_id)
+    if not did:
+        return None
+
+    cache_key = f"lote__{did}"
+
+    try:
+        p = ensure_local_lote_file(did)
+    except Exception as e:
+        st.error(str(e))
+        return None
+
+    try:
+        meta = (str(p), float(p.stat().st_mtime), int(p.stat().st_size))
+    except Exception:
+        meta = (str(p), 0.0, 0)
+
+    cache: Dict[str, Any] = st.session_state.get("_layer_cache", {})
+    cache_meta: Dict[str, Any] = st.session_state.get("_layer_cache_meta", {})
+
+    if cache_key in cache and cache_meta.get(cache_key) == meta:
+        g_cached = cache.get(cache_key)
+        if g_cached is not None:
+            return g_cached
+
+    g = read_gdf_parquet(str(p))
+    if g is None or g.empty:
+        st.warning(f"Arquivo de lotes do distrito '{did}' vazio ou inválido.")
+        return None
+
+    g = standardize_columns(g)
+    g = _drop_bad_geoms(g)
+    g = normalize_id_cols(g, LAYER_ID_COLS.get("lote", []))
+
+    cache[cache_key] = g
+    cache_meta[cache_key] = meta
     st.session_state["_layer_cache"] = cache
     st.session_state["_layer_cache_meta"] = cache_meta
     return g
@@ -1654,6 +1794,7 @@ def add_polygons_selectable_colored(
 # =============================================================================
 def build_post_iso_data() -> Dict[str, Any]:
     iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
+    distrito_id = _id_to_str(st.session_state.get("selected_distrito_id"))
 
     out: Dict[str, Any] = {
         "iso_ids": iso_ids,
@@ -1698,9 +1839,13 @@ def build_post_iso_data() -> Dict[str, Any]:
         out["quadra_id_col"] = id_col
         st.session_state["_quadra_id_col_map"] = id_col
 
-    g_lote = read_layer("lote")
-    if g_lote is not None:
-        out["g_lote"] = get_lotes_subset_for_isos(g_lote, iso_ids)
+    if distrito_id is not None:
+        g_lote = read_lotes_by_distrito(distrito_id)
+        if g_lote is not None:
+            if ISO_ID not in g_lote.columns:
+                st.warning(f"Arquivo de lotes do distrito '{distrito_id}' sem coluna '{ISO_ID}'.")
+            else:
+                out["g_lote"] = get_lotes_subset_for_isos(g_lote, iso_ids)
 
     return out
 
@@ -2399,10 +2544,10 @@ def render_map_panel() -> None:
                     selected_fill_opacity=0.0,
                     tooltip_prefix="Lote: ",
                     simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
-                    cache_key=f"lote-postiso:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['lote']}",
+                    cache_key=f"lote-postiso:{_id_to_str(st.session_state.get('selected_distrito_id'))}:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['lote']}",
                 )
             else:
-                st.warning("Nenhum lote encontrado para as isócronas selecionadas.")
+                st.warning("Nenhum lote encontrado para as isócronas selecionadas no distrito atual.")
 
         elif post_view == "censo":
             g_censo = data.get("g_censo")
