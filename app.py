@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import base64
 import json
 import re
+import shutil
 
 import streamlit as st
 import pandas as pd  # type: ignore
@@ -859,13 +860,43 @@ def lotes_local_dir() -> Path:
     return p
 
 
-def lote_local_path_for_distrito(distrito_id: Any) -> Path:
+def lotes_repo_dir() -> Path:
+    p = REPO_ROOT / "lotes"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def lote_filename_for_distrito(distrito_id: Any) -> str:
     did = _id_to_str(distrito_id) or ""
-    return lotes_local_dir() / f"Distrito_{did}.parquet"
+    return f"Distrito_{did}.parquet"
+
+
+def lote_local_path_for_distrito(distrito_id: Any) -> Path:
+    return lotes_local_dir() / lote_filename_for_distrito(distrito_id)
 
 
 def _download_url_from_file_id(file_id: str) -> str:
     return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+
+def local_lote_candidates(distrito_id: Any) -> List[Path]:
+    filename = lote_filename_for_distrito(distrito_id)
+    return [
+        REPO_ROOT / filename,
+        REPO_ROOT / "data" / filename,
+        lotes_repo_dir() / filename,
+        DATA_CACHE_DIR / filename,
+        lotes_local_dir() / filename,
+    ]
+
+
+def try_copy_lote_from_local_sources(distrito_id: Any, dst: Path) -> Optional[Path]:
+    for p in local_lote_candidates(distrito_id):
+        if p.exists() and p.stat().st_size > 0 and not _looks_like_html(p):
+            if p.resolve() != dst.resolve():
+                shutil.copy2(p, dst)
+            return dst if dst.exists() else p
+    return None
 
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
@@ -881,10 +912,7 @@ def list_drive_folder_files(folder_id: str) -> Dict[str, str]:
         f"https://drive.google.com/drive/u/0/folders/{folder_id}",
     ]
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-    }
-
+    headers = {"User-Agent": "Mozilla/5.0"}
     found: Dict[str, str] = {}
 
     for url in urls:
@@ -902,25 +930,6 @@ def list_drive_folder_files(folder_id: str) -> Dict[str, str]:
             matches2 = re.findall(r'\["([^"]+\.parquet)","([a-zA-Z0-9_-]{20,})"', html)
             for name, file_id in matches2:
                 found[name] = file_id
-
-            blob_matches = re.findall(r'(\[\["[^<]{0,50000}?\]\])', html)
-            for blob in blob_matches[:5]:
-                try:
-                    arr = json.loads(blob)
-                    stack = [arr]
-                    while stack:
-                        cur = stack.pop()
-                        if isinstance(cur, list):
-                            if len(cur) >= 2:
-                                a, b = cur[0], cur[1]
-                                if isinstance(a, str) and isinstance(b, str):
-                                    if a.endswith(".parquet") and re.fullmatch(r"[a-zA-Z0-9_-]{20,}", b):
-                                        found[a] = b
-                                    elif b.endswith(".parquet") and re.fullmatch(r"[a-zA-Z0-9_-]{20,}", a):
-                                        found[b] = a
-                            stack.extend(cur)
-                except Exception:
-                    pass
 
             if found:
                 return found
@@ -941,7 +950,7 @@ def find_lote_file_id_in_folder(distrito_id: Any) -> str:
     if not folder_id:
         return ""
 
-    target_name = f"Distrito_{did}.parquet"
+    target_name = lote_filename_for_distrito(did)
     files_map = list_drive_folder_files(folder_id)
     return files_map.get(target_name, "")
 
@@ -952,6 +961,7 @@ def ensure_local_lote_file(distrito_id: Any, *, force_redownload: bool = False) 
         raise RuntimeError("distrito_id inválido para carregar arquivo de lotes.")
 
     dst = lote_local_path_for_distrito(did)
+    dst.parent.mkdir(parents=True, exist_ok=True)
 
     if force_redownload:
         try:
@@ -962,22 +972,13 @@ def ensure_local_lote_file(distrito_id: Any, *, force_redownload: bool = False) 
     if dst.exists() and dst.stat().st_size > 0 and not _looks_like_html(dst):
         return dst
 
-    filename = f"Distrito_{did}.parquet"
+    copied = try_copy_lote_from_local_sources(did, dst)
+    if copied is not None and copied.exists():
+        return copied
 
-    repo_candidates = [
-        REPO_ROOT / filename,
-        REPO_ROOT / "data" / filename,
-        REPO_ROOT / "lotes" / filename,
-        DATA_CACHE_DIR / filename,
-        lotes_local_dir() / filename,
-    ]
-    for p in repo_candidates:
-        if p.exists() and p.stat().st_size > 0 and not _looks_like_html(p):
-            if p != dst:
-                dst.write_bytes(p.read_bytes())
-            return dst
-
+    filename = lote_filename_for_distrito(did)
     file_id = find_lote_file_id_in_folder(did)
+
     if file_id:
         try:
             return download_drive_file(_download_url_from_file_id(file_id), dst, label=filename)
@@ -987,10 +988,11 @@ def ensure_local_lote_file(distrito_id: Any, *, force_redownload: bool = False) 
             )
 
     raise RuntimeError(
-        f"Não foi possível localizar o arquivo de lotes '{filename}' dentro da pasta do Google Drive. "
-        f"Verifique se a pasta está pública e se o arquivo existe com esse nome exato. "
-        f"Alternativamente, coloque-o localmente em uma destas pastas: "
-        f"'{REPO_ROOT}', '{REPO_ROOT / 'data'}', '{REPO_ROOT / 'lotes'}' ou '{lotes_local_dir()}'."
+        f"Não foi possível localizar o arquivo de lotes '{filename}'. "
+        f"O app procura primeiro localmente em: "
+        f"'{REPO_ROOT}', '{REPO_ROOT / 'data'}', '{lotes_repo_dir()}', '{DATA_CACHE_DIR}' e '{lotes_local_dir()}'. "
+        f"Se não encontrar localmente, tenta buscar na pasta do Google Drive configurada em: {get_lotes_folder_raw()} . "
+        f"Verifique se o arquivo existe com esse nome exato."
     )
 
 # =============================================================================
