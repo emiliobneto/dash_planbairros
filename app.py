@@ -66,6 +66,7 @@ SIMPLIFY_TOL_BY_LEVEL = {
     "censo": 0.00015,
     "od": 0.0002,
     "quadra": 0.00008,
+    "lote": 0.00004,
 }
 
 ISO_FILL_OPACITY_DEFAULT = 0.05
@@ -129,11 +130,13 @@ OD_ID = "od_id"
 QUADRA_ID = "quadra_id"
 QUADRA_UID = "quadra_uid"
 CENSO_ID = "censo_id"
+LOTE_ID = "lote_id"
 
 DIST_PARENT = SUBPREF_ID
 ISO_PARENT = DIST_ID
 OD_PARENT = ISO_ID
 CENSO_PARENT = ISO_ID
+LOTE_PARENT = ISO_ID
 
 LAYER_ID_COLS = {
     "subpref": [SUBPREF_ID],
@@ -142,6 +145,7 @@ LAYER_ID_COLS = {
     "censo": [CENSO_ID, CENSO_PARENT, QUADRA_ID, ISO_ID],
     "od": [OD_ID, OD_PARENT, ISO_ID],
     "quadra": [QUADRA_ID, ISO_ID, CENSO_ID, QUADRA_UID],
+    "lote": [LOTE_ID, LOTE_PARENT, DIST_ID],
 }
 
 LOCAL_FILENAMES = {
@@ -152,6 +156,12 @@ LOCAL_FILENAMES = {
     "od": "ZonasOD.parquet",
     "quadra": "Quadras.parquet",
 }
+
+# =============================================================================
+# LOTES
+# =============================================================================
+LOTES_DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/17-lA2P_D4oV1joysDf7BOAgp358IcoEG?usp=drive_link"
+LOTES_SECRET_KEY = "PB_LOTES_FOLDER_URL"
 
 # =============================================================================
 # NORMALIZAÇÃO
@@ -176,6 +186,7 @@ COL_ALIASES: Dict[str, Set[str]] = {
     OD_ID: _mk_aliases(OD_ID) | {"OD_ID", "zona_od", "zonaod", "id_od", "od", "od_id"},
     QUADRA_ID: _mk_aliases(QUADRA_ID),
     CENSO_ID: _mk_aliases(CENSO_ID) | {"cendo_id", "CENDO_ID", "setor_id", "id_setor", "codigo_setor", "cd_setor"},
+    LOTE_ID: _mk_aliases(LOTE_ID) | {"id_lote", "codigo_lote", "cd_lote", "lote"},
 }
 
 
@@ -393,6 +404,14 @@ def get_censo_subset_for_isos(g_censo: "gpd.GeoDataFrame", iso_ids: Set[str]) ->
         return subset_by_parent_multi(g_censo, ISO_ID, iso_ids)
     return g_censo.iloc[0:0].copy()
 
+
+def get_lotes_subset_for_isos(g_lote: "gpd.GeoDataFrame", iso_ids: Set[str]) -> "gpd.GeoDataFrame":
+    if g_lote is None or g_lote.empty:
+        return g_lote.iloc[0:0].copy()
+    if ISO_ID not in g_lote.columns:
+        return g_lote.iloc[0:0].copy()
+    return subset_by_parent_multi(g_lote, ISO_ID, iso_ids)
+
 # =============================================================================
 # HEADER / CSS
 # =============================================================================
@@ -480,6 +499,7 @@ def init_state() -> None:
     st.session_state.setdefault("selected_censo_ids", set())
     st.session_state.setdefault("selected_od_ids", set())
     st.session_state.setdefault("selected_quadra_ids", set())
+    st.session_state.setdefault("selected_lote_ids", set())
 
     st.session_state.setdefault("view_center", (-23.55, -46.63))
     st.session_state.setdefault("view_zoom", 11)
@@ -517,6 +537,7 @@ def reset_post_iso_state() -> None:
     st.session_state["selected_censo_ids"] = set()
     st.session_state["selected_od_ids"] = set()
     st.session_state["selected_quadra_ids"] = set()
+    st.session_state["selected_lote_ids"] = set()
 
 
 def reset_to(level: str, *, clear_click_sig: bool = True) -> None:
@@ -798,9 +819,98 @@ def ensure_local_layer(layer_key: str, *, force_redownload: bool = False) -> Pat
         )
 
 # =============================================================================
+# LOTES / IO ESPECÍFICO
+# =============================================================================
+def get_lotes_folder_raw() -> str:
+    raw_ui = str(st.session_state.get("drive_lotes_folder_raw", "")).strip()
+    if raw_ui:
+        return raw_ui
+
+    raw_secret = _get_secret(LOTES_SECRET_KEY)
+    if raw_secret:
+        return raw_secret
+
+    return LOTES_DRIVE_FOLDER_URL
+
+
+def lotes_local_dir() -> Path:
+    p = DATA_CACHE_DIR / "lotes"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def lote_local_path_for_distrito(distrito_id: Any) -> Path:
+    did = _id_to_str(distrito_id) or ""
+    return lotes_local_dir() / f"distrito_{did}.parquet"
+
+
+def _drive_folder_file_candidates(folder_raw: str, filename: str) -> List[str]:
+    folder_raw = (folder_raw or "").strip()
+    candidates: List[str] = []
+
+    if folder_raw.lower().startswith("http"):
+        if folder_raw.endswith("/"):
+            candidates.append(f"{folder_raw}{filename}")
+        else:
+            candidates.append(f"{folder_raw}/{filename}")
+
+    return candidates
+
+
+def ensure_local_lote_file(distrito_id: Any, *, force_redownload: bool = False) -> Path:
+    did = _id_to_str(distrito_id)
+    if not did:
+        raise RuntimeError("distrito_id inválido para carregar arquivo de lotes.")
+
+    dst = lote_local_path_for_distrito(did)
+
+    if force_redownload:
+        try:
+            dst.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if dst.exists() and dst.stat().st_size > 0 and not _looks_like_html(dst):
+        return dst
+
+    filename = f"distrito_{did}.parquet"
+
+    # Prioridade 1: arquivo já colocado localmente
+    repo_candidates = [
+        REPO_ROOT / filename,
+        REPO_ROOT / "data" / filename,
+        REPO_ROOT / "lotes" / filename,
+        DATA_CACHE_DIR / filename,
+        lotes_local_dir() / filename,
+    ]
+    for p in repo_candidates:
+        if p.exists() and p.stat().st_size > 0 and not _looks_like_html(p):
+            if p != dst:
+                dst.write_bytes(p.read_bytes())
+            return dst
+
+    # Prioridade 2: tentativa via link configurado da pasta
+    folder_raw = get_lotes_folder_raw()
+    candidates = _drive_folder_file_candidates(folder_raw, filename)
+
+    last_error = None
+    for cand in candidates:
+        try:
+            return download_drive_file(cand, dst, label=filename)
+        except Exception as e:
+            last_error = e
+
+    raise RuntimeError(
+        f"Não foi possível obter o arquivo de lotes '{filename}'. "
+        f"Coloque-o localmente em uma destas pastas: "
+        f"'{REPO_ROOT}', '{REPO_ROOT / 'data'}', '{REPO_ROOT / 'lotes'}' ou '{lotes_local_dir()}'. "
+        f"Detalhe: {last_error if last_error else 'arquivo não encontrado'}"
+    )
+
+# =============================================================================
 # READ / FILTER
 # =============================================================================
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
 def read_gdf_parquet(path: str) -> Optional["gpd.GeoDataFrame"]:
     if gpd is None:
         return None
@@ -869,6 +979,48 @@ def read_layer(layer_key: str) -> Optional["gpd.GeoDataFrame"]:
 
     cache[layer_key] = g
     cache_meta[layer_key] = meta
+    st.session_state["_layer_cache"] = cache
+    st.session_state["_layer_cache_meta"] = cache_meta
+    return g
+
+
+def read_lotes_by_distrito(distrito_id: Any) -> Optional["gpd.GeoDataFrame"]:
+    did = _id_to_str(distrito_id)
+    if not did:
+        return None
+
+    cache_key = f"lote__{did}"
+
+    try:
+        p = ensure_local_lote_file(did)
+    except Exception as e:
+        st.error(str(e))
+        return None
+
+    try:
+        meta = (str(p), float(p.stat().st_mtime), int(p.stat().st_size))
+    except Exception:
+        meta = (str(p), 0.0, 0)
+
+    cache: Dict[str, Any] = st.session_state.get("_layer_cache", {})
+    cache_meta: Dict[str, Any] = st.session_state.get("_layer_cache_meta", {})
+
+    if cache_key in cache and cache_meta.get(cache_key) == meta:
+        g_cached = cache.get(cache_key)
+        if g_cached is not None:
+            return g_cached
+
+    g = read_gdf_parquet(str(p))
+    if g is None or g.empty:
+        st.warning(f"Arquivo de lotes do distrito '{did}' vazio ou inválido.")
+        return None
+
+    g = standardize_columns(g)
+    g = _drop_bad_geoms(g)
+    g = normalize_id_cols(g, LAYER_ID_COLS.get("lote", []))
+
+    cache[cache_key] = g
+    cache_meta[cache_key] = meta
     st.session_state["_layer_cache"] = cache
     st.session_state["_layer_cache_meta"] = cache_meta
     return g
@@ -1556,12 +1708,15 @@ def add_polygons_selectable_colored(
 # =============================================================================
 def build_post_iso_data() -> Dict[str, Any]:
     iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
+    distrito_id = _id_to_str(st.session_state.get("selected_distrito_id"))
+
     out: Dict[str, Any] = {
         "iso_ids": iso_ids,
         "g_parent": None,
         "g_censo": None,
         "g_od": None,
         "g_quadra": None,
+        "g_lote": None,
         "quadra_id_col": QUADRA_UID,
     }
 
@@ -1597,6 +1752,14 @@ def build_post_iso_data() -> Dict[str, Any]:
         out["g_quadra"] = g_quad_show
         out["quadra_id_col"] = id_col
         st.session_state["_quadra_id_col_map"] = id_col
+
+    if distrito_id is not None:
+        g_lote = read_lotes_by_distrito(distrito_id)
+        if g_lote is not None:
+            if ISO_ID not in g_lote.columns:
+                st.warning(f"Arquivo de lotes do distrito '{distrito_id}' sem coluna '{ISO_ID}'.")
+            else:
+                out["g_lote"] = get_lotes_subset_for_isos(g_lote, iso_ids)
 
     return out
 
@@ -1731,6 +1894,20 @@ def consume_map_event(level: str, map_state: Dict[str, Any], allow_click: bool =
             _toggle_in_set("selected_od_ids", picked)
             return
 
+        if post_view == "lote":
+            g_show = data.get("g_lote")
+            picked = _pick_id_from_last_object(map_state, LOTE_ID) or parse_tooltip_id(tooltip_raw)
+            if not picked and isinstance(click, dict) and g_show is not None and LOTE_ID in g_show.columns:
+                picked = pick_feature_id(g_show, click, LOTE_ID)
+            if not picked:
+                return
+            sig = _click_signature(picked, click)
+            if sig == st.session_state.get("last_click_sig", ""):
+                return
+            st.session_state["last_click_sig"] = sig
+            _toggle_in_set("selected_lote_ids", picked)
+            return
+
 
 def consume_draw_selection(level: str, map_state: Dict[str, Any]) -> None:
     geom = _extract_drawn_geometry(map_state)
@@ -1778,6 +1955,12 @@ def consume_draw_selection(level: str, map_state: Dict[str, Any]) -> None:
                 select_features_by_geometry(g_show, geom, OD_ID, "selected_od_ids", mode="add")
             return
 
+        if post_view == "lote":
+            g_show = data.get("g_lote")
+            if g_show is not None and LOTE_ID in g_show.columns:
+                select_features_by_geometry(g_show, geom, LOTE_ID, "selected_lote_ids", mode="add")
+            return
+
 # =============================================================================
 # UI
 # =============================================================================
@@ -1789,7 +1972,7 @@ def _variables_for_level(level: str) -> List[str]:
     if level == "isocrona":
         return ["Isócronas", "Isócronas (classes)"]
     if level == "quadra":
-        return ["Quadras", "Cluster", "Setor censitário", "Zonas OD"]
+        return ["Quadras", "Cluster", "Setor censitário", "Zonas OD", "Lotes"]
     return ["Nível"]
 
 
@@ -1870,6 +2053,13 @@ def _fit_selected_post_level() -> None:
             set_view_to_gdf(subset_by_id_multi(g, OD_ID, ids), bump=0, zmax=18)
         return
 
+    if post_view == "lote":
+        ids = ensure_set_of_str(st.session_state.get("selected_lote_ids", set()))
+        g = data.get("g_lote")
+        if g is not None and ids and LOTE_ID in g.columns:
+            set_view_to_gdf(subset_by_id_multi(g, LOTE_ID, ids), bump=1, zmax=20)
+        return
+
 
 def _on_post_iso_view_change() -> None:
     mark_ui_action()
@@ -1916,7 +2106,7 @@ def control_panel() -> None:
         )
 
         st.button(
-            "Avançar para Quadras",
+            "Avançar para Visualização detalhada",
             type="primary",
             use_container_width=True,
             disabled=not ok_iso,
@@ -1933,9 +2123,10 @@ def control_panel() -> None:
     if lvl == "quadra":
         st.radio(
             "Visualização pós-isócronas",
-            options=["quadra", "censo", "od"],
+            options=["quadra", "lote", "censo", "od"],
             format_func=lambda x: {
                 "quadra": "Quadras",
+                "lote": "Lotes",
                 "censo": "Setor censitário",
                 "od": "Zonas OD",
             }[x],
@@ -2167,6 +2358,7 @@ def render_map_panel() -> None:
 
         label_map = {
             "quadra": "Quadras",
+            "lote": "Lotes",
             "censo": "Setor censitário",
             "od": "Zonas OD",
         }
@@ -2177,6 +2369,10 @@ def render_map_panel() -> None:
             gq = data.get("g_quadra")
             if gq is not None and not gq.empty:
                 target = gq
+        elif post_view == "lote":
+            gl = data.get("g_lote")
+            if gl is not None and not gl.empty:
+                target = gl
         elif post_view == "censo":
             gc = data.get("g_censo")
             if gc is not None and not gc.empty:
@@ -2244,6 +2440,28 @@ def render_map_panel() -> None:
                     )
             else:
                 st.warning("Nenhuma quadra encontrada para as isócronas selecionadas.")
+
+        elif post_view == "lote":
+            g_lote = data.get("g_lote")
+            if g_lote is not None and not g_lote.empty:
+                add_polygons_selectable(
+                    m,
+                    g_lote,
+                    "Lotes",
+                    LOTE_ID,
+                    tooltip_col=LOTE_ID if LOTE_ID in g_lote.columns else ISO_ID,
+                    selected_ids=st.session_state.get("selected_lote_ids", set()),
+                    fill_color="#b7d7a8",
+                    fill_opacity=0.18,
+                    base_color="#5b7f47",
+                    base_weight=0.7,
+                    selected_fill_opacity=0.0,
+                    tooltip_prefix="Lote: ",
+                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
+                    cache_key=f"lote-postiso:{_id_to_str(st.session_state.get('selected_distrito_id'))}:{'|'.join(sorted(list(iso_ids)))}:{SIMPLIFY_TOL_BY_LEVEL['lote']}",
+                )
+            else:
+                st.warning("Nenhum lote encontrado para as isócronas selecionadas no distrito atual.")
 
         elif post_view == "censo":
             g_censo = data.get("g_censo")
