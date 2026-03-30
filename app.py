@@ -46,9 +46,11 @@ PB_COLORS = {
     "navy": "#14407D",
     "marrom": "#C65534",
 }
+
 PB_NAVY = PB_COLORS["navy"]
 PB_BROWN = PB_COLORS["telha"]
 PB_BTN = "#1C6880"
+PB_BLACK = "#000000"
 
 CARTO_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
 CARTO_ATTR = "© OpenStreetMap contributors © CARTO"
@@ -58,18 +60,18 @@ LINE_CAP = "round"
 LINE_JOIN = "round"
 
 PARENT_FILL_OPACITY = 0.20
-PARENT_STROKE_OPACITY = 0.35
-PARENT_STROKE_WEIGHT = 0.7
-PARENT_STROKE_DASH = "2,6"
+PARENT_STROKE_OPACITY = 1.0
+PARENT_STROKE_WEIGHT = 1.0
+PARENT_STROKE_DASH = None
 
 SIMPLIFY_TOL_BY_LEVEL = {
-    "subpref": 0.0008,
-    "distrito": 0.0006,
-    "isocrona": 0.0004,
-    "censo": 0.00015,
-    "od": 0.0002,
-    "quadra": 0.00008,
-    "lote": 0.00004,
+    "subpref": 0.0,
+    "distrito": 0.0,
+    "isocrona": 0.0,
+    "censo": 0.0,
+    "od": 0.0,
+    "quadra": 0.0,
+    "lote": 0.0,
 }
 
 ISO_FILL_OPACITY_DEFAULT = 0.05
@@ -1388,12 +1390,6 @@ def _simplify_to_geojson(
     except Exception:
         return ""
 
-    try:
-        if simplify_tol and simplify_tol > 0:
-            g["geometry"] = g.geometry.simplify(simplify_tol, preserve_topology=True)
-    except Exception:
-        pass
-
     g = _drop_bad_geoms(g)
 
     try:
@@ -1572,6 +1568,7 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
     try:
         folium.map.CustomPane("parent_fill", z_index=610).add_to(m)
         folium.map.CustomPane("detail_shapes", z_index=640).add_to(m)
+        folium.map.CustomPane("labels", z_index=700).add_to(m)
     except Exception:
         pass
     return m
@@ -1590,7 +1587,7 @@ def _mk_tooltip(id_col: str, prefix: str) -> Optional[Any]:
     )
 
 # =============================================================================
-# LABELS DINÂMICOS
+# LABELS
 # =============================================================================
 def _format_label_multiline(text: Any) -> str:
     if text is None:
@@ -1608,21 +1605,14 @@ def _format_label_multiline(text: Any) -> str:
     return html.escape(txt)
 
 
-def add_labels_on_map_zoomable(
+def add_labels_on_map(
     m,
     gdf: "gpd.GeoDataFrame",
     label_col: str,
     *,
-    layer_name: str = "labels",
+    font_size: int = 12,
     color: str = "#000000",
     weight: str = "700",
-    min_zoom_show: int = 10,
-    max_zoom_show: int = 20,
-    base_zoom: int = 11,
-    base_font_size: float = 12.0,
-    min_font_size: float = 9.0,
-    max_font_size: float = 20.0,
-    zoom_step: float = 0.8,
 ) -> None:
     if folium is None or gdf is None or gdf.empty:
         return
@@ -1636,7 +1626,6 @@ def add_labels_on_map_zoomable(
             return
 
         points = g.geometry.representative_point()
-        items = []
 
         for idx, row in g.iterrows():
             label = row.get(label_col)
@@ -1651,88 +1640,33 @@ def add_labels_on_map_zoomable(
             if pt is None or getattr(pt, "is_empty", False):
                 continue
 
-            items.append(
-                {
-                    "lat": float(pt.y),
-                    "lng": float(pt.x),
-                    "label_html": txt_html,
-                }
-            )
-
-        if not items:
-            return
-
-        map_name = m.get_name()
-        layer_var = re.sub(r"[^a-zA-Z0-9_]", "_", layer_name.lower())
-        js_items = json.dumps(items, ensure_ascii=False)
-
-        script = f"""
-        <script>
-        (function() {{
-            var map = {map_name};
-            var labelData_{layer_var} = {js_items};
-            var layerGroup_{layer_var} = L.layerGroup().addTo(map);
-
-            function fontSizeForZoom(zoom) {{
-                var size = {base_font_size} + ((zoom - {base_zoom}) * {zoom_step});
-                size = Math.max({min_font_size}, Math.min({max_font_size}, size));
-                return size.toFixed(1);
-            }}
-
-            function redrawLabels_{layer_var}() {{
-                layerGroup_{layer_var}.clearLayers();
-                var zoom = map.getZoom();
-
-                if (zoom < {min_zoom_show} || zoom > {max_zoom_show}) {{
-                    return;
-                }}
-
-                var size = fontSizeForZoom(zoom);
-
-                labelData_{layer_var}.forEach(function(item) {{
-                    var icon = L.divIcon({{
-                        className: 'pb-dynamic-label',
-                        html: `
-                            <div style="
-                                font-family: Roboto, Arial, sans-serif;
-                                font-size: ${{size}}px;
-                                color: {color};
-                                font-weight: {weight};
-                                text-align: center;
-                                white-space: nowrap;
-                                line-height: 1.1;
-                                text-shadow:
-                                    -1px -1px 0 #ffffff,
-                                     1px -1px 0 #ffffff,
-                                    -1px  1px 0 #ffffff,
-                                     1px  1px 0 #ffffff,
-                                     0px  0px 3px #ffffff;
-                                transform: translate(-50%, -50%);
-                                pointer-events: none;
-                            ">
-                                ${{item.label_html}}
-                            </div>
-                        `,
-                        iconSize: null
-                    }});
-
-                    L.marker([item.lat, item.lng], {{
-                        icon: icon,
-                        interactive: false,
-                        keyboard: false
-                    }}).addTo(layerGroup_{layer_var});
-                }});
-            }}
-
-            map.on('zoomend', redrawLabels_{layer_var});
-            map.on('moveend', redrawLabels_{layer_var});
-            redrawLabels_{layer_var}();
-        }})();
-        </script>
-        """
-
-        m.get_root().html.add_child(folium.Element(script))
-
+            folium.Marker(
+                location=[pt.y, pt.x],
+                icon=folium.DivIcon(
+                    icon_size=(150, 36),
+                    icon_anchor=(75, 18),
+                    html=f"""
+                    <div style="
+                        font-family: Roboto, Arial, sans-serif;
+                        font-size: {font_size}px;
+                        color: {color};
+                        font-weight: {weight};
+                        text-align: center;
+                        white-space: nowrap;
+                        line-height: 1.1;
+                        text-shadow:
+                            -1px -1px 0 #ffffff,
+                             1px -1px 0 #ffffff,
+                            -1px  1px 0 #ffffff,
+                             1px  1px 0 #ffffff,
+                             0px  0px 3px #ffffff;
+                        pointer-events: none;
+                    ">
+                        {txt_html}
+                    </div>
+                    """
+                ),
+            ).add_to(m)
     except Exception:
         pass
 
@@ -1745,11 +1679,11 @@ def add_parent_fill(
     pane: str = "parent_fill",
     fill_color: str = PB_BROWN,
     fill_opacity: float = PARENT_FILL_OPACITY,
-    stroke_color: str = PB_BROWN,
+    stroke_color: str = PB_BLACK,
     stroke_weight: float = PARENT_STROKE_WEIGHT,
     stroke_opacity: float = PARENT_STROKE_OPACITY,
-    dash_array: str = PARENT_STROKE_DASH,
-    simplify_tol: float = 0.0006,
+    dash_array: Optional[str] = PARENT_STROKE_DASH,
+    simplify_tol: float = 0.0,
     cache_key: Optional[str] = None,
 ) -> None:
     if folium is None or gdf is None or gdf.empty:
@@ -1792,15 +1726,15 @@ def add_polygons_selectable(
     selected_ids: Optional[Set[Any]] = None,
     extra_props: Optional[List[str]] = None,
     pane: str = "detail_shapes",
-    base_color: str = "#111111",
-    base_weight: float = 0.8,
+    base_color: str = PB_BLACK,
+    base_weight: float = 1.0,
     fill_color: str = "#ffffff",
     fill_opacity: float = 0.10,
-    selected_color: str = PB_NAVY,
-    selected_weight: float = 2.6,
+    selected_color: str = PB_BLACK,
+    selected_weight: float = 2.2,
     selected_fill_opacity: float = 0.26,
     tooltip_prefix: str = "ID: ",
-    simplify_tol: float = 0.0006,
+    simplify_tol: float = 0.0,
     cache_key: Optional[str] = None,
 ) -> None:
     if folium is None or gdf is None or gdf.empty:
@@ -1843,13 +1777,18 @@ def add_polygons_selectable(
         style_function=lambda _f: {
             "color": base_color,
             "weight": base_weight,
-            "opacity": 0.95,
+            "opacity": 1.0,
             "lineCap": LINE_CAP,
             "lineJoin": LINE_JOIN,
             "fillColor": fill_color,
             "fillOpacity": fill_opacity,
         },
-        highlight_function=lambda _f: {"weight": base_weight + 1.4, "fillOpacity": min(fill_opacity + 0.12, 0.40)},
+        highlight_function=lambda _f: {
+            "color": PB_BLACK,
+            "weight": base_weight + 1.0,
+            "opacity": 1.0,
+            "fillOpacity": min(fill_opacity + 0.10, 0.40),
+        },
         tooltip=tooltip_base,
     ).add_to(fg_base)
     fg_base.add_to(m)
@@ -1868,7 +1807,7 @@ def add_polygons_selectable(
                     style_function=lambda _f: {
                         "color": selected_color,
                         "weight": selected_weight,
-                        "opacity": 0.98,
+                        "opacity": 1.0,
                         "lineCap": LINE_CAP,
                         "lineJoin": LINE_JOIN,
                         "fillColor": fill_color,
@@ -1888,14 +1827,14 @@ def add_polygons_selectable_colored(
     selected_ids: Optional[Set[Any]] = None,
     tooltip_col: Optional[str] = None,
     pane: str = "detail_shapes",
-    base_color: str = "#111111",
-    base_weight: float = 0.8,
+    base_color: str = PB_BLACK,
+    base_weight: float = 1.0,
     fill_opacity: float = 0.14,
-    selected_color: str = PB_NAVY,
-    selected_weight: float = 2.6,
+    selected_color: str = PB_BLACK,
+    selected_weight: float = 2.2,
     selected_fill_opacity: float = 0.28,
     tooltip_prefix: str = "ID: ",
-    simplify_tol: float = 0.0006,
+    simplify_tol: float = 0.0,
     cache_key: Optional[str] = None,
     default_fill: str = "#ffffff",
 ) -> None:
@@ -1934,7 +1873,7 @@ def add_polygons_selectable_colored(
         return {
             "color": base_color,
             "weight": base_weight,
-            "opacity": 0.95,
+            "opacity": 1.0,
             "lineCap": LINE_CAP,
             "lineJoin": LINE_JOIN,
             "fillColor": fc,
@@ -1947,7 +1886,12 @@ def add_polygons_selectable_colored(
         pane=pane,
         smooth_factor=SMOOTH_FACTOR,
         style_function=_style,
-        highlight_function=lambda _f: {"weight": base_weight + 1.4, "fillOpacity": min(fill_opacity + 0.12, 1.0)},
+        highlight_function=lambda _f: {
+            "color": PB_BLACK,
+            "weight": base_weight + 1.0,
+            "opacity": 1.0,
+            "fillOpacity": min(fill_opacity + 0.10, 1.0),
+        },
         tooltip=tooltip_base,
     ).add_to(fg_base)
     fg_base.add_to(m)
@@ -1968,7 +1912,7 @@ def add_polygons_selectable_colored(
                     style_function=lambda _f: {
                         "color": selected_color,
                         "weight": selected_weight,
-                        "opacity": 0.99,
+                        "opacity": 1.0,
                         "lineCap": LINE_CAP,
                         "lineJoin": LINE_JOIN,
                         "fillColor": "#ffffff",
@@ -2462,20 +2406,13 @@ def render_map_panel() -> None:
         )
 
         if "sp_nome" in g_sub.columns:
-            add_labels_on_map_zoomable(
+            add_labels_on_map(
                 m,
                 g_sub,
                 "sp_nome",
-                layer_name="labels_subpref",
-                color="#000000",
+                font_size=13,
+                color=PB_BLACK,
                 weight="700",
-                min_zoom_show=10,
-                max_zoom_show=20,
-                base_zoom=11,
-                base_font_size=13,
-                min_font_size=10,
-                max_font_size=22,
-                zoom_step=0.9,
             )
 
     elif level == "distrito":
@@ -2524,20 +2461,13 @@ def render_map_panel() -> None:
         )
 
         if "ds_nome" in g_show.columns:
-            add_labels_on_map_zoomable(
+            add_labels_on_map(
                 m,
                 g_show,
                 "ds_nome",
-                layer_name="labels_distrito",
-                color="#000000",
+                font_size=12,
+                color=PB_BLACK,
                 weight="700",
-                min_zoom_show=11,
-                max_zoom_show=20,
-                base_zoom=12,
-                base_font_size=12,
-                min_font_size=9,
-                max_font_size=20,
-                zoom_step=0.85,
             )
 
     elif level == "isocrona":
@@ -2741,8 +2671,8 @@ def render_map_panel() -> None:
                     selected_ids=st.session_state.get("selected_lote_ids", set()),
                     fill_color="#b7d7a8",
                     fill_opacity=0.18,
-                    base_color="#5b7f47",
-                    base_weight=0.7,
+                    base_color=PB_BLACK,
+                    base_weight=1.0,
                     selected_fill_opacity=0.0,
                     tooltip_prefix="Lote: ",
                     simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
@@ -2783,8 +2713,8 @@ def render_map_panel() -> None:
                     selected_ids=st.session_state.get("selected_od_ids", set()),
                     fill_color="#d9b26f",
                     fill_opacity=0.16,
-                    base_color="#8c5f1d",
-                    base_weight=1.2,
+                    base_color=PB_BLACK,
+                    base_weight=1.0,
                     selected_fill_opacity=0.0,
                     tooltip_prefix="Zona OD: ",
                     simplify_tol=SIMPLIFY_TOL_BY_LEVEL["od"],
