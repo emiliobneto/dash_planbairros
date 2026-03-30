@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import base64
+import html
 import json
 import re
 import shutil
@@ -164,6 +165,102 @@ LOCAL_FILENAMES = {
 # =============================================================================
 LOTES_DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/17-lA2P_D4oV1joysDf7BOAgp358IcoEG?usp=drive_link"
 LOTES_SECRET_KEY = "PB_LOTES_FOLDER_URL"
+
+LOTES_LINKS_BY_DISTRITO = {
+    "1": "https://drive.google.com/file/d/1Kbn6RXKXoxdpcdTbI9txBBSf63Yd14zZ/view?usp=drive_link",
+    "2": "https://drive.google.com/file/d/1q8oaYurUmEyJIgluOmos-nDytAtLur7Q/view?usp=drive_link",
+    "3": "https://drive.google.com/file/d/15Gg4GVDabqZwzY1ubIwhhPZXXU4hkrs8/view?usp=drive_link",
+    "4": "https://drive.google.com/file/d/1OAbjgydEp2E5UhWqHwCkKj_6EziDMAYL/view?usp=drive_link",
+    "5": "https://drive.google.com/file/d/1jiruqIpGIGhU7q0Uu4wCSl_xUsLdPnZY/view?usp=drive_link",
+    "6": "https://drive.google.com/file/d/1IcYBxz1aa-1Aoelsm6_Vf3UM_fQ_y4Iv/view?usp=drive_link",
+    "7": "https://drive.google.com/file/d/1us8VgARE1VLjFEWLMfH4qjOadiJ4Y0vj/view?usp=drive_link",
+    "8": "https://drive.google.com/file/d/1yGeLMS5zYUKJGi1i5mlvvV4BgJmvEZgW/view?usp=drive_link",
+    "9": "https://drive.google.com/file/d/1ueN0KUmZ5ijd5wK087dVK0Fq9ATob5pS/view?usp=drive_link",
+    "10": "https://drive.google.com/file/d/1KCwDfaqVBMEoFm4pqAYGPEcYPW9IDIir/view?usp=drive_link",
+    "11": "https://drive.google.com/file/d/1g7wg3aHO4r2UpuEPcNG9qCgqygR4PLvY/view?usp=drive_link",
+    "12": "https://drive.google.com/file/d/1mG4zs2HqmzTaeFwovJdw-nt11G27L7CC/view?usp=drive_link",
+    "13": "https://drive.google.com/file/d/1BlpnBTDQsBpfPXL_xhom7TtNkt3w9k9I/view?usp=drive_link",
+    "14": "https://drive.google.com/file/d/1iBkLh3atFZG61jORGXNcwYjM7c_wTPXU/view?usp=drive_link",
+    "15": "https://drive.google.com/file/d/1Kx3ttk0Tmow0aJqPhnI-B0p-mpasMsxp/view?usp=drive_link",
+    "16": "https://drive.google.com/file/d/1IyFlPR1nGRfbSPn8J3yrySJAWFkI5L2q/view?usp=drive_link",
+    "17": "https://drive.google.com/file/d/1_kmHNaY0k5zl6Xk1dSGVHrUDtGYWaCMj/view?usp=drive_link",
+    "18": "https://drive.google.com/file/d/15jngv3COgPLIwizOmbQhJuEDlwBSF3M5/view?usp=drive_link",
+    "19": "https://drive.google.com/file/d/1IlvxySwpW3OoRktzooJ2bk4XGkuhcis8/view?usp=drive_link",
+    "20": "https://drive.google.com/file/d/1KcCz5bIl1cMcE_7eFqLXN0zA4QAZ5Q0U/view?usp=drive_link",
+    "21": "https://drive.google.com/file/d/1wU7EBRnMbJNXTk0J8d0uENE-FGrGfNRc/view?usp=drive_link",
+    "22": "https://drive.google.com/file/d/1jjfwx59Cni8eJzqiUEixhuP1rcra2m79/view?usp=drive_link",
+    "23": "https://drive.google.com/file/d/1XWhKjd1sm78LgYYf_64-LgsOu4E-_gxl/view?usp=drive_link",
+    "24": "https://drive.google.com/file/d/1JtBX5QB2rzL5Be4tYTHZD5jW0bnNMca2/view?usp=drive_link",
+    "25": "https://drive.google.com/file/d/1Mnbq4eqLlPZRbcsktuUrJQ0P_1llI8a3/view?usp=drive_link",
+    "26": "https://drive.google.com/file/d/1gCCKQLKBRLCcWHfuMrMTuW3LR_jIBXCF/view?usp=drive_link",
+    "27": "https://drive.google.com/file/d/1SO2TkRNpFCQ15tH5yPixlsngNpu4Pqxv/view?usp=drive_link",
+    "28": "https://drive.google.com/file/d/1e-G0lIXe1gn8iK2HMn5ZwJdRMGObjN15/view?usp=drive_link",
+    "31": "https://drive.google.com/file/d/1Sp7RXDbxjLVAK1VwkF2q4SBfu1-drm16/view?usp=drive_link",
+    "32": "https://drive.google.com/file/d/16rw5zxnJi3nxBDFZJyjp8PQZzRB9K7LM/view?usp=drive_link",
+    "33": "https://drive.google.com/file/d/1DYhc60NvClbNDCCr-tHYyyaO_1k_SZQL/view?usp=drive_link",
+    "34": "https://drive.google.com/file/d/16EN1W9H_EbbT2TbhLknJykODdAgfjB4w/view?usp=drive_link",
+    "35": "https://drive.google.com/file/d/1QrPXvd23iX2duiTgTDmpu_nNFTyDuIS5/view?usp=drive_link",
+    "37": "https://drive.google.com/file/d/1pGeH3Mrfg6xJfFmiKJBgRvHxdAB7N1KU/view?usp=drive_link",
+    "38": "https://drive.google.com/file/d/1XI2nZIcdOd2hv9MZzVLuYonCEg_s79IC/view?usp=drive_link",
+    "39": "https://drive.google.com/file/d/1WsKRq-sqC5_-zWg0tpVnfjRUyLYoojUB/view?usp=drive_link",
+    "40": "https://drive.google.com/file/d/1SdoU-K7AmzSoRln3BCuAPxHWEfNi292m/view?usp=drive_link",
+    "41": "https://drive.google.com/file/d/1TT9nkYdA8Dw2mwci599053KpTT-_2sml/view?usp=drive_link",
+    "42": "https://drive.google.com/file/d/1EqjCjnfW80EaM2F5PaG22qEb3WSspFsf/view?usp=drive_link",
+    "43": "https://drive.google.com/file/d/1s2P3XpxfmGsIjIjaRoC8FXoF5h3TDjGQ/view?usp=drive_link",
+    "44": "https://drive.google.com/file/d/1fUCV4U34DJaPRF-s1oVdX67DM-Z7Rln_/view?usp=drive_link",
+    "45": "https://drive.google.com/file/d/1UeUQyeAckTabd4BmiHJJqClsgKarfEhL/view?usp=drive_link",
+    "46": "https://drive.google.com/file/d/1SAMCChCPxWqejoXudY8XFID8jd5o_ngU/view?usp=drive_link",
+    "47": "https://drive.google.com/file/d/1oN_6xqyk7HS1sieoEKk8nttjy8-xS_yu/view?usp=drive_link",
+    "48": "https://drive.google.com/file/d/1lGEaNPhtHOnSJYJsB7nA1lkaeIPrNNFz/view?usp=drive_link",
+    "49": "https://drive.google.com/file/d/1jB4pIZStVa-vwuvOSDdiWnsCJEpvaa9t/view?usp=drive_link",
+    "50": "https://drive.google.com/file/d/1dfGxJv0utpr7E-vdjQQprAz_Ipx5ZJwZ/view?usp=drive_link",
+    "51": "https://drive.google.com/file/d/1URtL1odgNGjh2nI2dD3lnjzJiBbBjqh4/view?usp=drive_link",
+    "52": "https://drive.google.com/file/d/1dPCx22YRyEf1jx0N8Bn8OVedFrETA9VD/view?usp=drive_link",
+    "53": "https://drive.google.com/file/d/1CMRsOPSVKXOTOfDQj202IMJX6aGOfF3V/view?usp=drive_link",
+    "54": "https://drive.google.com/file/d/17zVEIEUQrefj9BCsHT200hC984qL6L36/view?usp=drive_link",
+    "55": "https://drive.google.com/file/d/1oQUwYO0TgW3ryY5pPG3ixcJ4TdpvT5hg/view?usp=drive_link",
+    "56": "https://drive.google.com/file/d/1WKXOCAX1SmBa9_N8a9zNxhIO1E93pMId/view?usp=drive_link",
+    "57": "https://drive.google.com/file/d/12RJ7NktS6SoqQ4MsJxsqKt2Zh3qy3iH1/view?usp=drive_link",
+    "58": "https://drive.google.com/file/d/1wKXvQNTcYmYt5sSEUKdvCsgFNp9m0Q5k/view?usp=drive_link",
+    "59": "https://drive.google.com/file/d/1DY6qMT1MD7EddZd5fj3SBCTJNWyjuqNX/view?usp=drive_link",
+    "60": "https://drive.google.com/file/d/1zyf9ouOfgoW5mns5N7unQrriQJ6xjdUi/view?usp=drive_link",
+    "61": "https://drive.google.com/file/d/15zON1tja5ou3y7L8d8nu-fdc4XYGlnqb/view?usp=drive_link",
+    "62": "https://drive.google.com/file/d/1VmzWAtjAFlM1DC-tKG0Dw1-otrVkdpti/view?usp=drive_link",
+    "63": "https://drive.google.com/file/d/1TH5wYLMeBeprot6-bPFZyh_dVhLGLR08/view?usp=drive_link",
+    "64": "https://drive.google.com/file/d/1ScM1ebCH51wTi0mmMTSIPahoZofm_xuL/view?usp=drive_link",
+    "65": "https://drive.google.com/file/d/1qbWAHdca8ZSx4G7OUnMXQlMsg9neBCW8/view?usp=drive_link",
+    "66": "https://drive.google.com/file/d/1ASSj1YdIvUe64BfAzWQ9IbDEumof615i/view?usp=drive_link",
+    "67": "https://drive.google.com/file/d/1GKCozATY0I8UVxhnjdpco3-VBPS27Zr7/view?usp=drive_link",
+    "68": "https://drive.google.com/file/d/1cy7nAHarikbvVXyXAco6EIDrsvZzlV8F/view?usp=drive_link",
+    "69": "https://drive.google.com/file/d/1eiJHdo0GjqECrqYeBeS5xzXCKOkNGJab/view?usp=drive_link",
+    "70": "https://drive.google.com/file/d/1pyA-Dh0P5AN3-ip9MfSu22ebInsr5R7h/view?usp=drive_link",
+    "71": "https://drive.google.com/file/d/1PA4ovneuLD2qHHwv6Qx6DQxbKIyuLYux/view?usp=drive_link",
+    "72": "https://drive.google.com/file/d/1aXnU47uzXtW1ZcD9SUg9nHJubVBaz3az/view?usp=drive_link",
+    "73": "https://drive.google.com/file/d/1p7HZEr4s_RgAe57hMDXj5-4dpXlsHMt9/view?usp=drive_link",
+    "74": "https://drive.google.com/file/d/1dfP9qK9eGnvo0hK--l0lnThxACfIZ9_f/view?usp=drive_link",
+    "75": "https://drive.google.com/file/d/1prPh84jY3BYkRMTBcFtAAPeREOP9EQwe/view?usp=drive_link",
+    "76": "https://drive.google.com/file/d/1VVcJajqLHrEr8XDAfVF3_QlvGuAqjuSd/view?usp=drive_link",
+    "77": "https://drive.google.com/file/d/1Pw-1y6ZFgFzEDzKDdI8VdOg4O-hJHajy/view?usp=drive_link",
+    "78": "https://drive.google.com/file/d/12F-MQZFQFjZPAcVKz4Y__T7fcNlyjTpO/view?usp=drive_link",
+    "79": "https://drive.google.com/file/d/1RYbBaPOp2CWYfj8ltEDI_y84FdxOxlEW/view?usp=drive_link",
+    "80": "https://drive.google.com/file/d/1BHy41a8XZhNitEqRm1sL3n7SontFMVka/view?usp=drive_link",
+    "81": "https://drive.google.com/file/d/1Yo9gPsjPwjvTPAz_nfCGNVF5ruxFcwVU/view?usp=drive_link",
+    "82": "https://drive.google.com/file/d/1mCGAXLnLPMmo7ZGxjwpPV-qES8S_0XKg/view?usp=drive_link",
+    "83": "https://drive.google.com/file/d/1eggbh76-bq54M1ve_MkxrS-SfH_Uwohk/view?usp=drive_link",
+    "84": "https://drive.google.com/file/d/1ZJy1KOwMiE2eL14Bgo7iU-G3Hc_BhC6x/view?usp=drive_link",
+    "85": "https://drive.google.com/file/d/1fxfK10uzPHO_Q77myUDsI91gr7_e19Ut/view?usp=drive_link",
+    "86": "https://drive.google.com/file/d/1OdqJ9IKe2oAN1VE3a94rt1JAwcn-16Ji/view?usp=drive_link",
+    "87": "https://drive.google.com/file/d/1SodUj07iUFiC7oddWNvB6GRzHMZ9eigS/view?usp=drive_link",
+    "88": "https://drive.google.com/file/d/1ZppypRlP-AbK5gQqRkh_LavTbblq4016/view?usp=drive_link",
+    "89": "https://drive.google.com/file/d/1oQkZUWR5LbffNMHShbiXxSEDR3CFcTNM/view?usp=drive_link",
+    "90": "https://drive.google.com/file/d/17dAYRSJciVVBIhmTtI_FMbmZBZcXQxBM/view?usp=drive_link",
+    "91": "https://drive.google.com/file/d/10ceUaLciuAGkRMJNo7VHVD7ajVdSOtfj/view?usp=drive_link",
+    "92": "https://drive.google.com/file/d/1szxz5749c2WcXkXTiV4ZYn_oeuIFi4ke/view?usp=drive_link",
+    "93": "https://drive.google.com/file/d/1dOlYZzidB3Yoo5mjmoDSUC65dpWogoox/view?usp=drive_link",
+    "94": "https://drive.google.com/file/d/17dfihWuDJsFnhwpE4y_ow493z1IXncCf/view?usp=drive_link",
+    "95": "https://drive.google.com/file/d/1R9m8HCQTOYqSuSlT2FiWSBzCQ2Ry9jE5/view?usp=drive_link",
+    "96": "https://drive.google.com/file/d/1yjd8bnRuSrsfGTpZY3DwEuiZJs5DXqfs/view?usp=drive_link",
+}
 
 # =============================================================================
 # NORMALIZAÇÃO
@@ -921,13 +1018,13 @@ def list_drive_folder_files(folder_id: str) -> Dict[str, str]:
             if resp.status_code != 200:
                 continue
 
-            html = resp.text
+            html_txt = resp.text
 
-            matches = re.findall(r'\["([a-zA-Z0-9_-]{20,})","([^"]+\.parquet)"', html)
+            matches = re.findall(r'\["([a-zA-Z0-9_-]{20,})","([^"]+\.parquet)"', html_txt)
             for file_id, name in matches:
                 found[name] = file_id
 
-            matches2 = re.findall(r'\["([^"]+\.parquet)","([a-zA-Z0-9_-]{20,})"', html)
+            matches2 = re.findall(r'\["([^"]+\.parquet)","([a-zA-Z0-9_-]{20,})"', html_txt)
             for name, file_id in matches2:
                 found[name] = file_id
 
@@ -976,6 +1073,16 @@ def ensure_local_lote_file(distrito_id: Any, *, force_redownload: bool = False) 
     if copied is not None and copied.exists():
         return copied
 
+    direct_url = str(LOTES_LINKS_BY_DISTRITO.get(did, "")).strip()
+    if direct_url:
+        try:
+            return download_drive_file(direct_url, dst, label=lote_filename_for_distrito(did))
+        except Exception as e:
+            raise RuntimeError(
+                f"Falha ao baixar o arquivo de lotes do distrito '{did}' pelo link direto consolidado. "
+                f"Detalhe: {e}"
+            )
+
     filename = lote_filename_for_distrito(did)
     file_id = find_lote_file_id_in_folder(did)
 
@@ -991,7 +1098,8 @@ def ensure_local_lote_file(distrito_id: Any, *, force_redownload: bool = False) 
         f"Não foi possível localizar o arquivo de lotes '{filename}'. "
         f"O app procura primeiro localmente em: "
         f"'{REPO_ROOT}', '{REPO_ROOT / 'data'}', '{lotes_repo_dir()}', '{DATA_CACHE_DIR}' e '{lotes_local_dir()}'. "
-        f"Se não encontrar localmente, tenta buscar na pasta do Google Drive configurada em: {get_lotes_folder_raw()} . "
+        f"Depois tenta o link consolidado por distrito e, por fim, a pasta do Google Drive configurada em: "
+        f"{get_lotes_folder_raw()} . "
         f"Verifique se o arquivo existe com esse nome exato."
     )
 
@@ -1481,6 +1589,153 @@ def _mk_tooltip(id_col: str, prefix: str) -> Optional[Any]:
         max_width=320,
     )
 
+# =============================================================================
+# LABELS DINÂMICOS
+# =============================================================================
+def _format_label_multiline(text: Any) -> str:
+    if text is None:
+        return ""
+    txt = str(text).strip()
+    if not txt:
+        return ""
+
+    for sep in [" - ", " – ", "/"]:
+        if sep in txt:
+            parts = [p.strip() for p in txt.split(sep) if str(p).strip()]
+            if len(parts) >= 2:
+                return "<br>".join(html.escape(p) for p in parts[:2])
+
+    return html.escape(txt)
+
+
+def add_labels_on_map_zoomable(
+    m,
+    gdf: "gpd.GeoDataFrame",
+    label_col: str,
+    *,
+    layer_name: str = "labels",
+    color: str = "#000000",
+    weight: str = "700",
+    min_zoom_show: int = 10,
+    max_zoom_show: int = 20,
+    base_zoom: int = 11,
+    base_font_size: float = 12.0,
+    min_font_size: float = 9.0,
+    max_font_size: float = 20.0,
+    zoom_step: float = 0.8,
+) -> None:
+    if folium is None or gdf is None or gdf.empty:
+        return
+    if label_col not in gdf.columns:
+        return
+
+    try:
+        g = gdf.copy()
+        g = g[g.geometry.notna()].copy()
+        if g.empty:
+            return
+
+        points = g.geometry.representative_point()
+        items = []
+
+        for idx, row in g.iterrows():
+            label = row.get(label_col)
+            if pd.isna(label):
+                continue
+
+            txt_html = _format_label_multiline(label)
+            if not txt_html:
+                continue
+
+            pt = points.loc[idx]
+            if pt is None or getattr(pt, "is_empty", False):
+                continue
+
+            items.append(
+                {
+                    "lat": float(pt.y),
+                    "lng": float(pt.x),
+                    "label_html": txt_html,
+                }
+            )
+
+        if not items:
+            return
+
+        map_name = m.get_name()
+        layer_var = re.sub(r"[^a-zA-Z0-9_]", "_", layer_name.lower())
+        js_items = json.dumps(items, ensure_ascii=False)
+
+        script = f"""
+        <script>
+        (function() {{
+            var map = {map_name};
+            var labelData_{layer_var} = {js_items};
+            var layerGroup_{layer_var} = L.layerGroup().addTo(map);
+
+            function fontSizeForZoom(zoom) {{
+                var size = {base_font_size} + ((zoom - {base_zoom}) * {zoom_step});
+                size = Math.max({min_font_size}, Math.min({max_font_size}, size));
+                return size.toFixed(1);
+            }}
+
+            function redrawLabels_{layer_var}() {{
+                layerGroup_{layer_var}.clearLayers();
+                var zoom = map.getZoom();
+
+                if (zoom < {min_zoom_show} || zoom > {max_zoom_show}) {{
+                    return;
+                }}
+
+                var size = fontSizeForZoom(zoom);
+
+                labelData_{layer_var}.forEach(function(item) {{
+                    var icon = L.divIcon({{
+                        className: 'pb-dynamic-label',
+                        html: `
+                            <div style="
+                                font-family: Roboto, Arial, sans-serif;
+                                font-size: ${{size}}px;
+                                color: {color};
+                                font-weight: {weight};
+                                text-align: center;
+                                white-space: nowrap;
+                                line-height: 1.1;
+                                text-shadow:
+                                    -1px -1px 0 #ffffff,
+                                     1px -1px 0 #ffffff,
+                                    -1px  1px 0 #ffffff,
+                                     1px  1px 0 #ffffff,
+                                     0px  0px 3px #ffffff;
+                                transform: translate(-50%, -50%);
+                                pointer-events: none;
+                            ">
+                                ${{item.label_html}}
+                            </div>
+                        `,
+                        iconSize: null
+                    }});
+
+                    L.marker([item.lat, item.lng], {{
+                        icon: icon,
+                        interactive: false,
+                        keyboard: false
+                    }}).addTo(layerGroup_{layer_var});
+                }});
+            }}
+
+            map.on('zoomend', redrawLabels_{layer_var});
+            map.on('moveend', redrawLabels_{layer_var});
+            redrawLabels_{layer_var}();
+        }})();
+        </script>
+        """
+
+        m.get_root().html.add_child(folium.Element(script))
+
+    except Exception:
+        pass
+
 
 def add_parent_fill(
     m,
@@ -1525,75 +1780,6 @@ def add_parent_fill(
         },
     ).add_to(fg)
     fg.add_to(m)
-
-
-def add_labels_on_map(
-    m,
-    gdf: "gpd.GeoDataFrame",
-    label_col: str,
-    *,
-    font_size: int = 12,
-    color: str = "#000000",
-    weight: str = "700",
-) -> None:
-    if folium is None or gdf is None or gdf.empty:
-        return
-    if label_col not in gdf.columns:
-        return
-
-    try:
-        g = gdf.copy()
-        g = g[g.geometry.notna()].copy()
-        if g.empty:
-            return
-
-        points = g.geometry.representative_point()
-
-        for idx, row in g.iterrows():
-            label = row.get(label_col)
-            if pd.isna(label):
-                continue
-
-            txt = str(label).strip()
-            if not txt:
-                continue
-
-            pt = points.loc[idx]
-            if pt is None or getattr(pt, "is_empty", False):
-                continue
-
-            safe_txt = (
-                txt.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-            )
-
-            folium.Marker(
-                location=[pt.y, pt.x],
-                icon=folium.DivIcon(
-                    html=f"""
-                    <div style="
-                        font-family: Roboto, Arial, sans-serif;
-                        font-size: {font_size}px;
-                        color: {color};
-                        font-weight: {weight};
-                        text-align: center;
-                        white-space: nowrap;
-                        line-height: 1.1;
-                        text-shadow:
-                            -1px -1px 0 #ffffff,
-                             1px -1px 0 #ffffff,
-                            -1px  1px 0 #ffffff,
-                             1px  1px 0 #ffffff,
-                             0px  0px 3px #ffffff;
-                    ">
-                        {safe_txt}
-                    </div>
-                    """
-                ),
-            ).add_to(m)
-    except Exception:
-        pass
 
 
 def add_polygons_selectable(
@@ -2276,13 +2462,20 @@ def render_map_panel() -> None:
         )
 
         if "sp_nome" in g_sub.columns:
-            add_labels_on_map(
+            add_labels_on_map_zoomable(
                 m,
                 g_sub,
                 "sp_nome",
-                font_size=13,
+                layer_name="labels_subpref",
                 color="#000000",
                 weight="700",
+                min_zoom_show=10,
+                max_zoom_show=20,
+                base_zoom=11,
+                base_font_size=13,
+                min_font_size=10,
+                max_font_size=22,
+                zoom_step=0.9,
             )
 
     elif level == "distrito":
@@ -2331,13 +2524,20 @@ def render_map_panel() -> None:
         )
 
         if "ds_nome" in g_show.columns:
-            add_labels_on_map(
+            add_labels_on_map_zoomable(
                 m,
                 g_show,
                 "ds_nome",
-                font_size=12,
+                layer_name="labels_distrito",
                 color="#000000",
                 weight="700",
+                min_zoom_show=11,
+                max_zoom_show=20,
+                base_zoom=12,
+                base_font_size=12,
+                min_font_size=9,
+                max_font_size=20,
+                zoom_step=0.85,
             )
 
     elif level == "isocrona":
