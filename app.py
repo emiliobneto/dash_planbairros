@@ -68,17 +68,10 @@ DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 ASSETS_DIR = REPO_ROOT / "assets"
 LOGO_PATH = ASSETS_DIR / "logo_todos.jpg"
 LOGO_HEIGHT = 46
-# Pasta onde estão os dados versionados no GitHub
-LIMITES_DIR = REPO_ROOT / "limites administrativos"
 
-# Diretórios candidatos onde os arquivos podem estar
-DATA_SEARCH_DIRS = [
-    LIMITES_DIR,
-    LIMITES_DIR / "data",
-    REPO_ROOT,
-    REPO_ROOT / "data",
-    DATA_CACHE_DIR,
-]
+LIMITES_DIR = REPO_ROOT / "limites_administrativos"
+DATA_SEARCH_DIRS = [LIMITES_DIR, LIMITES_DIR / "data", REPO_ROOT, REPO_ROOT / "data", DATA_CACHE_DIR]
+
 
 
 # =============================================================================
