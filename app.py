@@ -31,8 +31,8 @@ PB_BROWN = "#C65534"
 PB_BTN = "#1C6880"
 PB_BLACK = "#000000"
 
-CARTO_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-CARTO_ATTR = "© OpenStreetMap contributors © CARTO"
+CARTO_LIGHT_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+CARTO_ATTR = "© OpenStreetMap contributors"
 
 SMOOTH_FACTOR = 1.0
 LINE_CAP = "round"
@@ -1165,8 +1165,8 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
     if folium is None:
         return None
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True, prefer_canvas=True)
-    folium.TileLayer(tiles=CARTO_LIGHT_URL, attr=CARTO_ATTR, name="Carto Positron",
-                     overlay=False, control=False, subdomains="abcd", max_zoom=20).add_to(m)
+    folium.TileLayer(tiles=CARTO_LIGHT_URL, attr=CARTO_ATTR, name="OpenStreetMap",
+                     overlay=False, control=False, max_zoom=19).add_to(m)
     try:
         folium.map.CustomPane("parent_fill", z_index=610).add_to(m)
         folium.map.CustomPane("detail_shapes", z_index=640).add_to(m)
@@ -1175,7 +1175,6 @@ def make_carto_map(center=(-23.55, -46.63), zoom=11):
     except Exception:
         pass
     return m
-
 
 def _mk_tooltip(id_col, prefix):
     if GeoJsonTooltip is None:
