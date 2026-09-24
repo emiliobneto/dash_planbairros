@@ -96,7 +96,7 @@ ISO_DEFAULT_COLOR = "#ffffff"
 # =============================================================================
 # IDS
 # =============================================================================
-SUBPREF_ID = "subpref_id"
+SUBPREF_ID = "sp_id"
 DIST_ID = "distrito_id"
 ISO_ID = "iso_id"
 OD_ID = "od_id"
