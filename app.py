@@ -1,2395 +1,656 @@
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
-import base64
-import html
-import json
-import os
+# -*- coding: utf-8 -*-
+"""PlanBairros — Dashboard Streamlit/Folium."""
 import re
-import shutil
-import unicodedata
+from pathlib import Path
 
+import pandas as pd
+import requests
 import streamlit as st
-import pandas as pd  # type: ignore
+
+st.set_page_config(page_title="PlanBairros", layout="wide")
 
 try:
-    import geopandas as gpd  # type: ignore
-    import folium  # type: ignore
-    from folium.features import GeoJsonTooltip  # type: ignore
-    from folium.plugins import Draw  # type: ignore
-    from branca.element import Template, MacroElement, JavascriptLink  # type: ignore
-    from streamlit_folium import st_folium  # type: ignore
-    from shapely.geometry import Point, shape  # type: ignore
-except Exception:
-    gpd = folium = GeoJsonTooltip = Draw = st_folium = Point = shape = None  # type: ignore
-    Template = MacroElement = JavascriptLink = None  # type: ignore
+    import geopandas as gpd
+    from shapely.geometry import Point, shape
+    from shapely.ops import unary_union
+    import folium
+    from folium.plugins import Draw
+    from branca.element import Element, JavascriptLink, MacroElement, Template
+    from streamlit_folium import st_folium
+except ImportError as e:  # pragma: no cover
+    st.error(f"Este app requer `geopandas`, `folium` e `streamlit-folium`: {e}")
+    st.stop()
 
 # =============================================================================
-# CONFIG / UI
+# CAMINHOS (relativos ao repositório — funciona local e no Streamlit Cloud)
 # =============================================================================
-st.set_page_config(page_title="PlanBairros", page_icon="🏙️",
-                   layout="wide", initial_sidebar_state="collapsed")
+APP_DIR = Path(__file__).resolve().parent
 
-PB_NAVY = "#14407D"
-PB_BROWN = "#C65534"
-PB_BTN = "#1C6880"
-PB_BLACK = "#000000"
 
-CARTO_LIGHT_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-CARTO_ATTR = "© OpenStreetMap contributors"
+def _find_repo_root(start: Path) -> Path:
+    for p in [start, *start.parents]:
+        if (p / "limites_administrativos").is_dir():
+            return p
+    return start
 
-SMOOTH_FACTOR = 1.0
-LINE_CAP = "round"
-LINE_JOIN = "round"
 
-PARENT_FILL_OPACITY = 0.20
-PARENT_STROKE_OPACITY = 1.0
-PARENT_STROKE_WEIGHT = 1.0
-PARENT_STROKE_DASH = None
-
-SIMPLIFY_TOL_BY_LEVEL = {
-    "subpref": 0.0002, "distrito": 0.0001, "isocrona": 0.00005,
-    "censo": 0.00003, "od": 0.00005, "quadra": 0.0, "lote": 0.0,
-}
-
-ISO_FILL_OPACITY_DEFAULT = 0.05
-ISO_FILL_OPACITY_CLASSES = 0.05
-
-# --- Camadas fixas (sempre visíveis) ---
-FIXED_LAYER_STYLE = {
-    "area_verde":   {"file": "area_verde.geojson",  "color": "#556B2F", "weight": 0,   "fill": True,  "fill_opacity": 0.55, "name": "Áreas verdes"},
-    "rios":         {"file": "rios.geojson",         "color": "#0047AB", "weight": 2.0, "fill": True,  "fill_opacity": 0.35, "name": "Rios"},
-    "linhas_metro": {"file": "linhas metro.geojson", "color": "#000000", "weight": 2.8, "fill": False, "fill_opacity": 0.0,  "name": "Metrô"},
-    "linhas_trem":  {"file": "linhas trem.geojson",  "color": "#000000", "weight": 2.2, "fill": False, "fill_opacity": 0.0,  "name": "Trem", "dash": "6 4"},
-}
-
-# =============================================================================
-# PATHS
-# =============================================================================
-REPO_ROOT = Path.cwd()
-DATA_CACHE_DIR = REPO_ROOT / "data_cache"
-DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-ASSETS_DIR = REPO_ROOT / "assets"
-LOGO_PATH = ASSETS_DIR / "logo_todos.jpg"
-LOGO_HEIGHT = 46
-
+REPO_ROOT = _find_repo_root(APP_DIR)
 LIMITES_DIR = REPO_ROOT / "limites_administrativos"
-DATA_SEARCH_DIRS = [LIMITES_DIR, LIMITES_DIR / "data", REPO_ROOT, REPO_ROOT / "data", DATA_CACHE_DIR]
+CACHE_DIR = REPO_ROOT / "data_cache"
+SEARCH_DIRS = [
+    LIMITES_DIR,
+    LIMITES_DIR / "data",
+    LIMITES_DIR / "tematicos",
+    REPO_ROOT / "data",
+    REPO_ROOT,
+    APP_DIR,
+    CACHE_DIR,
+]
 
-# =============================================================================
-# MAPAS TEMÁTICOS — PASTA / LINKS
-# =============================================================================
-THEMATIC_LOCAL_DIR = r"C:\Users\emilio.bneto\Downloads\dash"   # ambiente local
-THEMATIC_DIR_SECRET_KEY = "PB_THEMATIC_DIR"                     # opcional (secrets/env)
-THEMATIC_CACHE_DIR = DATA_CACHE_DIR / "tematicos"
-THEMATIC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+CARTO_LIGHT_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+CARTO_ATTR = "© OpenStreetMap contributors © CARTO"
 
-# Links do Drive (nuvem). Preencha quando subir os arquivos, ou use secrets PB_TEM_<CHAVE>.
-THEMATIC_DRIVE_LINKS: Dict[str, str] = {
-    "apa": "", "bacia": "", "praca": "", "corredor_verde": "", "favela": "",
-    "declividade": "", "risco_geologico": "", "arvores": "", "vias": "",
-    "densidade": "", "lcz": "",
-}
-
-LCZ_LABELS = {
-    1: "Alto-compacto", 2: "Médio-compacto", 3: "Baixo-compacto", 4: "Alto-aberto",
-    5: "Médio-aberto", 6: "Baixo-aberto", 7: "Baixo-precário", 8: "Baixo-grande",
-    9: "Ocupação esparsa", 10: "Indústria pesada", 101: "Arborização densa",
-    102: "Arborização esparsa", 103: "Vegetação arbustiva", 104: "Vegetação herbácea",
-    105: "Rocha ou pavimento", 106: "Solo exposto", 107: "Água",
-}
-LCZ_COLORS_BY_CODE = {
-    1: "#8B0000", 2: "#D10000", 3: "#FF0000", 4: "#BF4D00", 5: "#FF6600", 6: "#FFA366",
-    7: "#FAEE05", 8: "#B3B3B3", 9: "#FFCCAA", 10: "#555555", 101: "#006A00",
-    102: "#00AA00", 103: "#648526", 104: "#B9DB79", 105: "#000000", 106: "#FBF7AE", 107: "#6A6AFF",
-}
-DENS_BINS = [(2000, "0 – 2.000 hab/hec"), (4000, "2.001 – 4.000 hab/hec"),
-             (6000, "4.001 – 6.000 hab/hec"), (8000, "6.001 – 8.000 hab/hec"),
-             (10000, "8.001 – 10.000 hab/hec"), (float("inf"), "> 10.000 hab/hec")]
-DENS_COLORS = ["#ffffb2", "#fed976", "#feb24c", "#fd8d3c", "#f03b20", "#bd0026"]
-
-THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
-    "apa": {"title": "APA", "file": "apa.parquet", "label": "NOME_CAPS", "kind": "auto"},
-    "bacia": {"title": "Bacias hidrográficas", "file": "bacia.parquet",
-              "label": "nm_bacia_hidrografica_principal", "kind": "auto"},
-    "praca": {"title": "Praças", "file": "praca.parquet", "label": "nome", "kind": "single", "color": "#2e8b57"},
-    "corredor_verde": {"title": "Corredores verdes", "file": "corredor_verde.parquet",
-                       "label": "tx_proposta_planpavel", "kind": "class",
-                       "class_col": "tx_proposta_corredor_planpavel", "fn": "corredor", "weight": 3,
-                       "colors": {"Corredor verde": "#2ca25f", "Corredor polinizador": "#e6a100"}},
-    "favela": {"title": "Favelas", "file": "favela.parquet", "label": "nome", "kind": "class",
-               "class_col": "propriedade_area", "fn": "favela",
-               "colors": {"Sem informação": "#bdbdbd", "Pública": "#3182bd",
-                          "Particular": "#e6550d", "Pública/particular": "#756bb1"}},
-    "declividade": {"title": "Declividade", "file": "Declividade.parquet", "label": "classe",
-                    "kind": "class", "class_col": "classe", "fn": "decliv", "tt_leg": True,
-                    "colors": {"1 - 0 a 5%": "#1a9850", "2 - 5 a 25%": "#fee08b",
-                               "3 - 25 a 60%": "#fc8d59", "4 - acima de 60%": "#d73027"}},
-    "risco_geologico": {"title": "Risco geológico", "file": "risco_geologico.parquet",
-                        "label": "rg_process", "kind": "class", "class_col": "rg_process", "fn": "risco",
-                        "colors": {"R1": "#fee5d9", "R2": "#fcae91", "R3": "#fb6a4a", "R4": "#cb181d",
-                                   "Área em monitoramento": "#6baed6", "Área encerrada": "#969696"}},
-    "arvores": {"title": "Árvores", "file": "arvores.parquet", "label": None, "kind": "points", "color": "#1b7a1b"},
-    "vias": {"title": "Vias", "file": "vias.parquet", "label": "cvc_classe", "kind": "class",
-             "class_col": "cvc_classe", "fn": "vias", "weight": 4, "tt_leg": True,
-             "colors": {"Local": "#1f5fd1", "Coletora": "#f2c500", "Arterial": "#e31a1c",
-                        "Via de trânsito rápido": "#808080", "Via de pedestres": "#ff8c00"}},
-    "densidade": {"title": "Densidade demográfica", "file": "densidade_demografica.parquet",
-                  "label": "hab_hec", "kind": "class", "class_col": "hab_hec", "fn": "dens",
-                  "colors": dict(zip([b[1] for b in DENS_BINS], DENS_COLORS))},
-    "lcz": {"title": "Zona climática local", "file": "LCZ.parquet", "label": "DN", "kind": "class",
-            "class_col": "DN", "fn": "lcz", "tt_leg": True,
-            "colors": {LCZ_LABELS[k]: LCZ_COLORS_BY_CODE[k] for k in LCZ_LABELS}},
-}
-PALETTE_AUTO = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02",
-                "#a6761d", "#666666", "#1f78b4", "#b2df8a", "#fb9a99", "#cab2d6"]
-MAX_POINTS = 8000
-
-# =============================================================================
-# VISUALIZAÇÕES / CSV
-# =============================================================================
-QUADRAS_CSV_FILENAME = "quadras.csv"
-QUADRAS_CSV_SECRET_KEY = "PB_QUADRAS_CSV_FILE_ID"
-QUADRAS_CSV_FALLBACK_URL = "https://drive.google.com/file/d/1_WKryQlu_jZL1xsgAmQDrI81aSdzKYsc/view?usp=drive_link"
-
-CLUSTER_COL = "Cluster"
-ISO_CLASS_COL = "nova_class"
-CLUSTER_COLOR_MAP = {0: "#bf7db2", 1: "#f7bd6a", 2: "#cf651f", 3: "#cf651f", 4: "#793393"}
-CLUSTER_NULL_COLOR = "#c8c8c8"
-ISO_TRANSITION_SET = {1, 3, 6}
-ISO_TRANSITION_LABEL = "Área de transição"
-ISO_TRANSITION_COLOR = "#7f6a5c"
-ISO_VALUE_TO_CLASSNUM = {0: 1, 2: 2, 4: 3, 5: 4, 7: 5, 8: 6, 9: 7}
-ISO_CLASSNUM_TO_COLOR = {1: "#f7f7f7", 2: "#d8daeb", 3: "#8073ac", 4: "#b2abd2",
-                         5: "#b35806", 6: "#e08214", 7: "#542788"}
-ISO_DEFAULT_COLOR = "#ffffff"
-
-# =============================================================================
-# IDS
-# =============================================================================
-SUBPREF_ID = "sp_id"
-DIST_ID = "distrito_id"
-ISO_ID = "iso_id"
-OD_ID = "od_id"
-QUADRA_ID = "quadra_id"
-QUADRA_UID = "quadra_uid"
-CENSO_ID = "censo_id"
-LOTE_ID = "lote_id"
-
-DIST_PARENT = SUBPREF_ID
-ISO_PARENT = DIST_ID
-CENSO_PARENT = ISO_ID
-
-LAYER_ID_COLS = {
-    "subpref": [SUBPREF_ID], "dist": [DIST_ID, DIST_PARENT],
-    "iso": [ISO_ID, ISO_PARENT, SUBPREF_ID],
-    "censo": [CENSO_ID, CENSO_PARENT, QUADRA_ID, ISO_ID],
-    "od": [OD_ID, ISO_ID], "quadra": [QUADRA_ID, ISO_ID, CENSO_ID, QUADRA_UID],
-    "lote": [LOTE_ID, ISO_ID, DIST_ID],
-}
-
-LOCAL_FILENAMES = {
+ADMIN_FILES = {
     "subpref": "subprefeitura.parquet",
-    "dist": "Distritos.parquet",
+    "distrito": "Distritos.parquet",
     "iso": "isocronas.parquet",
     "censo": "SetoresCensitarios2023.parquet",
     "od": "ZonasOD2023.parquet",
-    "quadra": "Quadras.parquet",
+    "quadras": "Quadras.parquet",
+    "lotes": "Lotes.parquet",
 }
+ADMIN_STYLE = {  # cor, espessura, título
+    "subpref": ("#1a237e", 2.5, "Subprefeituras"),
+    "distrito": ("#4a148c", 2.0, "Distritos"),
+    "iso": ("#d84315", 2.0, "Isócronas"),
+    "censo": ("#455a64", 0.8, "Setores censitários"),
+    "od": ("#00838f", 1.2, "Zonas OD"),
+    "quadras": ("#6d4c41", 0.6, "Quadras"),
+    "lotes": ("#8d6e63", 0.4, "Lotes"),
+}
+
 
 # =============================================================================
-# LOTES / QUADRA — links
+# LEITURA DE ARQUIVOS
 # =============================================================================
-LOTES_DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/17-lA2P_D4oV1joysDf7BOAgp358IcoEG?usp=drive_link"
-LOTES_SECRET_KEY = "PB_LOTES_FOLDER_URL"
-
-LOTES_LINKS_BY_DISTRITO = {
-    "1": "https://drive.google.com/file/d/1Kbn6RXKXoxdpcdTbI9txBBSf63Yd14zZ/view?usp=drive_link",
-    "2": "https://drive.google.com/file/d/1q8oaYurUmEyJIgluOmos-nDytAtLur7Q/view?usp=drive_link",
-    "3": "https://drive.google.com/file/d/15Gg4GVDabqZwzY1ubIwhhPZXXU4hkrs8/view?usp=drive_link",
-    "4": "https://drive.google.com/file/d/1OAbjgydEp2E5UhWqHwCkKj_6EziDMAYL/view?usp=drive_link",
-    "5": "https://drive.google.com/file/d/1jiruqIpGIGhU7q0Uu4wCSl_xUsLdPnZY/view?usp=drive_link",
-    "6": "https://drive.google.com/file/d/1IcYBxz1aa-1Aoelsm6_Vf3UM_fQ_y4Iv/view?usp=drive_link",
-    "7": "https://drive.google.com/file/d/1us8VgARE1VLjFEWLMfH4qjOadiJ4Y0vj/view?usp=drive_link",
-    "8": "https://drive.google.com/file/d/1yGeLMS5zYUKJGi1i5mlvvV4BgJmvEZgW/view?usp=drive_link",
-    "9": "https://drive.google.com/file/d/1ueN0KUmZ5ijd5wK087dVK0Fq9ATob5pS/view?usp=drive_link",
-    "10": "https://drive.google.com/file/d/1KCwDfaqVBMEoFm4pqAYGPEcYPW9IDIir/view?usp=drive_link",
-    "11": "https://drive.google.com/file/d/1g7wg3aHO4r2UpuEPcNG9qCgqygR4PLvY/view?usp=drive_link",
-    "12": "https://drive.google.com/file/d/1mG4zs2HqmzTaeFwovJdw-nt11G27L7CC/view?usp=drive_link",
-    "13": "https://drive.google.com/file/d/1BlpnBTDQsBpfPXL_xhom7TtNkt3w9k9I/view?usp=drive_link",
-    "14": "https://drive.google.com/file/d/1iBkLh3atFZG61jORGXNcwYjM7c_wTPXU/view?usp=drive_link",
-    "15": "https://drive.google.com/file/d/1Kx3ttk0Tmow0aJqPhnI-B0p-mpasMsxp/view?usp=drive_link",
-    "16": "https://drive.google.com/file/d/1IyFlPR1nGRfbSPn8J3yrySJAWFkI5L2q/view?usp=drive_link",
-    "17": "https://drive.google.com/file/d/1_kmHNaY0k5zl6Xk1dSGVHrUDtGYWaCMj/view?usp=drive_link",
-    "18": "https://drive.google.com/file/d/15jngv3COgPLIwizOmbQhJuEDlwBSF3M5/view?usp=drive_link",
-    "19": "https://drive.google.com/file/d/1IlvxySwpW3OoRktzooJ2bk4XGkuhcis8/view?usp=drive_link",
-    "20": "https://drive.google.com/file/d/1KcCz5bIl1cMcE_7eFqLXN0zA4QAZ5Q0U/view?usp=drive_link",
-    "21": "https://drive.google.com/file/d/1wU7EBRnMbJNXTk0J8d0uENE-FGrGfNRc/view?usp=drive_link",
-    "22": "https://drive.google.com/file/d/1jjfwx59Cni8eJzqiUEixhuP1rcra2m79/view?usp=drive_link",
-    "23": "https://drive.google.com/file/d/1XWhKjd1sm78LgYYf_64-LgsOu4E-_gxl/view?usp=drive_link",
-    "24": "https://drive.google.com/file/d/1JtBX5QB2rzL5Be4tYTHZD5jW0bnNMca2/view?usp=drive_link",
-    "25": "https://drive.google.com/file/d/1Mnbq4eqLlPZRbcsktuUrJQ0P_1llI8a3/view?usp=drive_link",
-    "26": "https://drive.google.com/file/d/1gCCKQLKBRLCcWHfuMrMTuW3LR_jIBXCF/view?usp=drive_link",
-    "27": "https://drive.google.com/file/d/1SO2TkRNpFCQ15tH5yPixlsngNpu4Pqxv/view?usp=drive_link",
-    "28": "https://drive.google.com/file/d/1e-G0lIXe1gn8iK2HMn5ZwJdRMGObjN15/view?usp=drive_link",
-    "29": "https://drive.google.com/file/d/1LXamIFPz_yAdxpWoachxebX5KqTJkJAN/view?usp=drive_link",
-    "30": "https://drive.google.com/file/d/16oq92B67QzeKIdQ3GTzQex5WGLfKj4Am/view?usp=drive_link",
-    "31": "https://drive.google.com/file/d/1Sp7RXDbxjLVAK1VwkF2q4SBfu1-drm16/view?usp=drive_link",
-    "32": "https://drive.google.com/file/d/16rw5zxnJi3nxBDFZJyjp8PQZzRB9K7LM/view?usp=drive_link",
-    "33": "https://drive.google.com/file/d/1DYhc60NvClbNDCCr-tHYyyaO_1k_SZQL/view?usp=drive_link",
-    "34": "https://drive.google.com/file/d/16EN1W9H_EbbT2TbhLknJykODdAgfjB4w/view?usp=drive_link",
-    "35": "https://drive.google.com/file/d/1QrPXvd23iX2duiTgTDmpu_nNFTyDuIS5/view?usp=drive_link",
-    "36": "https://drive.google.com/file/d/1xToRhnE_ugRwoa_qdWFu3wMloiXGSwoP/view?usp=drive_link",
-    "37": "https://drive.google.com/file/d/1pGeH3Mrfg6xJfFmiKJBgRvHxdAB7N1KU/view?usp=drive_link",
-    "38": "https://drive.google.com/file/d/1XI2nZIcdOd2hv9MZzVLuYonCEg_s79IC/view?usp=drive_link",
-    "39": "https://drive.google.com/file/d/1WsKRq-sqC5_-zWg0tpVnfjRUyLYoojUB/view?usp=drive_link",
-    "40": "https://drive.google.com/file/d/1SdoU-K7AmzSoRln3BCuAPxHWEfNi292m/view?usp=drive_link",
-    "41": "https://drive.google.com/file/d/1TT9nkYdA8Dw2mwci599053KpTT-_2sml/view?usp=drive_link",
-    "42": "https://drive.google.com/file/d/1EqjCjnfW80EaM2F5PaG22qEb3WSspFsf/view?usp=drive_link",
-    "43": "https://drive.google.com/file/d/1s2P3XpxfmGsIjIjaRoC8FXoF5h3TDjGQ/view?usp=drive_link",
-    "44": "https://drive.google.com/file/d/1fUCV4U34DJaPRF-s1oVdX67DM-Z7Rln_/view?usp=drive_link",
-    "45": "https://drive.google.com/file/d/1UeUQyeAckTabd4BmiHJJqClsgKarfEhL/view?usp=drive_link",
-    "46": "https://drive.google.com/file/d/1SAMCChCPxWqejoXudY8XFID8jd5o_ngU/view?usp=drive_link",
-    "47": "https://drive.google.com/file/d/1oN_6xqyk7HS1sieoEKk8nttjy8-xS_yu/view?usp=drive_link",
-    "48": "https://drive.google.com/file/d/1lGEaNPhtHOnSJYJsB7nA1lkaeIPrNNFz/view?usp=drive_link",
-    "49": "https://drive.google.com/file/d/1jB4pIZStVa-vwuvOSDdiWnsCJEpvaa9t/view?usp=drive_link",
-    "50": "https://drive.google.com/file/d/1dfGxJv0utpr7E-vdjQQprAz_Ipx5ZJwZ/view?usp=drive_link",
-    "51": "https://drive.google.com/file/d/1URtL1odgNGjh2nI2dD3lnjzJiBbBjqh4/view?usp=drive_link",
-    "52": "https://drive.google.com/file/d/1dPCx22YRyEf1jx0N8Bn8OVedFrETA9VD/view?usp=drive_link",
-    "53": "https://drive.google.com/file/d/1CMRsOPSVKXOTOfDQj202IMJX6aGOfF3V/view?usp=drive_link",
-    "54": "https://drive.google.com/file/d/17zVEIEUQrefj9BCsHT200hC984qL6L36/view?usp=drive_link",
-    "55": "https://drive.google.com/file/d/1oQUwYO0TgW3ryY5pPG3ixcJ4TdpvT5hg/view?usp=drive_link",
-    "56": "https://drive.google.com/file/d/1WKXOCAX1SmBa9_N8a9zNxhIO1E93pMId/view?usp=drive_link",
-    "57": "https://drive.google.com/file/d/12RJ7NktS6SoqQ4MsJxsqKt2Zh3qy3iH1/view?usp=drive_link",
-    "58": "https://drive.google.com/file/d/1wKXvQNTcYmYt5sSEUKdvCsgFNp9m0Q5k/view?usp=drive_link",
-    "59": "https://drive.google.com/file/d/1DY6qMT1MD7EddZd5fj3SBCTJNWyjuqNX/view?usp=drive_link",
-    "60": "https://drive.google.com/file/d/1zyf9ouOfgoW5mns5N7unQrriQJ6xjdUi/view?usp=drive_link",
-    "61": "https://drive.google.com/file/d/15zON1tja5ou3y7L8d8nu-fdc4XYGlnqb/view?usp=drive_link",
-    "62": "https://drive.google.com/file/d/1VmzWAtjAFlM1DC-tKG0Dw1-otrVkdpti/view?usp=drive_link",
-    "63": "https://drive.google.com/file/d/1TH5wYLMeBeprot6-bPFZyh_dVhLGLR08/view?usp=drive_link",
-    "64": "https://drive.google.com/file/d/1ScM1ebCH51wTi0mmMTSIPahoZofm_xuL/view?usp=drive_link",
-    "65": "https://drive.google.com/file/d/1qbWAHdca8ZSx4G7OUnMXQlMsg9neBCW8/view?usp=drive_link",
-    "66": "https://drive.google.com/file/d/1ASSj1YdIvUe64BfAzWQ9IbDEumof615i/view?usp=drive_link",
-    "67": "https://drive.google.com/file/d/1GKCozATY0I8UVxhnjdpco3-VBPS27Zr7/view?usp=drive_link",
-    "68": "https://drive.google.com/file/d/1cy7nAHarikbvVXyXAco6EIDrsvZzlV8F/view?usp=drive_link",
-    "69": "https://drive.google.com/file/d/1eiJHdo0GjqECrqYeBeS5xzXCKOkNGJab/view?usp=drive_link",
-    "70": "https://drive.google.com/file/d/1pyA-Dh0P5AN3-ip9MfSu22ebInsr5R7h/view?usp=drive_link",
-    "71": "https://drive.google.com/file/d/1PA4ovneuLD2qHHwv6Qx6DQxbKIyuLYux/view?usp=drive_link",
-    "72": "https://drive.google.com/file/d/1aXnU47uzXtW1ZcD9SUg9nHJubVBaz3az/view?usp=drive_link",
-    "73": "https://drive.google.com/file/d/1p7HZEr4s_RgAe57hMDXj5-4dpXlsHMt9/view?usp=drive_link",
-    "74": "https://drive.google.com/file/d/1dfP9qK9eGnvo0hK--l0lnThxACfIZ9_f/view?usp=drive_link",
-    "75": "https://drive.google.com/file/d/1prPh84jY3BYkRMTBcFtAAPeREOP9EQwe/view?usp=drive_link",
-    "76": "https://drive.google.com/file/d/1VVcJajqLHrEr8XDAfVF3_QlvGuAqjuSd/view?usp=drive_link",
-    "77": "https://drive.google.com/file/d/1Pw-1y6ZFgFzEDzKDdI8VdOg4O-hJHajy/view?usp=drive_link",
-    "78": "https://drive.google.com/file/d/12F-MQZFQFjZPAcVKz4Y__T7fcNlyjTpO/view?usp=drive_link",
-    "79": "https://drive.google.com/file/d/1RYbBaPOp2CWYfj8ltEDI_y84FdxOxlEW/view?usp=drive_link",
-    "80": "https://drive.google.com/file/d/1BHy41a8XZhNitEqRm1sL3n7SontFMVka/view?usp=drive_link",
-    "81": "https://drive.google.com/file/d/1Yo9gPsjPwjvTPAz_nfCGNVF5ruxFcwVU/view?usp=drive_link",
-    "82": "https://drive.google.com/file/d/1mCGAXLnLPMmo7ZGxjwpPV-qES8S_0XKg/view?usp=drive_link",
-    "83": "https://drive.google.com/file/d/1eggbh76-bq54M1ve_MkxrS-SfH_Uwohk/view?usp=drive_link",
-    "84": "https://drive.google.com/file/d/1ZJy1KOwMiE2eL14Bgo7iU-G3Hc_BhC6x/view?usp=drive_link",
-    "85": "https://drive.google.com/file/d/1fxfK10uzPHO_Q77myUDsI91gr7_e19Ut/view?usp=drive_link",
-    "86": "https://drive.google.com/file/d/1OdqJ9IKe2oAN1VE3a94rt1JAwcn-16Ji/view?usp=drive_link",
-    "87": "https://drive.google.com/file/d/1SodUj07iUFiC7oddWNvB6GRzHMZ9eigS/view?usp=drive_link",
-    "88": "https://drive.google.com/file/d/1ZppypRlP-AbK5gQqRkh_LavTbblq4016/view?usp=drive_link",
-    "89": "https://drive.google.com/file/d/1oQkZUWR5LbffNMHShbiXxSEDR3CFcTNM/view?usp=drive_link",
-    "90": "https://drive.google.com/file/d/17dAYRSJciVVBIhmTtI_FMbmZBZcXQxBM/view?usp=drive_link",
-    "91": "https://drive.google.com/file/d/10ceUaLciuAGkRMJNo7VHVD7ajVdSOtfj/view?usp=drive_link",
-    "92": "https://drive.google.com/file/d/1szxz5749c2WcXkXTiV4ZYn_oeuIFi4ke/view?usp=drive_link",
-    "93": "https://drive.google.com/file/d/1dOlYZzidB3Yoo5mjmoDSUC65dpWogoox/view?usp=drive_link",
-    "94": "https://drive.google.com/file/d/17dfihWuDJsFnhwpE4y_ow493z1IXncCf/view?usp=drive_link",
-    "95": "https://drive.google.com/file/d/1R9m8HCQTOYqSuSlT2FiWSBzCQ2Ry9jE5/view?usp=drive_link",
-    "96": "https://drive.google.com/file/d/1yjd8bnRuSrsfGTpZY3DwEuiZJs5DXqfs/view?usp=drive_link",
-}
-
-SECRETS_KEYS = {
-    "subpref": "PB_SUBPREF_FILE_ID", "dist": "PB_DISTRITO_FILE_ID",
-    "iso": "PB_ISOCRONAS_FILE_ID", "censo": "PB_CENSO_FILE_ID",
-    "od": "PB_OD_FILE_ID", "quadra": "PB_QUADRAS_FILE_ID",
-}
-FALLBACK_URLS = {
-    "subpref": "", "dist": "", "iso": "", "censo": "", "od": "",
-    "quadra": "https://drive.google.com/file/d/1Ivy2PyGHqFgIxSMoK3N9oik2wr5v912U/view?usp=drive_link",
-}
-
-# =============================================================================
-# NORMALIZAÇÃO
-# =============================================================================
-def _mk_aliases(base: str) -> Set[str]:
-    b = base.strip()
-    return {b, b.upper(), b.title(), b.replace("_", ""), b.replace("_", "").upper(), f"{b} ", f" {b}"}
+@st.cache_data(show_spinner=False)
+def _file_index() -> dict:
+    idx = {}
+    for d in SEARCH_DIRS:
+        if d.is_dir():
+            for f in d.glob("*.parquet"):
+                idx.setdefault(f.name.lower(), str(f))
+    if LIMITES_DIR.is_dir():
+        for f in LIMITES_DIR.rglob("*.parquet"):
+            idx.setdefault(f.name.lower(), str(f))
+    return idx
 
 
-COL_ALIASES: Dict[str, Set[str]] = {
-    SUBPREF_ID: _mk_aliases(SUBPREF_ID),
-    DIST_ID: _mk_aliases(DIST_ID) | {"id_distrito", "dist_id", "codigo_distrito", "cd_distrito"},
-    ISO_ID: _mk_aliases(ISO_ID),
-    OD_ID: _mk_aliases(OD_ID) | {"OD_ID", "zona_od", "zonaod", "id_od", "od"},
-    QUADRA_ID: _mk_aliases(QUADRA_ID),
-    CENSO_ID: _mk_aliases(CENSO_ID) | {"cendo_id", "setor_id", "id_setor", "codigo_setor", "cd_setor", "cd_geocodi"},
-    LOTE_ID: _mk_aliases(LOTE_ID) | {"id_lote", "codigo_lote", "cd_lote", "lote"},
-}
+def _secret(name: str) -> str:
+    try:
+        return str(st.secrets.get(name, ""))
+    except Exception:
+        return ""
 
 
-def standardize_columns(gdf):
-    if gdf is None or gdf.empty:
-        return gdf
-    ren: Dict[str, str] = {}
+def _download_drive(key: str, fname: str):
+    fid = _secret(f"PB_{key.upper()}_FILE_ID")
+    if not fid:
+        return None
+    CACHE_DIR.mkdir(exist_ok=True)
+    out = CACHE_DIR / fname
+    if out.exists():
+        return out
+    url = f"https://drive.google.com/uc?export=download&id={fid}&confirm=t"
+    r = requests.get(url, timeout=300)
+    r.raise_for_status()
+    out.write_bytes(r.content)
+    return out
+
+
+def find_file(key: str, fname: str):
+    p = _file_index().get(fname.lower())
+    if p:
+        return Path(p)
+    try:
+        return _download_drive(key, fname)
+    except Exception:
+        return None
+
+
+def _fix_crs(gdf):
+    if gdf.crs is None:
+        minx = gdf.total_bounds[0]
+        gdf = gdf.set_crs(31983 if abs(minx) > 180 else 4326, allow_override=True)
+    if gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(4326)
+    return gdf
+
+
+@st.cache_resource(show_spinner="Carregando camada...")
+def read_layer(key: str, fname: str):
+    path = find_file(key, fname)
+    if path is None:
+        return None
+    try:
+        gdf = gpd.read_parquet(path)
+        gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty]
+        return _fix_crs(gdf)
+    except Exception:
+        return pd.read_parquet(path)  # tabela sem geometria
+
+
+def require(key: str):
+    gdf = read_layer(key, ADMIN_FILES[key])
+    if gdf is None:
+        dirs = "\n".join(f"- `{d}`" for d in SEARCH_DIRS)
+        st.error(
+            f"Camada **{key}** (`{ADMIN_FILES[key]}`) não encontrada.\n\n"
+            f"Raiz do repositório detectada: `{REPO_ROOT}`\n\nPastas verificadas:\n{dirs}"
+        )
+    return gdf
+
+
+def name_col(gdf, prefs=()):
+    for c in prefs:
+        if c in gdf.columns:
+            return c
     for c in gdf.columns:
-        raw = str(c)
-        cl = re.sub(r"\s+", " ", raw.strip())
-        low = cl.lower()
-        if raw != cl:
-            ren[raw] = cl
-        for canon, aliases in COL_ALIASES.items():
-            if cl in {a.strip() for a in aliases} or low in {a.strip().lower() for a in aliases}:
-                ren[cl] = canon
-    return gdf.rename(columns=ren)
+        if c != "geometry" and re.search(r"(nome|nm_|name|sigla)", c, re.I):
+            return c
+    for c in gdf.columns:
+        if c != "geometry" and gdf[c].dtype == object:
+            return c
+    return gdf.columns[0]
 
-
-def _id_to_str(v: Any) -> Optional[str]:
-    if v is None:
-        return None
-    if isinstance(v, str):
-        s = v.strip()
-        return s if s != "" else None
-    try:
-        if pd.isna(v):
-            return None
-    except Exception:
-        pass
-    if isinstance(v, bool):
-        return str(v)
-    if isinstance(v, int):
-        return str(v)
-    if isinstance(v, float):
-        return str(int(v)) if v.is_integer() else str(v).strip()
-    s = str(v).strip()
-    if s == "":
-        return None
-    if s.endswith(".0") and s[:-2].replace("-", "").isdigit():
-        return s[:-2]
-    return s
-
-
-def normalize_quadra_id(v, width=6):
-    s = _id_to_str(v)
-    if s is None:
-        return None
-    return s.zfill(width) if s.isdigit() else s
-
-
-def make_quadra_uid(iso_id, quadra_id):
-    iso, qid = _id_to_str(iso_id), _id_to_str(quadra_id)
-    return f"{iso}__{qid}" if iso and qid else None
-
-
-def normalize_id_cols(gdf, cols):
-    if gdf is None or gdf.empty:
-        return gdf
-    g = gdf.copy()
-    for c in cols:
-        if c in g.columns:
-            g[c] = g[c].map(_id_to_str)
-    return g
-
-
-def ensure_set_of_str(value, *, drop_empty=True) -> Set[str]:
-    if value is None:
-        return set()
-    items = value if isinstance(value, (set, list, tuple)) else (value,)
-    out: Set[str] = set()
-    for x in items:
-        s = _id_to_str(x)
-        if s is None or (drop_empty and s == ""):
-            continue
-        out.add(s)
-    return out
-
-
-def first_non_null_value(gdf, col):
-    if gdf is None or gdf.empty or col not in gdf.columns:
-        return None
-    try:
-        vals = gdf[col].dropna()
-        if len(vals) == 0:
-            return None
-        s = str(vals.iloc[0]).strip()
-        return s or None
-    except Exception:
-        return None
-
-
-def label_or_id(gdf, *, label_col, fallback_col, fallback_prefix=""):
-    lbl = first_non_null_value(gdf, label_col)
-    if lbl:
-        return lbl
-    fb = first_non_null_value(gdf, fallback_col)
-    return f"{fallback_prefix}{fb}" if fb else (fallback_prefix.strip() or "")
-
-
-def subset_by_parent(child, parent_col, parent_val):
-    if child is None or child.empty or parent_col not in child.columns or parent_val is None:
-        return child.iloc[0:0].copy() if child is not None else child
-    pv = _id_to_str(parent_val)
-    return child.iloc[0:0].copy() if pv is None else child[child[parent_col] == pv]
-
-
-def subset_by_parent_multi(child, parent_col, parent_vals):
-    if child is None or child.empty or parent_col not in child.columns or not parent_vals:
-        return child.iloc[0:0].copy() if child is not None else child
-    pset = {v for v in (_id_to_str(x) for x in parent_vals) if v is not None}
-    return child.iloc[0:0].copy() if not pset else child[child[parent_col].isin(list(pset))]
-
-
-def subset_by_id(gdf, id_col, id_val):
-    if gdf is None or gdf.empty or id_col not in gdf.columns or id_val is None:
-        return gdf.iloc[0:0].copy() if gdf is not None else gdf
-    iv = _id_to_str(id_val)
-    return gdf.iloc[0:0].copy() if iv is None else gdf[gdf[id_col] == iv]
-
-
-def subset_by_id_multi(gdf, id_col, ids):
-    if gdf is None or gdf.empty or id_col not in gdf.columns or not ids:
-        return gdf.iloc[0:0].copy() if gdf is not None else gdf
-    iset = {v for v in (_id_to_str(x) for x in ids) if v is not None}
-    return gdf.iloc[0:0].copy() if not iset else gdf[gdf[id_col].isin(list(iset))]
-
-
-def choose_quadra_parent_col(g_quad, *, preferred=CENSO_ID, fallback=ISO_ID):
-    if g_quad is None or getattr(g_quad, "empty", True):
-        return None
-    if preferred in g_quad.columns and g_quad[preferred].notna().any():
-        return preferred
-    return fallback if fallback in g_quad.columns else None
-
-
-def get_quadras_subset_for_mode(g_quad, *, iso_ids, filter_censo_ids):
-    if g_quad is None or g_quad.empty:
-        return g_quad.iloc[0:0].copy() if g_quad is not None else g_quad
-    iso_ids = ensure_set_of_str(iso_ids)
-    filter_censo_ids = ensure_set_of_str(filter_censo_ids)
-    if choose_quadra_parent_col(g_quad) == CENSO_ID and filter_censo_ids:
-        return subset_by_id_multi(g_quad, CENSO_ID, filter_censo_ids)
-    if ISO_ID in g_quad.columns and iso_ids:
-        return subset_by_parent_multi(g_quad, ISO_ID, iso_ids)
-    return g_quad.iloc[0:0].copy()
-
-
-def get_censo_subset_for_isos(g_censo, iso_ids):
-    if g_censo is None or g_censo.empty:
-        return g_censo.iloc[0:0].copy() if g_censo is not None else g_censo
-    col = CENSO_PARENT if CENSO_PARENT in g_censo.columns else (ISO_ID if ISO_ID in g_censo.columns else None)
-    return subset_by_parent_multi(g_censo, col, iso_ids) if col else g_censo.iloc[0:0].copy()
-
-
-def get_lotes_subset_for_isos(g_lote, iso_ids):
-    if g_lote is None or g_lote.empty or ISO_ID not in g_lote.columns:
-        return g_lote.iloc[0:0].copy() if g_lote is not None else g_lote
-    return subset_by_parent_multi(g_lote, ISO_ID, iso_ids)
 
 # =============================================================================
-# DRIVE / IO
+# CAMADAS TEMÁTICAS
 # =============================================================================
-def _get_secret(key):
+def _num(v):
     try:
-        return str(st.secrets.get(key, "")).strip()
-    except Exception:
-        return ""
-
-
-def extract_drive_id(raw):
-    raw = (raw or "").strip()
-    if not raw:
-        return ""
-    if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", raw) and "http" not in raw.lower():
-        return raw
-    for pat in (r"/file/d/([a-zA-Z0-9_-]+)", r"[?&]id=([a-zA-Z0-9_-]+)", r"([a-zA-Z0-9_-]{20,})"):
-        m = re.search(pat, raw)
-        if m:
-            return m.group(1)
-    return ""
-
-
-def _drive_candidates(file_id_or_url):
-    raw = (file_id_or_url or "").strip()
-    fid = extract_drive_id(raw)
-    urls = []
-    if fid:
-        urls.append(f"https://drive.google.com/uc?export=download&id={fid}")
-        urls.append(f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t")
-    if raw.lower().startswith("http"):
-        urls.append(raw)
-    seen, out = set(), []
-    for u in urls:
-        if u not in seen:
-            out.append(u); seen.add(u)
-    return out
-
-
-def _looks_like_html(path: Path):
-    try:
-        head = path.read_bytes()[:2048].lower()
-        return b"<!doctype html" in head or b"<html" in head or b"<head" in head
-    except Exception:
-        return False
-
-
-def download_drive_file(file_id_or_url, dst: Path, label=""):
-    import requests
-    raw = (file_id_or_url or "").strip()
-    fid = extract_drive_id(raw)
-    if not raw and not fid:
-        raise RuntimeError(f"FILE_ID inválido: {file_id_or_url!r}")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists() and dst.stat().st_size > 0 and not _looks_like_html(dst):
-        return dst
-    session = requests.Session()
-    ui = label or dst.name
-    last_error = None
-    for base_url in _drive_candidates(file_id_or_url):
-        try:
-            resp = session.get(base_url, stream=True, allow_redirects=True, timeout=120)
-            if "drive.google.com/uc" in base_url and fid:
-                token = next((v for k, v in resp.cookies.items() if k.startswith("download_warning")), None)
-                if token:
-                    resp = session.get(f"https://drive.google.com/uc?export=download&id={fid}&confirm={token}",
-                                       stream=True, allow_redirects=True, timeout=120)
-            if resp.status_code != 200:
-                last_error = RuntimeError(f"HTTP {resp.status_code} em '{ui}'"); continue
-            total = int(resp.headers.get("Content-Length", 0) or 0)
-            downloaded = 0
-            prog = st.progress(0, text=f"Baixando {ui}…")
-            with open(dst, "wb") as f:
-                for part in resp.iter_content(chunk_size=1024 * 1024):
-                    if not part:
-                        continue
-                    f.write(part); downloaded += len(part)
-                    if total > 0:
-                        pct = min(int(downloaded * 100 / total), 100)
-                        prog.progress(pct, text=f"Baixando {ui}… {pct}%")
-            prog.empty()
-            if dst.stat().st_size <= 0:
-                dst.unlink(missing_ok=True); last_error = RuntimeError("vazio"); continue
-            if _looks_like_html(dst):
-                dst.unlink(missing_ok=True); last_error = RuntimeError("HTML"); continue
-            return dst
-        except Exception as e:
-            try:
-                if dst.exists() and _looks_like_html(dst):
-                    dst.unlink(missing_ok=True)
-            except Exception:
-                pass
-            last_error = e
-    raise RuntimeError(str(last_error) if last_error else f"Falha ao baixar '{ui}'.")
-
-
-def get_drive_raw(layer_key):
-    raw_ui = str(st.session_state.get(f"drive_{layer_key}_raw", "")).strip()
-    if raw_ui:
-        return raw_ui
-    sk = SECRETS_KEYS.get(layer_key, "")
-    raw_secret = _get_secret(sk) if sk else ""
-    return raw_secret if raw_secret else str(FALLBACK_URLS.get(layer_key, "")).strip()
-
-
-def _find_local_file(filename) -> Optional[Path]:
-    for d in DATA_SEARCH_DIRS:
-        p = d / filename
-        if p.exists() and p.stat().st_size > 0 and not _looks_like_html(p):
-            return p
-    return None
-
-
-def local_layer_path(layer_key):
-    return DATA_CACHE_DIR / LOCAL_FILENAMES[layer_key]
-
-
-def ensure_local_layer(layer_key, *, force_redownload=False):
-    filename = LOCAL_FILENAMES[layer_key]
-    found = _find_local_file(filename)
-    if found is not None and not force_redownload:
-        return found
-    dst = local_layer_path(layer_key)
-    if force_redownload:
-        try: dst.unlink(missing_ok=True)
-        except Exception: pass
-    raw = get_drive_raw(layer_key)
-    if not raw:
-        raise RuntimeError(f"Layer '{layer_key}' ({filename}) não encontrada e sem link.")
-    return download_drive_file(raw, dst, label=filename)
-
-# --- TEMÁTICOS: conexão pasta local / nuvem ---
-def thematic_dirs() -> List[Path]:
-    dirs: List[Path] = []
-    custom = _get_secret(THEMATIC_DIR_SECRET_KEY) or os.environ.get(THEMATIC_DIR_SECRET_KEY, "")
-    if custom:
-        dirs.append(Path(custom))
-    dirs += [Path(THEMATIC_LOCAL_DIR), REPO_ROOT / "dash", REPO_ROOT / "tematicos",
-             THEMATIC_CACHE_DIR] + DATA_SEARCH_DIRS
-    return dirs
-
-
-def ensure_thematic_file(key) -> Optional[Path]:
-    fn = THEMATIC_LAYERS[key]["file"]
-    for d in thematic_dirs():
-        try:
-            for p in (d / fn, d / fn.lower()):
-                if p.exists() and p.stat().st_size > 0 and not _looks_like_html(p):
-                    return p
-        except Exception:
-            continue
-    raw = _get_secret(f"PB_TEM_{key.upper()}") or THEMATIC_DRIVE_LINKS.get(key, "")
-    if raw:
-        try:
-            return download_drive_file(raw, THEMATIC_CACHE_DIR / fn, label=fn)
-        except Exception as e:
-            st.warning(f"Falha ao baixar {fn}: {e}")
-    return None
-
-# --- LOTES ---
-def get_lotes_folder_raw():
-    raw_ui = str(st.session_state.get("drive_lotes_folder_raw", "")).strip()
-    if raw_ui:
-        return raw_ui
-    raw_secret = _get_secret(LOTES_SECRET_KEY)
-    return raw_secret if raw_secret else LOTES_DRIVE_FOLDER_URL
-
-
-def extract_drive_folder_id(raw):
-    raw = (raw or "").strip()
-    if not raw:
-        return ""
-    for pat in (r"/folders/([a-zA-Z0-9_-]+)", r"[?&]id=([a-zA-Z0-9_-]+)"):
-        m = re.search(pat, raw)
-        if m:
-            return m.group(1)
-    return raw if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", raw) and "http" not in raw.lower() else ""
-
-
-def lotes_local_dir() -> Path:
-    p = DATA_CACHE_DIR / "lotes"; p.mkdir(parents=True, exist_ok=True); return p
-
-
-def lote_filename_for_distrito(distrito_id):
-    return f"Distrito_{_id_to_str(distrito_id) or ''}.parquet"
-
-
-def lote_local_path_for_distrito(distrito_id):
-    return lotes_local_dir() / lote_filename_for_distrito(distrito_id)
-
-
-def local_lote_candidates(distrito_id):
-    fn = lote_filename_for_distrito(distrito_id)
-    return [REPO_ROOT / fn, REPO_ROOT / "data" / fn, REPO_ROOT / "lotes" / fn,
-            DATA_CACHE_DIR / fn, lotes_local_dir() / fn]
-
-
-def try_copy_lote_from_local_sources(distrito_id, dst: Path):
-    for p in local_lote_candidates(distrito_id):
-        if p.exists() and p.stat().st_size > 0 and not _looks_like_html(p):
-            if p.resolve() != dst.resolve():
-                shutil.copy2(p, dst)
-            return dst if dst.exists() else p
-    return None
-
-
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
-def list_drive_folder_files(folder_id):
-    import requests
-    folder_id = (folder_id or "").strip()
-    if not folder_id:
-        return {}
-    headers = {"User-Agent": "Mozilla/5.0"}
-    found = {}
-    for url in (f"https://drive.google.com/drive/folders/{folder_id}?usp=sharing",
-                f"https://drive.google.com/drive/u/0/folders/{folder_id}"):
-        try:
-            resp = requests.get(url, headers=headers, timeout=60)
-            if resp.status_code != 200:
-                continue
-            for fid, name in re.findall(r'\["([a-zA-Z0-9_-]{20,})","([^"]+\.parquet)"', resp.text):
-                found[name] = fid
-            for name, fid in re.findall(r'\["([^"]+\.parquet)","([a-zA-Z0-9_-]{20,})"', resp.text):
-                found[name] = fid
-            if found:
-                return found
-        except Exception:
-            continue
-    return found
-
-
-def find_lote_file_id_in_folder(distrito_id):
-    did = _id_to_str(distrito_id)
-    if not did:
-        return ""
-    fid = extract_drive_folder_id(get_lotes_folder_raw())
-    return list_drive_folder_files(fid).get(lote_filename_for_distrito(did), "") if fid else ""
-
-
-def ensure_local_lote_file(distrito_id, *, force_redownload=False):
-    did = _id_to_str(distrito_id)
-    if not did:
-        raise RuntimeError("distrito_id inválido para lotes.")
-    dst = lote_local_path_for_distrito(did)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if force_redownload:
-        try: dst.unlink(missing_ok=True)
-        except Exception: pass
-    if dst.exists() and dst.stat().st_size > 0 and not _looks_like_html(dst):
-        return dst
-    copied = try_copy_lote_from_local_sources(did, dst)
-    if copied is not None and copied.exists():
-        return copied
-    direct = str(LOTES_LINKS_BY_DISTRITO.get(did, "")).strip()
-    if direct:
-        return download_drive_file(direct, dst, label=lote_filename_for_distrito(did))
-    fid = find_lote_file_id_in_folder(did)
-    if fid:
-        return download_drive_file(f"https://drive.google.com/uc?export=download&id={fid}",
-                                   dst, label=lote_filename_for_distrito(did))
-    raise RuntimeError(f"Lotes '{lote_filename_for_distrito(did)}' não localizado (distrito {did}).")
-
-# =============================================================================
-# READ
-# =============================================================================
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
-def read_gdf_parquet(path):
-    if gpd is None:
-        return None
-    p = Path(path)
-    if not p.exists():
-        return None
-    gdf = gpd.read_parquet(p)
-    try:
-        gdf = gdf.set_crs(4326, allow_override=True) if gdf.crs is None else gdf.to_crs(4326)
-    except Exception:
-        pass
-    return gdf
-
-
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
-def read_gdf_geojson(path):
-    if gpd is None:
-        return None
-    p = Path(path)
-    if not p.exists():
-        return None
-    try:
-        gdf = gpd.read_file(p)
-        gdf = gdf.set_crs(4326, allow_override=True) if gdf.crs is None else gdf.to_crs(4326)
-        return gdf
+        return float(str(v).replace(",", "."))
     except Exception:
         return None
 
 
-def _drop_bad_geoms(gdf):
-    if gdf is None or gdf.empty:
-        return gdf
-    gdf = gdf.copy()
-    gdf = gdf[gdf.geometry.notna()]
-    try:
-        gdf = gdf[~gdf.geometry.is_empty]
-    except Exception:
-        pass
-    return gdf
+def cls_corredor(v):
+    s = str(v).lower()
+    if "poliniz" in s:
+        return "Corredor polinizador", "#f9a825"
+    return "Corredor verde", "#2e7d32"
 
 
-def read_layer(layer_key):
-    try:
-        p = ensure_local_layer(layer_key)
-    except Exception as e:
-        if layer_key == "quadra":
-            st.info("Camada de quadras indisponível — visualização de quadra/cluster desativada.")
-            return None
-        st.error(str(e)); return None
-    try:
-        meta = (str(p), float(p.stat().st_mtime), int(p.stat().st_size))
-    except Exception:
-        meta = (str(p), 0.0, 0)
-    cache = st.session_state.get("_layer_cache", {})
-    cache_meta = st.session_state.get("_layer_cache_meta", {})
-    if layer_key in cache and cache_meta.get(layer_key) == meta and cache.get(layer_key) is not None:
-        return cache[layer_key]
-    g = read_gdf_parquet(str(p))
-    if g is None or g.empty:
-        st.error(f"Layer '{layer_key}' vazia/erro ({p.name})."); return None
-    g = standardize_columns(g)
-    g = _drop_bad_geoms(g)
-    g = normalize_id_cols(g, LAYER_ID_COLS.get(layer_key, []))
-    if layer_key == "quadra":
-        if QUADRA_ID in g.columns:
-            g[QUADRA_ID] = g[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
-        if ISO_ID in g.columns:
-            g[ISO_ID] = g[ISO_ID].map(_id_to_str)
-        if ISO_ID in g.columns and QUADRA_ID in g.columns:
-            g[QUADRA_UID] = [make_quadra_uid(i, q) for i, q in zip(g[ISO_ID], g[QUADRA_ID])]
-    cache[layer_key] = g; cache_meta[layer_key] = meta
-    st.session_state["_layer_cache"] = cache
-    st.session_state["_layer_cache_meta"] = cache_meta
-    return g
+FAVELA = {
+    "sem informação": "#9e9e9e", "pública": "#1e88e5",
+    "particular": "#e53935", "pública/particular": "#8e24aa",
+}
 
 
-def read_lotes_by_distrito(distrito_id):
-    did = _id_to_str(distrito_id)
-    if not did:
-        return None
-    cache_key = f"lote__{did}"
-    try:
-        p = ensure_local_lote_file(did)
-    except Exception as e:
-        st.warning(str(e)); return None
-    try:
-        meta = (str(p), float(p.stat().st_mtime), int(p.stat().st_size))
-    except Exception:
-        meta = (str(p), 0.0, 0)
-    cache = st.session_state.get("_layer_cache", {})
-    cache_meta = st.session_state.get("_layer_cache_meta", {})
-    if cache_key in cache and cache_meta.get(cache_key) == meta and cache.get(cache_key) is not None:
-        return cache[cache_key]
-    g = read_gdf_parquet(str(p))
-    if g is None or g.empty:
-        st.warning(f"Lotes do distrito '{did}' vazio/inválido."); return None
-    g = standardize_columns(g)
-    g = _drop_bad_geoms(g)
-    g = normalize_id_cols(g, LAYER_ID_COLS.get("lote", []))
-    cache[cache_key] = g; cache_meta[cache_key] = meta
-    st.session_state["_layer_cache"] = cache
-    st.session_state["_layer_cache_meta"] = cache_meta
-    return g
-
-# =============================================================================
-# TEMÁTICOS — leitura / filtro / classificação
-# =============================================================================
-def _col(g, name) -> Optional[str]:
-    if g is None or not name:
-        return None
-    low = {str(c).strip().lower(): c for c in g.columns}
-    return low.get(str(name).strip().lower())
+def cls_favela(v):
+    s = str(v).strip().lower().replace(" / ", "/")
+    s = s.replace("publica", "pública")
+    if s in FAVELA:
+        return s, FAVELA[s]
+    return "sem informação", FAVELA["sem informação"]
 
 
-def _norm_txt(v) -> str:
-    if v is None:
-        return ""
-    try:
-        if pd.isna(v):
-            return ""
-    except Exception:
-        pass
-    s = unicodedata.normalize("NFKD", str(v)).encode("ascii", "ignore").decode("ascii")
-    return re.sub(r"\s+", " ", s).strip().lower()
+DECLIV = {
+    "1": ("1 - 0 a 5%", "#c8e6c9"), "2": ("2 - 5 a 25%", "#fff59d"),
+    "3": ("3 - 25 a 60%", "#ffb74d"), "4": ("4 - acima de 60%", "#d84315"),
+}
 
 
-def read_thematic(key):
-    p = ensure_thematic_file(key)
-    if p is None:
-        st.warning(f"Arquivo '{THEMATIC_LAYERS[key]['file']}' não encontrado na pasta de mapas.")
-        return None
-    meta = (str(p), float(p.stat().st_mtime), int(p.stat().st_size))
-    ck = f"tem__{key}"
-    cache = st.session_state.get("_layer_cache", {})
-    cache_meta = st.session_state.get("_layer_cache_meta", {})
-    if ck in cache and cache_meta.get(ck) == meta:
-        return cache[ck]
-    g = None
-    try:
-        g = read_gdf_parquet(str(p))
-    except Exception:
-        g = None
-    if g is None and key == "densidade":
-        try:
-            df = pd.read_parquet(p)
-            dd = _col(df, "dd_setor")
-            censo = read_layer("censo")
-            if dd and censo is not None:
-                df["__k"] = df[dd].map(_id_to_str)
-                g = censo[[CENSO_ID, "geometry"]].merge(df, left_on=CENSO_ID, right_on="__k", how="inner")
-                g = gpd.GeoDataFrame(g, geometry="geometry", crs=4326)
-        except Exception as e:
-            st.warning(f"Densidade: falha ao associar dd_setor = censo_id ({e}).")
-    if g is None or g.empty:
-        st.warning(f"Camada temática '{key}' vazia ou inválida."); return None
-    g = standardize_columns(g)
-    g = _drop_bad_geoms(g)
-    g = normalize_id_cols(g, [ISO_ID, CENSO_ID])
-    cache[ck] = g; cache_meta[ck] = meta
-    st.session_state["_layer_cache"] = cache
-    st.session_state["_layer_cache_meta"] = cache_meta
-    return g
+def cls_decliv(v):
+    m = re.match(r"\s*([1-4])", str(v))
+    return DECLIV[m.group(1)] if m else ("Sem classe", "#bdbdbd")
 
 
-def filter_thematic(key, g, iso_ids, g_iso_sel):
-    if g is None or g.empty:
-        return g
-    if key == "densidade":
-        censo = read_layer("censo")
-        ids = set(get_censo_subset_for_isos(censo, iso_ids)[CENSO_ID].dropna()) if censo is not None else set()
-        col = _col(g, "dd_setor") or (CENSO_ID if CENSO_ID in g.columns else None)
-        if col and ids:
-            return g[g[col].map(_id_to_str).isin(ids)]
-    if ISO_ID in g.columns:
-        return subset_by_parent_multi(g, ISO_ID, iso_ids)
-    if g_iso_sel is None or g_iso_sel.empty:
-        return g.iloc[0:0]
-    try:
-        union = g_iso_sel.geometry.union_all()
-    except Exception:
-        union = g_iso_sel.geometry.unary_union
-    minx, miny, maxx, maxy = g_iso_sel.total_bounds
-    c = g.cx[minx:maxx, miny:maxy]
-    return c[c.intersects(union)]
+RISCO = {
+    "R1": "#fff176", "R2": "#ffb74d", "R3": "#ff7043", "R4": "#c62828",
+    "Área em monitoramento": "#90a4ae", "Área encerrada": "#cfd8dc",
+}
 
 
-def _cls_corredor(v):
-    return "Corredor polinizador" if "poliniz" in _norm_txt(v) else "Corredor verde"
-
-
-def _cls_favela(v):
-    s = _norm_txt(v)
-    if "public" in s and "particular" in s:
-        return "Pública/particular"
-    if "public" in s:
-        return "Pública"
-    if "particular" in s:
-        return "Particular"
-    return "Sem informação"
-
-
-def _cls_decliv(v):
-    return {1: "1 - 0 a 5%", 2: "2 - 5 a 25%", 3: "3 - 25 a 60%", 4: "4 - acima de 60%"}.get(_coerce_int(v), "Sem classe")
-
-
-def _cls_risco(v):
-    s = _norm_txt(v)
-    s2 = s.replace(" ", "")
-    if s2 in ("r1", "r2", "r3", "r4"):
-        return s2.upper()
-    if "monitor" in s:
-        return "Área em monitoramento"
-    if "encerr" in s:
-        return "Área encerrada"
-    return "Outros"
-
-
-def _cls_vias(v):
-    s = _norm_txt(v)
-    if s == "vtr" or "transito rapido" in s:
-        return "Via de trânsito rápido"
-    if "pedest" in s:
-        return "Via de pedestres"
-    return {"local": "Local", "coletora": "Coletora", "arterial": "Arterial"}.get(s, "Outros")
-
-
-def _cls_dens(v):
-    try:
-        x = float(str(v).replace(",", "."))
-    except Exception:
-        return "Sem informação"
-    if pd.isna(x):
-        return "Sem informação"
-    for lim, lab in DENS_BINS:
-        if x <= lim:
-            return lab
-    return DENS_BINS[-1][1]
-
-
-def _cls_lcz(v):
-    return LCZ_LABELS.get(_coerce_int(v), "Sem classe")
-
-
-CLASSIFIERS = {"corredor": _cls_corredor, "favela": _cls_favela, "decliv": _cls_decliv,
-               "risco": _cls_risco, "vias": _cls_vias, "dens": _cls_dens, "lcz": _cls_lcz}
-
-
-def classify_thematic(key, g):
-    cfg = THEMATIC_LAYERS[key]
-    g = g.copy()
-    lab_col = _col(g, cfg.get("label"))
-    g["__tt"] = g[lab_col].astype(str) if lab_col else cfg["title"]
-    kind = cfg["kind"]
-    if kind == "auto":
-        vals = sorted(g[lab_col].dropna().astype(str).unique()) if lab_col else []
-        cmap = {v: PALETTE_AUTO[i % len(PALETTE_AUTO)] for i, v in enumerate(vals)}
-        g["__leg"] = g[lab_col].astype(str) if lab_col else cfg["title"]
-        g["__color"] = g["__leg"].map(cmap).fillna("#888888")
-        legend = list(cmap.items())
-    elif kind in ("single", "points"):
-        g["__leg"] = cfg["title"]; g["__color"] = cfg["color"]
-        legend = [(cfg["title"], cfg["color"])]
+def cls_risco(v):
+    s = str(v).upper()
+    if "MONITORAMENTO" in s:
+        k = "Área em monitoramento"
+    elif "ENCERRAD" in s:
+        k = "Área encerrada"
     else:
-        src = _col(g, cfg["class_col"])
-        fn = CLASSIFIERS[cfg["fn"]]
-        g["__leg"] = g[src].map(fn) if src else "Sem informação"
-        colors = cfg["colors"]
-        g["__color"] = g["__leg"].map(colors).fillna("#bdbdbd")
-        present = set(g["__leg"].unique())
-        legend = [(k, v) for k, v in colors.items() if k in present]
-        if cfg.get("tt_leg"):
-            g["__tt"] = g["__leg"]
-    return g, legend
-
-# =============================================================================
-# CSV CLUSTER
-# =============================================================================
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
-def read_df_csv(path):
-    p = Path(path)
-    if not p.exists() or p.stat().st_size <= 0:
-        return None
-    try:
-        return pd.read_csv(p, dtype={QUADRA_ID: "string", ISO_ID: "string", CLUSTER_COL: "string"})
-    except Exception:
-        return None
+        m = re.search(r"R\s*([1-4])", s)
+        k = f"R{m.group(1)}" if m else None
+    return (k, RISCO[k]) if k else ("Sem classe", "#bdbdbd")
 
 
-def get_quadras_csv_raw():
-    raw_ui = str(st.session_state.get("drive_quadras_csv_raw", "")).strip()
-    if raw_ui:
-        return raw_ui
-    raw_secret = _get_secret(QUADRAS_CSV_SECRET_KEY) if QUADRAS_CSV_SECRET_KEY else ""
-    return raw_secret if raw_secret else str(QUADRAS_CSV_FALLBACK_URL or "").strip()
+VIAS = {
+    "Local": "#1e88e5", "Coletora": "#fdd835", "Arterial": "#e53935",
+    "Via de trânsito rápido": "#757575", "Via de pedestres": "#fb8c00",
+}
 
 
-def ensure_local_quadras_csv():
-    found = _find_local_file(QUADRAS_CSV_FILENAME)
-    if found is not None:
-        return found
-    raw = get_quadras_csv_raw()
-    dst = DATA_CACHE_DIR / QUADRAS_CSV_FILENAME
-    if not raw:
-        return dst
-    try:
-        return download_drive_file(raw, dst, label=dst.name)
-    except Exception:
-        st.warning(f"Não foi possível baixar {QUADRAS_CSV_FILENAME}."); return dst
+def cls_vias(v):
+    s = str(v).upper()
+    if "PEDESTRE" in s:
+        k = "Via de pedestres"
+    elif "VTR" in s or "RÁPIDO" in s or "RAPIDO" in s:
+        k = "Via de trânsito rápido"
+    elif "ARTERIAL" in s:
+        k = "Arterial"
+    elif "COLETORA" in s:
+        k = "Coletora"
+    elif "LOCAL" in s:
+        k = "Local"
+    else:
+        return "Outra", "#bdbdbd"
+    return k, VIAS[k]
 
 
-def get_quadras_csv_df():
-    p = ensure_local_quadras_csv()
-    df = read_df_csv(str(p))
-    if df is None or df.empty:
-        return None
-    df = df.copy()
-    cl = {str(c).strip().lower(): c for c in df.columns}
-    if QUADRA_ID not in df.columns and "quadra_id" in cl:
-        df = df.rename(columns={cl["quadra_id"]: QUADRA_ID})
-    if ISO_ID not in df.columns and "iso_id" in cl:
-        df = df.rename(columns={cl["iso_id"]: ISO_ID})
-    if CLUSTER_COL not in df.columns and "cluster" in cl:
-        df = df.rename(columns={cl["cluster"]: CLUSTER_COL})
-    if QUADRA_ID in df.columns:
-        df[QUADRA_ID] = df[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
-    if ISO_ID in df.columns:
-        df[ISO_ID] = df[ISO_ID].map(_id_to_str)
-        df[QUADRA_UID] = [make_quadra_uid(i, q) for i, q in zip(df.get(ISO_ID, []), df.get(QUADRA_ID, []))]
-    return df
+DENS = [
+    (2000, "0 – 2.000 hab/hec", "#fff5eb"), (4000, "2.001 – 4.000 hab/hec", "#fdd0a2"),
+    (6000, "4.001 – 6.000 hab/hec", "#fdae6b"), (8000, "6.001 – 8.000 hab/hec", "#f16913"),
+    (10000, "8.001 – 10.000 hab/hec", "#d94801"), (float("inf"), "> 10.000 hab/hec", "#7f2704"),
+]
 
 
-def attach_quadras_csv(g_quad):
-    if g_quad is None or g_quad.empty:
-        return g_quad
-    df = get_quadras_csv_df()
-    if df is None:
-        return g_quad
-    if QUADRA_UID in g_quad.columns and QUADRA_UID in df.columns:
-        return g_quad.merge(df, on=QUADRA_UID, how="left", suffixes=("", "_csv"))
-    if QUADRA_ID in g_quad.columns and QUADRA_ID in df.columns:
-        return g_quad.merge(df, on=QUADRA_ID, how="left", suffixes=("", "_csv"))
-    return g_quad
+def cls_dens(v):
+    n = _num(v)
+    if n is None:
+        return "Sem dado", "#bdbdbd"
+    for lim, lab, col in DENS:
+        if n <= lim:
+            return lab, col
 
 
-def _coerce_int(v):
-    if v is None:
-        return None
-    try:
-        if pd.isna(v):
-            return None
-    except Exception:
-        pass
-    try:
-        if isinstance(v, str):
-            v = v.strip()
-            if v == "":
-                return None
-        return int(float(v))
-    except Exception:
-        return None
+LCZ = {
+    1: ("1 - Alto-compacto", "#8c0000"), 2: ("2 - Médio-compacto", "#d10000"),
+    3: ("3 - Baixo-compacto", "#ff0000"), 4: ("4 - Alto-aberto", "#bf4d00"),
+    5: ("5 - Médio-aberto", "#ff6600"), 6: ("6 - Baixo-aberto", "#ff9955"),
+    7: ("7 - Baixo-precário", "#faee05"), 8: ("8 - Baixo-grande", "#bcbcbc"),
+    9: ("9 - Ocupação esparsa", "#ffccaa"), 10: ("10 - Indústria pesada", "#555555"),
+    101: ("101 - Arborização densa", "#006a00"), 102: ("102 - Arborização esparsa", "#00aa00"),
+    103: ("103 - Vegetação arbustiva", "#648525"), 104: ("104 - Vegetação herbácea", "#b9db79"),
+    105: ("105 - Rocha ou pavimento", "#000000"), 106: ("106 - Solo exposto", "#fbf7ae"),
+    107: ("107 - Água", "#6a6aff"),
+}
 
 
-def cluster_color(code):
-    return CLUSTER_NULL_COLOR if code is None else CLUSTER_COLOR_MAP.get(code, CLUSTER_NULL_COLOR)
+def cls_lcz(v):
+    n = _num(v)
+    return LCZ.get(int(n), ("Sem classe", "#bdbdbd")) if n is not None else ("Sem classe", "#bdbdbd")
 
 
-def iso_label_color(nova_class):
-    nc = _coerce_int(nova_class)
-    if nc is None:
-        return ("Sem classe", ISO_DEFAULT_COLOR)
-    if nc in ISO_TRANSITION_SET:
-        return (ISO_TRANSITION_LABEL, ISO_TRANSITION_COLOR)
-    if nc in ISO_VALUE_TO_CLASSNUM:
-        k = ISO_VALUE_TO_CLASSNUM[nc]
-        return (f"Classe {k}", ISO_CLASSNUM_TO_COLOR.get(k, ISO_DEFAULT_COLOR))
-    return ("Outros", ISO_DEFAULT_COLOR)
+THEMATIC = {
+    "apa": dict(file="apa.parquet", title="APA", geom="poly", label="NOME_CAPS",
+                cls=None, color="#a5d6a7"),
+    "bacia": dict(file="bacia.parquet", title="Bacia hidrográfica", geom="poly",
+                  label="nm_bacia_hidrografica_principal", cls=None, color="#81d4fa"),
+    "praca": dict(file="praca.parquet", title="Praças", geom="poly", label="nome",
+                  cls=None, color="#66bb6a"),
+    "corredor": dict(file="corredor_verde.parquet", title="Corredores", geom="line",
+                     label="tx_proposta_planpavel", cls_col="tx_proposta_corredor_planpavel",
+                     cls=cls_corredor,
+                     legend=[("Corredor verde", "#2e7d32"), ("Corredor polinizador", "#f9a825")]),
+    "favela": dict(file="favela.parquet", title="Favelas", geom="poly", label="nome",
+                   cls_col="propriedade_area", cls=cls_favela, legend=list(FAVELA.items())),
+    "decliv": dict(file="Declividade.parquet", title="Declividade", geom="poly",
+                   label="classe", cls_col="classe", cls=cls_decliv, legend=list(DECLIV.values())),
+    "risco": dict(file="risco_geologico.parquet", title="Risco geológico", geom="poly",
+                  label="rg_process", cls_col="rg_process", cls=cls_risco,
+                  legend=list(RISCO.items())),
+    "arvores": dict(file="arvores.parquet", title="Árvores", geom="point", label=None,
+                    cls=None, color="#2e7d32"),
+    "vias": dict(file="vias.parquet", title="Vias", geom="line", label="cvc_classe",
+                 cls_col="cvc_classe", cls=cls_vias, legend=list(VIAS.items())),
+    "dens": dict(file="densidade_demografica.parquet", title="Densidade demográfica (hab/hec)",
+                 geom="poly", label="hab_hec", cls_col="hab_hec", cls=cls_dens,
+                 legend=[(l, c) for _, l, c in DENS]),
+    "lcz": dict(file="LCZ.parquet", title="Zona climática local", geom="poly", label="DN",
+                cls_col="DN", cls=cls_lcz, legend=list(LCZ.values())),
+}
 
-# =============================================================================
-# EXPORT (CSV / imagem)
-# =============================================================================
-def gdf_to_csv_bytes(gdf) -> bytes:
+
+def clip_to(gdf, area, ids=None):
     if gdf is None or len(gdf) == 0:
-        return b""
-    df = pd.DataFrame(gdf.drop(columns="geometry", errors="ignore")).copy()
-    if "__leg" in df.columns:
-        df = df.rename(columns={"__leg": "legenda"})
-    df = df[[c for c in df.columns if not str(c).startswith("__")]]
-    return df.to_csv(index=False, sep=";").encode("utf-8-sig")
+        return gdf
+    if ids is not None and "iso_ID" in gdf.columns:
+        return gdf[gdf["iso_ID"].astype(str).isin([str(i) for i in ids])]
+    idx = list(gdf.sindex.query(area, predicate="intersects"))
+    return gdf.iloc[idx]
 
 
-def set_export(slot, name, gdf):
-    st.session_state[slot] = (name, gdf_to_csv_bytes(gdf)) if gdf is not None and len(gdf) else None
+def load_thematic(key, area, iso_ids, censo_sel):
+    cfg = THEMATIC[key]
+    if key == "dens":
+        dens = read_layer(key, cfg["file"])
+        if dens is None:
+            return None
+        if isinstance(dens, gpd.GeoDataFrame) and "dd_setor" not in dens.columns:
+            gdf = clip_to(dens, area, iso_ids)
+        else:
+            if censo_sel is None or "censo_ID" not in censo_sel.columns:
+                return None
+            tab = pd.DataFrame(dens.drop(columns="geometry", errors="ignore"))
+            tab["dd_setor"] = tab["dd_setor"].astype(str)
+            base = censo_sel[["censo_ID", "geometry"]].copy()
+            base["censo_ID"] = base["censo_ID"].astype(str)
+            gdf = base.merge(tab, left_on="censo_ID", right_on="dd_setor", how="inner")
+            gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs=4326)
+    else:
+        src = read_layer(key, cfg["file"])
+        if src is None or not isinstance(src, gpd.GeoDataFrame):
+            return None
+        gdf = clip_to(src, area, iso_ids)
+    gdf = gdf.copy()
+    if cfg.get("cls"):
+        col = cfg["cls_col"]
+        res = gdf[col].map(cfg["cls"]) if col in gdf.columns else pd.Series(
+            [("Sem classe", "#bdbdbd")] * len(gdf), index=gdf.index)
+        gdf["_classe"] = res.map(lambda t: t[0])
+        gdf["_color"] = res.map(lambda t: t[1])
+    else:
+        gdf["_classe"] = cfg["title"]
+        gdf["_color"] = cfg["color"]
+    lab = cfg.get("label")
+    gdf["_label"] = gdf[lab].astype(str) if lab and lab in gdf.columns else gdf["_classe"]
+    if key == "dens":
+        gdf["_label"] = gdf["_label"] + " hab/hec"
+    return gdf
+
+
+# =============================================================================
+# MAPA
+# =============================================================================
+def _gj(gdf, cols):
+    out = gdf[[c for c in cols if c in gdf.columns] + ["geometry"]].copy()
+    for c in out.columns:
+        if c != "geometry":
+            out[c] = out[c].astype(str)
+    return out
+
+
+def add_thematic(m, key, gdf):
+    cfg = THEMATIC[key]
+    if gdf is None or len(gdf) == 0:
+        return
+    fg = folium.FeatureGroup(name=cfg["title"])
+    data = _gj(gdf, ["_label", "_classe", "_color"])
+    tip = folium.GeoJsonTooltip(fields=["_label"], aliases=[cfg["title"]])
+    if cfg["geom"] == "point":
+        data = data.head(8000)
+        folium.GeoJson(
+            data, marker=folium.CircleMarker(radius=2.5, fill=True, fill_opacity=0.9, weight=0),
+            style_function=lambda f: {"color": f["properties"]["_color"],
+                                      "fillColor": f["properties"]["_color"]},
+        ).add_to(fg)
+    elif cfg["geom"] == "line":
+        w = 4 if key == "vias" else 3
+        folium.GeoJson(
+            data, tooltip=tip,
+            style_function=lambda f, w=w: {"color": f["properties"]["_color"], "weight": w,
+                                           "opacity": 0.9},
+        ).add_to(fg)
+    else:
+        folium.GeoJson(
+            data, tooltip=tip,
+            style_function=lambda f: {"color": f["properties"]["_color"], "weight": 0.5,
+                                      "fillColor": f["properties"]["_color"],
+                                      "fillOpacity": 0.6},
+        ).add_to(fg)
+    fg.add_to(m)
+
+
+def add_boundary(m, key, gdf, label_col, highlight=None):
+    color, weight, title = ADMIN_STYLE[key]
+    if gdf is None or len(gdf) == 0:
+        return
+    data = _gj(gdf, [label_col])
+    hl = set(map(str, highlight or []))
+    folium.GeoJson(
+        data, name=title,
+        tooltip=folium.GeoJsonTooltip(fields=[label_col], aliases=[title]),
+        style_function=lambda f: {
+            "color": color, "weight": weight * (1.8 if f["properties"][label_col] in hl else 1),
+            "fillColor": "#ff7043" if f["properties"][label_col] in hl else color,
+            "fillOpacity": 0.25 if f["properties"][label_col] in hl else 0.03,
+        },
+    ).add_to(m)
+
+
+def add_legend(m, keys):
+    if not keys:
+        return
+    blocks = []
+    for k in keys:
+        cfg = THEMATIC[k]
+        items = cfg.get("legend") or [(cfg["title"], cfg["color"])]
+        rows = "".join(
+            f'<div><span style="display:inline-block;width:12px;height:12px;'
+            f'background:{c};margin-right:6px;border:1px solid #555"></span>{l}</div>'
+            for l, c in items)
+        blocks.append(f"<b>{cfg['title']}</b>{rows}")
+    html = ('<div style="position:absolute;bottom:20px;right:10px;z-index:9999;background:#fff;'
+            'padding:8px 10px;border-radius:6px;font-size:11px;max-height:320px;overflow:auto;'
+            'box-shadow:0 1px 4px rgba(0,0,0,.3)">' + "<hr style='margin:4px 0'>".join(blocks)
+            + "</div>")
+    m.get_root().html.add_child(Element(html))
 
 
 def add_print_button(m):
-    if MacroElement is None or m is None:
-        return
     m.get_root().header.add_child(JavascriptLink(
         "https://cdn.jsdelivr.net/npm/leaflet-easyprint@2.1.9/dist/bundle.min.js"))
     el = MacroElement()
     el._template = Template("""
     {% macro script(this, kwargs) %}
-    L.easyPrint({title:'Baixar imagem (PNG)', position:'topleft', sizeModes:['Current'],
-                 exportOnly:true, filename:'planbairros_mapa', hideControlContainer:false
-    }).addTo({{this._parent.get_name()}});
+    (function addPrint(n){
+      if (window.L && L.easyPrint) {
+        L.easyPrint({title:'Baixar imagem (PNG)', position:'topleft', sizeModes:['Current'],
+                     exportOnly:true, filename:'planbairros_mapa', hideControlContainer:false
+        }).addTo({{this._parent.get_name()}});
+      } else if (n < 40) { setTimeout(function(){ addPrint(n+1); }, 250); }
+    })(0);
     {% endmacro %}""")
     m.add_child(el)
 
 
-def add_legend(m, title, items):
-    if MacroElement is None or m is None or not items:
-        return
-    rows = "".join(
-        f"<div style='margin:2px 0'><span style='background:{c};width:14px;height:14px;"
-        f"display:inline-block;margin-right:6px;border:1px solid #555;vertical-align:middle'></span>"
-        f"{html.escape(str(l))}</div>" for l, c in items[:25])
-    box = (f"<div style='background:#fff;padding:8px 10px;border-radius:8px;"
-           f"box-shadow:0 1px 4px rgba(0,0,0,.3);font:12px Roboto,Arial;max-height:320px;overflow:auto'>"
-           f"<b>{html.escape(title)}</b>{rows}</div>")
-    el = MacroElement()
-    el._template = Template("""
-    {% macro script(this, kwargs) %}
-    var lg = L.control({position:'bottomright'});
-    lg.onAdd = function(){var d = L.DomUtil.create('div'); d.innerHTML = """ + json.dumps(box) + """; return d;};
-    lg.addTo({{this._parent.get_name()}});
-    {% endmacro %}""")
-    m.add_child(el)
+def feature_at(gdf, col, lat, lng):
+    pt = Point(lng, lat)
+    idx = list(gdf.sindex.query(pt, predicate="intersects"))
+    return str(gdf.iloc[idx[0]][col]) if idx else None
+
 
 # =============================================================================
-# HEADER / CSS
+# ESTADO
 # =============================================================================
-def _logo_data_uri():
-    if LOGO_PATH.exists():
-        suf = LOGO_PATH.suffix.lstrip(".").lower()
-        mime = "jpeg" if suf in ("jpg", "jpeg") else suf
-        b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode("utf-8")
-        return f"data:image/{mime};base64,{b64}"
-    return ("https://raw.githubusercontent.com/streamlit/brand/refs/heads/main/"
-            "logomark/streamlit-mark-color.png")
+for k, v in {"subpref": None, "distrito": None, "isos": [], "level": "Subprefeituras",
+             "last_click": None, "last_draw": None}.items():
+    st.session_state.setdefault(k, v)
 
 
-def inject_css():
-    st.markdown(
-        f"""
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
-        html, body, .stApp {{ font-family: 'Roboto', Arial, sans-serif; }}
-        .main .block-container {{ padding-top:.15rem !important; padding-bottom:.6rem !important; }}
-        .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
-        .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; border-radius:8px; }}
-        .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:14px 15px; width:100%; }}
-        .pb-title {{ font-size:2.25rem; font-weight:900; line-height:1.05; }}
-        .pb-subtitle {{ font-size:1.05rem; opacity:.95; margin-top:5px; }}
-        .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10);
-            box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
-        button[data-testid="stBaseButton-primary"],
-        div[data-testid="stBaseButton-primary"] > button {{
-            background:{PB_BTN} !important; color:#fff !important; border:1px solid {PB_BTN} !important; }}
-        </style>
-        """, unsafe_allow_html=True)
-
-
-def render_header():
-    st.markdown(
-        f"""
-        <div class="pb-header">
-          <div class="pb-row">
-            <img src="{_logo_data_uri()}" class="pb-logo" />
-            <div style="display:flex;flex-direction:column">
-              <div class="pb-title">PlanBairros</div>
-              <div class="pb-subtitle">Plataforma de visualização e planejamento em escala de bairro</div>
-            </div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-# =============================================================================
-# STATE
-# =============================================================================
-MAP_KEY = "map_view"
-LEVEL_LABELS = {"subpref": "Subprefeituras", "distrito": "Distritos",
-                "isocrona": "Isócronas", "quadra": "Visualização detalhada"}
-
-
-def init_state():
-    ss = st.session_state
-    ss.setdefault("level", "subpref")
-    ss.setdefault("last_level", None)
-    ss.setdefault("selected_subpref_id", None)
-    ss.setdefault("selected_distrito_id", None)
-    ss.setdefault("selected_iso_ids", set())
-    ss.setdefault("selected_censo_ids", set())
-    ss.setdefault("selected_od_ids", set())
-    ss.setdefault("selected_quadra_ids", set())
-    ss.setdefault("selected_lote_ids", set())
-    ss.setdefault("view_center", (-23.55, -46.63))
-    ss.setdefault("view_zoom", 11)
-    ss.setdefault("last_click_sig", "")
-    ss.setdefault("last_draw_sig", "")
-    ss.setdefault("_geojson_cache", {})
-    ss.setdefault("_geojson_cache_order", [])
-    ss.setdefault("_layer_cache", {})
-    ss.setdefault("_layer_cache_meta", {})
-    ss.setdefault("_ui_action_sig", 0)
-    ss.setdefault("_ui_action_sig_seen", 0)
-    ss.setdefault("_map_level_rendered", None)
-    ss.setdefault("_quadra_id_col_map", QUADRA_UID)
-    ss.setdefault("variable", None)
-    ss.setdefault("selection_draw_mode", False)
-    ss.setdefault("post_iso_view", "quadra")
-    ss.setdefault("show_fixed_layers", True)
-    ss.setdefault("thematic_layer", "Nenhum")
-    ss.setdefault("_export_view", None)
-    ss.setdefault("_export_thematic", None)
-    ss.setdefault("_export_map_html", None)
-
-
-def mark_ui_action():
-    st.session_state["_ui_action_sig"] = int(st.session_state.get("_ui_action_sig", 0)) + 1
-
-
-def _geojson_cache_reset():
-    st.session_state["_geojson_cache"] = {}
-    st.session_state["_geojson_cache_order"] = []
-
-
-def reset_post_iso_state():
-    st.session_state["post_iso_view"] = "quadra"
-    st.session_state["selected_censo_ids"] = set()
-    st.session_state["selected_od_ids"] = set()
-    st.session_state["selected_quadra_ids"] = set()
-    st.session_state["selected_lote_ids"] = set()
-
-
-def reset_to(level, *, clear_click_sig=True):
-    st.session_state["level"] = level
-    if clear_click_sig:
-        st.session_state["last_click_sig"] = ""
-        st.session_state["last_draw_sig"] = ""
-    _geojson_cache_reset()
+def reset_below(level):
     if level == "subpref":
-        st.session_state["selected_subpref_id"] = None
-        st.session_state["selected_distrito_id"] = None
-        st.session_state["selected_iso_ids"] = set()
-        reset_post_iso_state()
-        st.session_state["view_center"] = (-23.55, -46.63)
-        st.session_state["view_zoom"] = 11
-        st.session_state["last_level"] = None
+        st.session_state.distrito = None
+        st.session_state.isos = []
     elif level == "distrito":
-        st.session_state["selected_distrito_id"] = None
-        st.session_state["selected_iso_ids"] = set()
-        reset_post_iso_state()
-    elif level == "isocrona":
-        st.session_state["selected_iso_ids"] = set()
-        reset_post_iso_state()
-    elif level == "quadra":
-        reset_post_iso_state()
+        st.session_state.isos = []
 
-
-def _prev_level(level):
-    return {"subpref": None, "distrito": "subpref", "isocrona": "distrito", "quadra": "isocrona"}.get(level)
-
-
-def _back_one_level():
-    prev = _prev_level(st.session_state.get("level", "subpref"))
-    if prev:
-        reset_to(prev)
-
-
-def _available_levels():
-    ss = st.session_state
-    out = ["subpref"]
-    if _id_to_str(ss.get("selected_subpref_id")):
-        out.append("distrito")
-    if _id_to_str(ss.get("selected_distrito_id")):
-        out.append("isocrona")
-    if ensure_set_of_str(ss.get("selected_iso_ids")):
-        out.append("quadra")
-    return out
-
-
-def _on_nav_change():
-    target = st.session_state.get("nav_level", "subpref")
-    if target != st.session_state.get("level"):
-        st.session_state["level"] = target
-        st.session_state["last_level"] = None
-        _geojson_cache_reset()
-    mark_ui_action()
-
-
-def _toggle_in_set(key, value):
-    s = st.session_state.get(key, set()) or set()
-    s.discard(value) if value in s else s.add(value)
-    st.session_state[key] = s
-
-
-def sanitize_level_state():
-    lvl = st.session_state.get("level", "subpref")
-    if lvl == "distrito" and _id_to_str(st.session_state.get("selected_subpref_id")) is None:
-        reset_to("subpref"); return
-    if lvl in ("isocrona", "quadra") and _id_to_str(st.session_state.get("selected_distrito_id")) is None:
-        reset_to("distrito"); return
-    if lvl == "quadra" and not (st.session_state.get("selected_iso_ids", set()) or set()):
-        reset_to("isocrona"); return
 
 # =============================================================================
-# GEOJSON CACHE
+# DADOS BASE
 # =============================================================================
-def _session_geojson_get(key):
-    return st.session_state.get("_geojson_cache", {}).get(key)
+subpref = require("subpref")
+if subpref is None:
+    st.stop()
+SP_COL = name_col(subpref, ("sp_nome", "nm_subprefeitura", "nome"))
+distritos = read_layer("distrito", ADMIN_FILES["distrito"])
+DS_COL = name_col(distritos, ("ds_nome", "nm_distrito", "nome")) if distritos is not None else None
+isos = read_layer("iso", ADMIN_FILES["iso"])
+ISO_COL = "iso_ID" if isos is not None and "iso_ID" in isos.columns else (
+    name_col(isos) if isos is not None else None)
 
+sp_names = sorted(subpref[SP_COL].astype(str).unique())
+sel_sp_geom = sel_ds_geom = None
+ds_in = iso_in = None
 
-def _session_geojson_set(key, value, max_items=120):
-    cache = st.session_state.get("_geojson_cache", {})
-    order = st.session_state.get("_geojson_cache_order", [])
-    if key in cache:
-        cache[key] = value
-        try: order.remove(key)
-        except Exception: pass
-        order.append(key)
+if st.session_state.subpref and distritos is not None:
+    sel_sp_geom = unary_union(subpref[subpref[SP_COL].astype(str) == st.session_state.subpref].geometry)
+    rp = distritos.geometry.representative_point()
+    ds_in = distritos[rp.within(sel_sp_geom)]
+if st.session_state.distrito and ds_in is not None and isos is not None:
+    sel_ds_geom = unary_union(ds_in[ds_in[DS_COL].astype(str) == st.session_state.distrito].geometry)
+    iso_in = clip_to(isos, sel_ds_geom)
+
+levels = ["Subprefeituras"]
+if ds_in is not None and len(ds_in):
+    levels.append("Distritos")
+if iso_in is not None and len(iso_in):
+    levels.append("Isócronas")
+if st.session_state.isos:
+    levels.append("Visualização detalhada")
+if st.session_state.level not in levels:
+    st.session_state.level = levels[-1]
+
+# =============================================================================
+# LAYOUT
+# =============================================================================
+st.title("PlanBairros")
+col_map, col_panel = st.columns([3, 1])
+
+with col_panel:
+    st.subheader("Navegação")
+    st.selectbox("Nível", levels, key="level")
+    st.selectbox("Subprefeitura", [None] + sp_names, key="subpref",
+                 format_func=lambda x: "— selecione —" if x is None else x,
+                 on_change=reset_below, args=("subpref",))
+    ds_opts = sorted(ds_in[DS_COL].astype(str).unique()) if ds_in is not None else []
+    st.selectbox("Distrito", [None] + ds_opts, key="distrito", disabled=not ds_opts,
+                 format_func=lambda x: "— selecione —" if x is None else x,
+                 on_change=reset_below, args=("distrito",))
+    iso_opts = sorted(iso_in[ISO_COL].astype(str).unique()) if iso_in is not None else []
+    st.session_state.isos = [i for i in st.session_state.isos if i in iso_opts]
+    st.multiselect("Isócronas", iso_opts, key="isos", disabled=not iso_opts)
+
+    detailed = st.session_state.level == "Visualização detalhada"
+    limites_sel = st.multiselect(
+        "Limites", ["censo", "quadras", "lotes", "od"], default=["censo"], disabled=not detailed,
+        format_func=lambda k: ADMIN_STYLE[k][2])
+    tem_sel = st.multiselect(
+        "Camadas temáticas", list(THEMATIC), disabled=not detailed,
+        format_func=lambda k: THEMATIC[k]["title"])
+    st.caption("Dica: clique no mapa ou desenhe um polígono para selecionar feições.")
+
+# =============================================================================
+# CONSTRUÇÃO DO MAPA
+# =============================================================================
+level = st.session_state.level
+m = folium.Map(tiles=None, control_scale=True, prefer_canvas=False)
+folium.TileLayer(CARTO_LIGHT_URL, attr=CARTO_ATTR, name="CARTO Light").add_to(m)
+csv_parts = []
+
+if level == "Subprefeituras":
+    base, base_col = subpref, SP_COL
+    add_boundary(m, "subpref", subpref, SP_COL, [st.session_state.subpref])
+elif level == "Distritos":
+    base, base_col = ds_in, DS_COL
+    add_boundary(m, "distrito", ds_in, DS_COL, [st.session_state.distrito])
+elif level == "Isócronas":
+    base, base_col = iso_in, ISO_COL
+    add_boundary(m, "iso", iso_in, ISO_COL, st.session_state.isos)
+else:
+    sel_iso = iso_in[iso_in[ISO_COL].astype(str).isin(st.session_state.isos)]
+    base, base_col = sel_iso, ISO_COL
+    area = unary_union(sel_iso.geometry)
+    ids = st.session_state.isos if ISO_COL == "iso_ID" else None
+
+    lim_data = {}
+    for k in set(limites_sel) | ({"censo"} if "dens" in tem_sel else set()):
+        g = read_layer(k, ADMIN_FILES[k])
+        if isinstance(g, gpd.GeoDataFrame):
+            lim_data[k] = clip_to(g, area, ids)
+
+    # 1) temáticas (abaixo)
+    for k in tem_sel:
+        g = load_thematic(k, area, ids, lim_data.get("censo"))
+        if g is None:
+            st.warning(f"Camada temática '{THEMATIC[k]['title']}' ({THEMATIC[k]['file']}) indisponível.")
+            continue
+        add_thematic(m, k, g)
+        part = pd.DataFrame(g.drop(columns="geometry"))
+        part.insert(0, "camada", THEMATIC[k]["title"])
+        csv_parts.append(part)
+    add_legend(m, tem_sel)
+
+    # 2) limites (acima das temáticas)
+    for k in limites_sel:
+        g = lim_data.get(k)
+        if g is not None:
+            add_boundary(m, k, g, name_col(g, ("censo_ID", "NumeroZona", "nome")))
+    add_boundary(m, "iso", sel_iso, ISO_COL, st.session_state.isos)
+    iso_tab = pd.DataFrame(sel_iso.drop(columns="geometry"))
+    iso_tab.insert(0, "camada", "Isócronas")
+    csv_parts.insert(0, iso_tab)
+
+if base is not None and len(base):
+    b = base.total_bounds
+    m.fit_bounds([[b[1], b[0]], [b[3], b[2]]])
+
+Draw(export=False, draw_options={"polyline": False, "circle": False, "marker": False,
+                                 "circlemarker": False}).add_to(m)
+folium.LayerControl(collapsed=True).add_to(m)
+add_print_button(m)
+
+with col_map:
+    out = st_folium(m, height=700, use_container_width=True, key=f"map_{level}",
+                    returned_objects=["last_object_clicked", "all_drawings"])
+
+# =============================================================================
+# INTERAÇÃO (clique / desenho)
+# =============================================================================
+changed = False
+click = (out or {}).get("last_object_clicked")
+if click and base is not None and len(base):
+    ck = (round(click["lat"], 6), round(click["lng"], 6), level)
+    if ck != st.session_state.last_click:
+        st.session_state.last_click = ck
+        fid = feature_at(base, base_col, click["lat"], click["lng"])
+        if fid:
+            if level == "Subprefeituras" and fid != st.session_state.subpref:
+                st.session_state.subpref = fid
+                reset_below("subpref")
+                changed = True
+            elif level == "Distritos" and fid != st.session_state.distrito:
+                st.session_state.distrito = fid
+                reset_below("distrito")
+                changed = True
+            elif level == "Isócronas":
+                s = list(st.session_state.isos)
+                s.remove(fid) if fid in s else s.append(fid)
+                st.session_state.isos = s
+                changed = True
+
+draws = (out or {}).get("all_drawings") or []
+if draws and level == "Isócronas" and iso_in is not None:
+    key = str(draws)
+    if key != st.session_state.last_draw:
+        st.session_state.last_draw = key
+        poly = unary_union([shape(d["geometry"]) for d in draws])
+        new = sorted(clip_to(iso_in, poly)[ISO_COL].astype(str).unique())
+        if new and new != st.session_state.isos:
+            st.session_state.isos = new
+            changed = True
+
+if changed:
+    st.rerun()
+
+# =============================================================================
+# EXPORTAÇÃO
+# =============================================================================
+with col_panel:
+    st.subheader("Exportar")
+    if csv_parts:
+        csv = pd.concat(csv_parts, ignore_index=True).to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇️ CSV da visualização", csv, "planbairros_dados.csv", "text/csv")
     else:
-        cache[key] = value; order.append(key)
-    while len(order) > max_items:
-        cache.pop(order.pop(0), None)
-    st.session_state["_geojson_cache"] = cache
-    st.session_state["_geojson_cache_order"] = order
-
-
-def _simplify_to_geojson(gdf, simplify_tol, keep_cols=None):
-    if gdf is None or gdf.empty:
-        return ""
-    keep_cols = [c for c in (keep_cols or []) if c in gdf.columns]
-    try:
-        g = gdf[keep_cols + ["geometry"]].copy()
-    except Exception:
-        return ""
-    g = _drop_bad_geoms(g)
-    if simplify_tol and simplify_tol > 0:
-        try:
-            g["geometry"] = g["geometry"].simplify(simplify_tol, preserve_topology=True)
-            g = _drop_bad_geoms(g)
-        except Exception:
-            pass
-    try:
-        return g.to_json()
-    except Exception:
-        return ""
-
-# =============================================================================
-# CLICK / DRAW
-# =============================================================================
-def pick_feature_id(gdf, click_latlon, id_col):
-    if gdf is None or gdf.empty or not click_latlon or id_col not in gdf.columns or Point is None:
-        return None
-    lat, lng = click_latlon.get("lat"), click_latlon.get("lng")
-    if lat is None or lng is None:
-        return None
-    try:
-        pt = Point(lng, lat)
-        cand = gdf
-        try:
-            if hasattr(gdf, "sindex") and gdf.sindex is not None:
-                idx = list(gdf.sindex.intersection(pt.bounds))
-                if idx:
-                    cand = gdf.iloc[idx]
-        except Exception:
-            pass
-        hit = cand[cand.geometry.contains(pt)]
-        if hit.empty:
-            hit = cand[cand.geometry.intersects(pt)]
-        return None if hit.empty else _id_to_str(hit.iloc[0][id_col])
-    except Exception:
-        return None
-
-
-def add_draw_tools(m):
-    if folium is None or Draw is None or m is None:
-        return
-    Draw(export=False, position="topleft",
-         draw_options={"polyline": False, "marker": False, "circle": False,
-                       "circlemarker": False, "polygon": True, "rectangle": True},
-         edit_options={"edit": False, "remove": True}).add_to(m)
-
-
-def _extract_drawn_geometry(map_state):
-    if not isinstance(map_state, dict):
-        return None
-    for cand in (map_state.get("all_drawings"), map_state.get("last_active_drawing"),
-                 map_state.get("last_drawing")):
-        if not cand:
-            continue
-        if isinstance(cand, list) and cand:
-            last = cand[-1]
-            geom = last.get("geometry") if isinstance(last, dict) else None
-            if geom and shape is not None:
-                try: return shape(geom)
-                except Exception: pass
-        if isinstance(cand, dict):
-            geom = cand.get("geometry", cand)
-            if geom and shape is not None:
-                try: return shape(geom)
-                except Exception: pass
-    return None
-
-
-def select_features_by_geometry(gdf, geom, id_col, state_key, mode="add"):
-    if gdf is None or gdf.empty or geom is None or id_col not in gdf.columns:
-        return
-    try:
-        hits = gdf[gdf.geometry.intersects(geom)]
-    except Exception:
-        return
-    ids = {v for v in (_id_to_str(x) for x in hits[id_col].tolist()) if v is not None}
-    if mode == "replace":
-        st.session_state[state_key] = ids; return
-    st.session_state[state_key] = ensure_set_of_str(st.session_state.get(state_key, set())) | ids
-
-
-def _pick_id_from_last_object(map_state, id_col):
-    obj = (map_state or {}).get("last_object_clicked")
-    if not isinstance(obj, dict):
-        return None
-    props = obj.get("properties") if isinstance(obj.get("properties"), dict) else obj
-    return _id_to_str(props.get(id_col)) if isinstance(props, dict) else None
-
-
-def parse_tooltip_id(tooltip):
-    if not tooltip:
-        return None
-    if isinstance(tooltip, dict):
-        tooltip = tooltip.get("text") or tooltip.get("tooltip") or str(tooltip)
-    s = re.sub(r"<[^>]+>", " ", str(tooltip)).strip()
-    m = re.search(r":\s*([^\s<]+)", s)
-    if m:
-        return _id_to_str(m.group(1))
-    m2 = re.search(r"([A-Za-z0-9_-]+)\s*$", s)
-    return _id_to_str(m2.group(1)) if m2 else None
-
-
-def _click_signature(picked_id, click):
-    lat = lng = None
-    if isinstance(click, dict):
-        lat, lng = click.get("lat"), click.get("lng")
-    try:
-        if lat is not None and lng is not None:
-            return f"{picked_id}|{float(lat):.7f}|{float(lng):.7f}"
-    except Exception:
-        pass
-    return f"{picked_id}|"
-
-# =============================================================================
-# FOLIUM
-# =============================================================================
-def make_carto_map(center=(-23.55, -46.63), zoom=11):
-    if folium is None:
-        return None
-    m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True, prefer_canvas=True)
-    folium.TileLayer(tiles=CARTO_LIGHT_URL, attr=CARTO_ATTR, name="OpenStreetMap",
-                     overlay=False, control=False, max_zoom=19).add_to(m)
-    try:
-        folium.map.CustomPane("parent_fill", z_index=610).add_to(m)
-        folium.map.CustomPane("thematic", z_index=625).add_to(m)
-        folium.map.CustomPane("detail_shapes", z_index=640).add_to(m)
-        folium.map.CustomPane("fixed_layers", z_index=660).add_to(m)
-        folium.map.CustomPane("boundaries", z_index=680, pointer_events=False).add_to(m)
-        folium.map.CustomPane("labels", z_index=700).add_to(m)
-    except Exception:
-        pass
-    return m
-
-
-def _mk_tooltip(id_col, prefix):
-    if GeoJsonTooltip is None:
-        return None
-    return GeoJsonTooltip(fields=[id_col], aliases=[prefix], sticky=True,
-                          labels=True, localize=True, max_width=320)
-
-
-def add_fixed_layers(m):
-    if folium is None or m is None or not st.session_state.get("show_fixed_layers", True):
-        return
-    for key, s in FIXED_LAYER_STYLE.items():
-        src = _find_local_file(s["file"])
-        if src is None:
-            continue
-        cache_key = f"fixed:{key}:{src.name}"
-        geojson = _session_geojson_get(cache_key)
-        if not geojson:
-            g = _drop_bad_geoms(read_gdf_geojson(str(src)))
-            if g is None or g.empty:
-                continue
-            geojson = _simplify_to_geojson(g, simplify_tol=0.0, keep_cols=[])
-            _session_geojson_set(cache_key, geojson)
-        if not geojson:
-            continue
-        fg = folium.FeatureGroup(name=s["name"], show=True)
-        folium.GeoJson(
-            data=geojson, pane="fixed_layers", smooth_factor=SMOOTH_FACTOR,
-            style_function=(lambda _f, c=s["color"], w=s["weight"], f=s["fill"],
-                            o=s["fill_opacity"], d=s.get("dash"): {
-                "color": c, "weight": w, "opacity": 1.0, "dashArray": d,
-                "lineCap": LINE_CAP, "lineJoin": LINE_JOIN,
-                "fill": f, "fillColor": c, "fillOpacity": o if f else 0.0}),
-        ).add_to(fg)
-        fg.add_to(m)
-
-
-def add_boundary_overlay(m, gdf, *, color=PB_BLACK, weight=1.6, simplify_tol=0.0, cache_key=None):
-    """Somente contorno, sempre na camada superior (pane 'boundaries')."""
-    if folium is None or gdf is None or gdf.empty:
-        return
-    key = cache_key or f"bnd:{len(gdf)}:{simplify_tol}"
-    geojson = _session_geojson_get(key)
-    if not geojson:
-        geojson = _simplify_to_geojson(gdf, simplify_tol=simplify_tol, keep_cols=[])
-        _session_geojson_set(key, geojson)
-    if not geojson:
-        return
-    folium.GeoJson(data=geojson, pane="boundaries", smooth_factor=SMOOTH_FACTOR,
-        style_function=lambda _f: {"color": color, "weight": weight, "opacity": 1.0,
-                                   "fill": False, "fillOpacity": 0.0,
-                                   "lineCap": LINE_CAP, "lineJoin": LINE_JOIN}).add_to(m)
-
-
-def add_thematic_to_map(m, key, g, legend):
-    cfg = THEMATIC_LAYERS[key]
-    if g is None or g.empty:
-        st.info(f"{cfg['title']}: nenhuma feição nas isócronas selecionadas.")
-        return
-    if cfg["kind"] == "points":
-        pts = g.geometry.representative_point()
-        if len(pts) > MAX_POINTS:
-            st.caption(f"Exibindo {MAX_POINTS} de {len(pts)} árvores.")
-            pts = pts.iloc[:MAX_POINTS]
-        fg = folium.FeatureGroup(name=cfg["title"], show=True)
-        for p in pts:
-            folium.CircleMarker(location=[p.y, p.x], radius=3, color=cfg["color"], weight=1,
-                                fill=True, fill_color=cfg["color"], fill_opacity=0.9).add_to(fg)
-        fg.add_to(m)
-    else:
-        geojson = _simplify_to_geojson(g, simplify_tol=0.0, keep_cols=["__color", "__tt", "__leg"])
-        if not geojson:
-            return
-        w = cfg.get("weight", 0.6)
-
-        def _style(f, w=w):
-            c = (f.get("properties") or {}).get("__color", "#888888")
-            return {"color": c, "weight": w, "opacity": 1.0, "fillColor": c,
-                    "fillOpacity": 0.6, "lineCap": LINE_CAP, "lineJoin": LINE_JOIN}
-
-        tt = GeoJsonTooltip(fields=["__tt", "__leg"], aliases=[f"{cfg['title']}:", "Legenda:"],
-                            sticky=True, labels=True) if GeoJsonTooltip else None
-        folium.GeoJson(data=geojson, name=cfg["title"], pane="thematic",
-                       smooth_factor=SMOOTH_FACTOR, style_function=_style, tooltip=tt).add_to(m)
-    add_legend(m, cfg["title"], legend)
-
-
-def _format_label_multiline(text):
-    if text is None:
-        return ""
-    txt = str(text).strip()
-    if not txt:
-        return ""
-    for sep in [" - ", " – ", "/"]:
-        if sep in txt:
-            parts = [p.strip() for p in txt.split(sep) if str(p).strip()]
-            if len(parts) >= 2:
-                return "<br>".join(html.escape(p) for p in parts[:2])
-    return html.escape(txt)
-
-
-def add_labels_on_map(m, gdf, label_col, *, font_size=12, color="#000000", weight="700"):
-    if folium is None or gdf is None or gdf.empty or label_col not in gdf.columns:
-        return
-    try:
-        g = gdf[gdf.geometry.notna()].copy()
-        if g.empty:
-            return
-        points = g.geometry.representative_point()
-        for idx, row in g.iterrows():
-            label = row.get(label_col)
-            if pd.isna(label):
-                continue
-            txt_html = _format_label_multiline(label)
-            if not txt_html:
-                continue
-            pt = points.loc[idx]
-            if pt is None or getattr(pt, "is_empty", False):
-                continue
-            folium.Marker(location=[pt.y, pt.x], icon=folium.DivIcon(
-                icon_size=(150, 36), icon_anchor=(75, 18),
-                html=f"""<div style="font-family:Roboto,Arial,sans-serif;font-size:{font_size}px;
-                    color:{color};font-weight:{weight};text-align:center;white-space:nowrap;line-height:1.1;
-                    text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 0 3px #fff;
-                    pointer-events:none;">{txt_html}</div>""")).add_to(m)
-    except Exception:
-        pass
-
-
-def add_parent_fill(m, gdf, name, *, pane="parent_fill", fill_color=PB_BROWN,
-                    fill_opacity=PARENT_FILL_OPACITY, stroke_color=PB_BLACK,
-                    stroke_weight=PARENT_STROKE_WEIGHT, stroke_opacity=PARENT_STROKE_OPACITY,
-                    dash_array=PARENT_STROKE_DASH, simplify_tol=0.0, cache_key=None):
-    if folium is None or gdf is None or gdf.empty:
-        return
-    key = cache_key or f"parent:{name}:{simplify_tol}:{len(gdf)}"
-    geojson = _session_geojson_get(key)
-    if not geojson:
-        geojson = _simplify_to_geojson(gdf, simplify_tol=simplify_tol, keep_cols=[])
-        _session_geojson_set(key, geojson)
-    if not geojson:
-        return
-    fg = folium.FeatureGroup(name=name, show=True)
-    folium.GeoJson(data=geojson, pane=pane, smooth_factor=SMOOTH_FACTOR,
-        style_function=lambda _f: {"color": stroke_color, "weight": stroke_weight,
-            "opacity": stroke_opacity, "dashArray": dash_array, "lineCap": LINE_CAP,
-            "lineJoin": LINE_JOIN, "fillColor": fill_color, "fillOpacity": fill_opacity}).add_to(fg)
-    fg.add_to(m)
-
-
-def add_polygons_selectable(m, gdf, name, id_col, *, tooltip_col=None, selected_ids=None,
-                            extra_props=None, pane="detail_shapes", base_color=PB_BLACK,
-                            base_weight=1.0, fill_color="#ffffff", fill_opacity=0.10,
-                            selected_color=PB_BLACK, selected_weight=2.2,
-                            selected_fill_opacity=0.26, tooltip_prefix="ID: ",
-                            simplify_tol=0.0, cache_key=None):
-    if folium is None or gdf is None or gdf.empty or id_col not in gdf.columns:
-        return
-    tooltip_col = tooltip_col or id_col
-    if tooltip_col not in gdf.columns:
-        return
-    sel = {v for v in (_id_to_str(x) for x in (selected_ids or set())) if v is not None}
-    extra_props = [c for c in (extra_props or []) if c in gdf.columns and c not in (id_col, tooltip_col)]
-    keep = ([id_col] if tooltip_col == id_col else [id_col, tooltip_col]) + extra_props
-    key = cache_key or f"base:{name}:{id_col}:{tooltip_col}:{','.join(extra_props)}:{simplify_tol}:{len(gdf)}"
-    geojson_base = _session_geojson_get(key)
-    if not geojson_base:
-        mini = gdf[keep + ["geometry"]].copy()
-        for c in keep:
-            mini[c] = mini[c].map(_id_to_str)
-        geojson_base = _simplify_to_geojson(mini, simplify_tol=simplify_tol, keep_cols=keep)
-        _session_geojson_set(key, geojson_base)
-    if not geojson_base:
-        return
-    fg_base = folium.FeatureGroup(name=name, show=True)
-    folium.GeoJson(data=geojson_base, pane=pane, smooth_factor=SMOOTH_FACTOR,
-        style_function=lambda _f: {"color": base_color, "weight": base_weight, "opacity": 1.0,
-            "lineCap": LINE_CAP, "lineJoin": LINE_JOIN, "fillColor": fill_color, "fillOpacity": fill_opacity},
-        highlight_function=lambda _f: {"color": PB_BLACK, "weight": base_weight + 1.0,
-            "opacity": 1.0, "fillOpacity": min(fill_opacity + 0.10, 0.40)},
-        tooltip=_mk_tooltip(tooltip_col, tooltip_prefix)).add_to(fg_base)
-    fg_base.add_to(m)
-    if sel:
-        sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
-        if not sel_gdf.empty:
-            sel_gdf[id_col] = sel_gdf[id_col].map(_id_to_str)
-            geojson_sel = _simplify_to_geojson(sel_gdf, simplify_tol=simplify_tol, keep_cols=[id_col])
-            if geojson_sel:
-                fg_sel = folium.FeatureGroup(name=f"{name} (selecionados)", show=True)
-                folium.GeoJson(data=geojson_sel, pane=pane, smooth_factor=SMOOTH_FACTOR,
-                    style_function=lambda _f: {"color": selected_color, "weight": selected_weight,
-                        "opacity": 1.0, "lineCap": LINE_CAP, "lineJoin": LINE_JOIN,
-                        "fillColor": fill_color, "fillOpacity": selected_fill_opacity}).add_to(fg_sel)
-                fg_sel.add_to(m)
-
-
-def add_polygons_selectable_colored(m, gdf, name, id_col, fill_color_col, *, selected_ids=None,
-                                    tooltip_col=None, pane="detail_shapes", base_color=PB_BLACK,
-                                    base_weight=1.0, fill_opacity=0.14, selected_color=PB_BLACK,
-                                    selected_weight=2.2, selected_fill_opacity=0.28,
-                                    tooltip_prefix="ID: ", simplify_tol=0.0, cache_key=None,
-                                    default_fill="#ffffff"):
-    if folium is None or gdf is None or gdf.empty:
-        return
-    if id_col not in gdf.columns or fill_color_col not in gdf.columns:
-        return
-    tooltip_col = tooltip_col or id_col
-    if tooltip_col not in gdf.columns:
-        tooltip_col = id_col
-    keep = [id_col, fill_color_col]
-    if tooltip_col not in keep:
-        keep.append(tooltip_col)
-    key = cache_key or f"baseC:{name}:{id_col}:{tooltip_col}:{fill_color_col}:{simplify_tol}:{len(gdf)}"
-    geojson_base = _session_geojson_get(key)
-    if not geojson_base:
-        mini = gdf[keep + ["geometry"]].copy()
-        mini[id_col] = mini[id_col].map(_id_to_str)
-        mini[tooltip_col] = mini[tooltip_col].map(_id_to_str)
-        mini[fill_color_col] = mini[fill_color_col].astype(str)
-        geojson_base = _simplify_to_geojson(mini, simplify_tol=simplify_tol, keep_cols=keep)
-        _session_geojson_set(key, geojson_base)
-    if not geojson_base:
-        return
-
-    def _style(f):
-        props = (f or {}).get("properties", {}) or {}
-        fc = props.get(fill_color_col, default_fill)
-        if not fc or str(fc).lower() in ("nan", "none"):
-            fc = default_fill
-        return {"color": base_color, "weight": base_weight, "opacity": 1.0,
-                "lineCap": LINE_CAP, "lineJoin": LINE_JOIN, "fillColor": fc, "fillOpacity": fill_opacity}
-
-    fg_base = folium.FeatureGroup(name=name, show=True)
-    folium.GeoJson(data=geojson_base, pane=pane, smooth_factor=SMOOTH_FACTOR, style_function=_style,
-        highlight_function=lambda _f: {"color": PB_BLACK, "weight": base_weight + 1.0,
-            "opacity": 1.0, "fillOpacity": min(fill_opacity + 0.10, 0.95)},
-        tooltip=_mk_tooltip(tooltip_col, tooltip_prefix)).add_to(fg_base)
-    fg_base.add_to(m)
-    sel = {v for v in (_id_to_str(x) for x in (selected_ids or set())) if v is not None}
-    if sel:
-        sel_gdf = gdf[gdf[id_col].isin(list(sel))][[id_col, "geometry"]].copy()
-        if not sel_gdf.empty:
-            sel_gdf[id_col] = sel_gdf[id_col].map(_id_to_str)
-            geojson_sel = _simplify_to_geojson(sel_gdf, simplify_tol=simplify_tol, keep_cols=[id_col])
-            if geojson_sel:
-                fg_sel = folium.FeatureGroup(name=f"{name} (selecionados)", show=True)
-                folium.GeoJson(data=geojson_sel, pane=pane, smooth_factor=SMOOTH_FACTOR,
-                    style_function=lambda _f: {"color": selected_color, "weight": selected_weight,
-                        "opacity": 1.0, "lineCap": LINE_CAP, "lineJoin": LINE_JOIN,
-                        "fillColor": "#ffffff", "fillOpacity": selected_fill_opacity}).add_to(fg_sel)
-                fg_sel.add_to(m)
-
-# =============================================================================
-# HELPERS PÓS-ISÓCRONA
-# =============================================================================
-def build_post_iso_data():
-    iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
-    distrito_id = _id_to_str(st.session_state.get("selected_distrito_id"))
-    out = {"iso_ids": iso_ids, "g_parent": None, "g_censo": None,
-           "g_od": None, "g_quadra": None, "g_lote": None, "quadra_id_col": QUADRA_UID}
-    if not iso_ids:
-        return out
-    g_iso = read_layer("iso")
-    if g_iso is not None:
-        out["g_parent"] = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
-    g_censo = read_layer("censo")
-    if g_censo is not None:
-        out["g_censo"] = get_censo_subset_for_isos(g_censo, iso_ids)
-    g_od = read_layer("od")
-    if g_od is not None:
-        if ISO_ID not in g_od.columns:
-            st.warning(f"ZonasOD sem '{ISO_ID}'. Colunas: {list(g_od.columns)}")
-        else:
-            out["g_od"] = subset_by_parent_multi(g_od, ISO_ID, iso_ids)
-    g_quad = read_layer("quadra")
-    if g_quad is not None:
-        censo_ids = ensure_set_of_str(st.session_state.get("selected_censo_ids", set()))
-        g_quad_show = get_quadras_subset_for_mode(g_quad, iso_ids=iso_ids, filter_censo_ids=censo_ids)
-        id_col = QUADRA_UID if QUADRA_UID in g_quad_show.columns else QUADRA_ID
-        if id_col not in g_quad_show.columns:
-            id_col = QUADRA_ID if QUADRA_ID in g_quad_show.columns else QUADRA_UID
-        out["g_quadra"] = g_quad_show
-        out["quadra_id_col"] = id_col
-        st.session_state["_quadra_id_col_map"] = id_col
-    if distrito_id is not None:
-        g_lote = read_lotes_by_distrito(distrito_id)
-        if g_lote is not None:
-            if ISO_ID not in g_lote.columns:
-                st.warning(f"Lotes do distrito '{distrito_id}' sem '{ISO_ID}'.")
-            else:
-                out["g_lote"] = get_lotes_subset_for_isos(g_lote, iso_ids)
-    return out
-
-# =============================================================================
-# EVENTOS
-# =============================================================================
-def consume_map_event(level, map_state, allow_click=True):
-    if not allow_click:
-        return
-    tooltip_raw = (map_state or {}).get("last_object_clicked_tooltip") or None
-    click = (map_state or {}).get("last_clicked") if isinstance((map_state or {}).get("last_clicked"), dict) else None
-
-    if level in ("subpref", "distrito"):
-        id_col = SUBPREF_ID if level == "subpref" else DIST_ID
-        picked = _pick_id_from_last_object(map_state, id_col) or parse_tooltip_id(tooltip_raw)
-        if not picked and isinstance(click, dict):
-            if level == "subpref":
-                g = read_layer("subpref")
-                if g is not None:
-                    picked = pick_feature_id(g, click, SUBPREF_ID)
-            else:
-                sp = _id_to_str(st.session_state.get("selected_subpref_id"))
-                if sp is not None:
-                    g = read_layer("dist")
-                    if g is not None:
-                        picked = pick_feature_id(subset_by_parent(g, DIST_PARENT, sp), click, DIST_ID)
-        if not picked:
-            return
-        sig = _click_signature(picked, click)
-        if sig == st.session_state.get("last_click_sig", ""):
-            return
-        st.session_state["last_click_sig"] = sig
-        if level == "subpref":
-            reset_to("distrito", clear_click_sig=False)
-            st.session_state["selected_subpref_id"] = picked
-            st.session_state["level"] = "distrito"
-            return
-        st.session_state["selected_distrito_id"] = picked
-        reset_to("isocrona", clear_click_sig=False)
-        st.session_state["level"] = "isocrona"
-        return
-
-    if level == "isocrona":
-        picked = _pick_id_from_last_object(map_state, ISO_ID) or parse_tooltip_id(tooltip_raw)
-        if not picked and isinstance(click, dict):
-            d = _id_to_str(st.session_state.get("selected_distrito_id"))
-            if d is not None:
-                g = read_layer("iso")
-                if g is not None:
-                    g_show = subset_by_parent(g, ISO_PARENT, d)
-                    if g_show.empty and DIST_ID in g.columns:
-                        g2 = g.copy()
-                        g2[DIST_ID] = g2[DIST_ID].astype(str).str.strip()
-                        g_show = g2[g2[DIST_ID] == str(d).strip()].copy()
-                    picked = pick_feature_id(g_show, click, ISO_ID)
-        if not picked:
-            return
-        sig = _click_signature(picked, click)
-        if sig == st.session_state.get("last_click_sig", ""):
-            return
-        st.session_state["last_click_sig"] = sig
-        _toggle_in_set("selected_iso_ids", picked)
-        return
-
-    if level == "quadra":
-        post_view = st.session_state.get("post_iso_view", "quadra")
-        data = build_post_iso_data()
-        if post_view == "quadra":
-            g_show = data.get("g_quadra")
-            id_col_map = data.get("quadra_id_col", QUADRA_UID)
-            picked = None
-            obj = (map_state or {}).get("last_object_clicked") or None
-            if isinstance(obj, dict):
-                props = obj.get("properties") if isinstance(obj.get("properties"), dict) else obj
-                if isinstance(props, dict):
-                    if id_col_map == QUADRA_UID:
-                        picked = _id_to_str(props.get(QUADRA_UID)) or make_quadra_uid(props.get(ISO_ID), props.get(QUADRA_ID))
-                    else:
-                        picked = _id_to_str(props.get(id_col_map)) or _id_to_str(props.get(QUADRA_ID))
-            if not picked and isinstance(click, dict) and g_show is not None and id_col_map in g_show.columns:
-                picked = pick_feature_id(g_show, click, id_col_map)
-            if not picked:
-                return
-            sig = _click_signature(picked, click)
-            if sig == st.session_state.get("last_click_sig", ""):
-                return
-            st.session_state["last_click_sig"] = sig
-            _toggle_in_set("selected_quadra_ids", picked)
-            return
-        cfg = {"censo": (data.get("g_censo"), CENSO_ID, "selected_censo_ids"),
-               "od": (data.get("g_od"), OD_ID, "selected_od_ids"),
-               "lote": (data.get("g_lote"), LOTE_ID, "selected_lote_ids")}
-        if post_view in cfg:
-            g_show, id_col, state_key = cfg[post_view]
-            picked = _pick_id_from_last_object(map_state, id_col) or parse_tooltip_id(tooltip_raw)
-            if not picked and isinstance(click, dict) and g_show is not None and id_col in getattr(g_show, "columns", []):
-                picked = pick_feature_id(g_show, click, id_col)
-            if not picked:
-                return
-            sig = _click_signature(picked, click)
-            if sig == st.session_state.get("last_click_sig", ""):
-                return
-            st.session_state["last_click_sig"] = sig
-            _toggle_in_set(state_key, picked)
-            return
-
-
-def consume_draw_selection(level, map_state):
-    geom = _extract_drawn_geometry(map_state)
-    if geom is None:
-        return
-    sig = str(getattr(geom, "wkt", ""))
-    if not sig or sig == st.session_state.get("last_draw_sig", ""):
-        return
-    st.session_state["last_draw_sig"] = sig
-    if level == "isocrona":
-        g = read_layer("iso")
-        d = _id_to_str(st.session_state.get("selected_distrito_id"))
-        if g is None or d is None:
-            return
-        g_show = subset_by_parent(g, ISO_PARENT, d)
-        if g_show.empty and DIST_ID in g.columns:
-            g2 = g.copy()
-            g2[DIST_ID] = g2[DIST_ID].astype(str).str.strip()
-            g_show = g2[g2[DIST_ID] == str(d).strip()].copy()
-        select_features_by_geometry(g_show, geom, ISO_ID, "selected_iso_ids", mode="add")
-        return
-    if level == "quadra":
-        data = build_post_iso_data()
-        post_view = st.session_state.get("post_iso_view", "quadra")
-        if post_view == "quadra":
-            g_show = data.get("g_quadra")
-            id_col_map = data.get("quadra_id_col", QUADRA_UID)
-            if g_show is not None and id_col_map in g_show.columns:
-                select_features_by_geometry(g_show, geom, id_col_map, "selected_quadra_ids", mode="add")
-            return
-        cfg = {"censo": (data.get("g_censo"), CENSO_ID, "selected_censo_ids"),
-               "od": (data.get("g_od"), OD_ID, "selected_od_ids"),
-               "lote": (data.get("g_lote"), LOTE_ID, "selected_lote_ids")}
-        if post_view in cfg:
-            g_show, id_col, state_key = cfg[post_view]
-            if g_show is not None and id_col in getattr(g_show, "columns", []):
-                select_features_by_geometry(g_show, geom, id_col, state_key, mode="add")
-            return
-
-# =============================================================================
-# UI
-# =============================================================================
-def _variables_for_level(level):
-    return {"subpref": ["Subprefeituras"], "distrito": ["Distritos"],
-            "isocrona": ["Isócronas", "Isócronas (classes)"],
-            "quadra": ["Quadras", "Cluster", "Setor censitário", "Zonas OD", "Lotes"]}.get(level, ["Nível"])
-
-
-def ensure_variable_for_level(level):
-    opts = _variables_for_level(level)
-    if st.session_state.get("variable") not in opts:
-        st.session_state["variable"] = opts[0]
-
-
-def variable_panel():
-    lvl = st.session_state.get("level", "subpref")
-    ensure_variable_for_level(lvl)
-    st.selectbox("Variável", options=_variables_for_level(lvl), key="variable", on_change=mark_ui_action)
-
-
-def bounds_center_zoom(gdf):
-    minx, miny, maxx, maxy = gdf.total_bounds
-    center = ((miny + maxy) / 2, (minx + maxx) / 2)
-    dx = maxx - minx
-    z = 15 if dx < 0.03 else 14 if dx < 0.08 else 13 if dx < 0.15 else 12 if dx < 0.30 else 11
-    return center, z
-
-
-def set_view_to_gdf(gdf, bump=0, zmax=18):
-    if gdf is None or gdf.empty:
-        return
-    try:
-        center, zoom = bounds_center_zoom(gdf)
-        st.session_state["view_center"] = center
-        st.session_state["view_zoom"] = min(zoom + bump, zmax)
-    except Exception:
-        pass
-
-
-def _fit_selected_isos():
-    iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
-    if not iso_ids:
-        return
-    g_iso = read_layer("iso")
-    if g_iso is None:
-        return
-    set_view_to_gdf(subset_by_id_multi(g_iso, ISO_ID, iso_ids), bump=0, zmax=18)
-
-
-def _fit_selected_post_level():
-    data = build_post_iso_data()
-    post_view = st.session_state.get("post_iso_view", "quadra")
-    if post_view == "quadra":
-        ids = ensure_set_of_str(st.session_state.get("selected_quadra_ids", set()))
-        g = data.get("g_quadra"); id_col = data.get("quadra_id_col", QUADRA_UID)
-        if g is not None and ids and id_col in g.columns:
-            set_view_to_gdf(subset_by_id_multi(g, id_col, ids), bump=1, zmax=19)
-        return
-    cfg = {"censo": (data.get("g_censo"), CENSO_ID, "selected_censo_ids", 0, 18),
-           "od": (data.get("g_od"), OD_ID, "selected_od_ids", 0, 18),
-           "lote": (data.get("g_lote"), LOTE_ID, "selected_lote_ids", 1, 20)}
-    if post_view in cfg:
-        g, id_col, sk, bump, zmax = cfg[post_view]
-        ids = ensure_set_of_str(st.session_state.get(sk, set()))
-        if g is not None and ids and id_col in getattr(g, "columns", []):
-            set_view_to_gdf(subset_by_id_multi(g, id_col, ids), bump=bump, zmax=zmax)
-
-
-def _thematic_enabled():
-    lvl = st.session_state.get("level", "subpref")
-    return lvl in ("isocrona", "quadra") and bool(ensure_set_of_str(st.session_state.get("selected_iso_ids")))
-
-
-def control_panel():
-    ss = st.session_state
-    lvl = ss.get("level", "subpref")
-
-    # --- Navegação (dropdown) ---
-    st.subheader("Navegação", anchor=False)
-    avail = _available_levels()
-    ss["nav_level"] = lvl if lvl in avail else avail[0]
-    st.selectbox("Nível", options=avail, format_func=lambda x: LEVEL_LABELS[x],
-                 key="nav_level", on_change=_on_nav_change)
-    st.button("Reset", type="primary", use_container_width=True,
-              on_click=lambda: (mark_ui_action(), reset_to("subpref")))
-    st.divider()
-
-    st.subheader("Variável", anchor=False)
-    variable_panel()
-    st.divider()
-
-    st.subheader("Ações e seleção", anchor=False)
-    ok_iso = len(ensure_set_of_str(ss.get("selected_iso_ids", set()))) > 0
-    if lvl == "isocrona":
-        st.button("Ajustar às isócronas selecionadas", use_container_width=True, disabled=not ok_iso,
-                  on_click=lambda: (mark_ui_action(), _fit_selected_isos()))
-        st.button("Avançar para Visualização detalhada", type="primary", use_container_width=True,
-                  disabled=not ok_iso,
-                  on_click=lambda: (mark_ui_action(),
-                      ss.__setitem__("post_iso_view", "quadra"),
-                      ss.__setitem__("level", "quadra"),
-                      ss.__setitem__("last_level", None)))
-        st.caption("Selecione uma ou mais isócronas antes de avançar.")
-
-    # Dropdown pós-isócronas — habilitado apenas no ambiente detalhado
-    st.selectbox("Visualização pós-isócronas", options=["quadra", "lote", "censo", "od"],
-                 format_func=lambda x: {"quadra": "Quadras", "lote": "Lotes",
-                     "censo": "Setor censitário", "od": "Zonas OD"}[x],
-                 key="post_iso_view", disabled=(lvl != "quadra"), on_change=mark_ui_action)
-    if lvl == "quadra":
-        st.button("Ajustar ao selecionado", use_container_width=True,
-                  on_click=lambda: (mark_ui_action(), _fit_selected_post_level()))
-
-    # Dropdown de mapas temáticos — habilitado apenas com isócronas selecionadas
-    tem_ok = _thematic_enabled()
-    if not tem_ok:
-        ss["thematic_layer"] = "Nenhum"
-    st.selectbox("Mapa temático", options=["Nenhum"] + list(THEMATIC_LAYERS.keys()),
-                 format_func=lambda k: "Nenhum" if k == "Nenhum" else THEMATIC_LAYERS[k]["title"],
-                 key="thematic_layer", disabled=not tem_ok, on_change=mark_ui_action)
-    if not tem_ok:
-        st.caption("Disponível após selecionar isócronas.")
-    st.divider()
-
-    st.checkbox("Habilitar seleção por caixa/laço", key="selection_draw_mode", on_change=mark_ui_action)
-    st.checkbox("Camadas fixas (metrô, trem, rios, verdes)", key="show_fixed_layers", on_change=mark_ui_action)
-    st.divider()
-
-    # --- Downloads ---
-    st.subheader("Downloads", anchor=False)
-    ev, et = ss.get("_export_view"), ss.get("_export_thematic")
-    st.download_button("CSV — visualização em tela", data=(ev[1] if ev else b""),
-                       file_name=f"{ev[0] if ev else 'visualizacao'}.csv", mime="text/csv",
-                       use_container_width=True, disabled=not ev)
-    st.download_button("CSV — mapa temático", data=(et[1] if et else b""),
-                       file_name=f"{et[0] if et else 'tematico'}.csv", mime="text/csv",
-                       use_container_width=True, disabled=not et)
-    mh = ss.get("_export_map_html")
-    st.download_button("Mapa (HTML interativo)", data=(mh or ""), file_name="planbairros_mapa.html",
-                       mime="text/html", use_container_width=True, disabled=not mh)
-    st.caption("Imagem PNG: use o botão 📷 no canto superior esquerdo do mapa.")
-
-# =============================================================================
-# MAP RENDER
-# =============================================================================
-def render_map_panel():
-    level = st.session_state.get("level", "subpref")
-    ensure_variable_for_level(level)
-    title = ""
-    m = None
-    tem_key = st.session_state.get("thematic_layer", "Nenhum")
-    tem_on = tem_key != "Nenhum" and _thematic_enabled()
-    fo = (lambda x: 0.0) if tem_on else (lambda x: x)
-    st.session_state["_export_view"] = None
-    st.session_state["_export_thematic"] = None
-
-    if level == "subpref":
-        title = "Subprefeituras"
-        g_sub = read_layer("subpref")
-        if g_sub is None or g_sub.empty:
-            st.stop()
-        if SUBPREF_ID not in g_sub.columns:
-            st.error(f"subprefeitura.parquet sem '{SUBPREF_ID}'."); st.stop()
-        if st.session_state.get("last_level") != "subpref":
-            set_view_to_gdf(g_sub, bump=0)
-            st.session_state["last_level"] = "subpref"
-        m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-        ttip = "sp_nome" if "sp_nome" in g_sub.columns else SUBPREF_ID
-        add_polygons_selectable(m, g_sub, "Subprefeituras", SUBPREF_ID, tooltip_col=ttip,
-            selected_ids=set(), fill_opacity=0.06, selected_fill_opacity=0.0, tooltip_prefix="Subpref: ",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"], cache_key=f"subpref:{SIMPLIFY_TOL_BY_LEVEL['subpref']}")
-        if "sp_nome" in g_sub.columns:
-            add_labels_on_map(m, g_sub, "sp_nome", font_size=13)
-        set_export("_export_view", "subprefeituras", g_sub)
-
-    elif level == "distrito":
-        sp = _id_to_str(st.session_state.get("selected_subpref_id"))
-        if sp is None:
-            reset_to("subpref"); return
-        g_dist = read_layer("dist"); g_sub = read_layer("subpref")
-        if g_dist is None or g_sub is None:
-            st.stop()
-        g_parent = subset_by_id(g_sub, SUBPREF_ID, sp)
-        title = f"Distritos ({label_or_id(g_parent, label_col='sp_nome', fallback_col=SUBPREF_ID)})"
-        g_show = subset_by_parent(g_dist, DIST_PARENT, sp)
-        if st.session_state.get("last_level") != "distrito":
-            set_view_to_gdf(g_show if not g_show.empty else g_parent, bump=0)
-            st.session_state["last_level"] = "distrito"
-        m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-        add_parent_fill(m, g_parent, "Subpref selecionada (sombra)",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["subpref"],
-            cache_key=f"parent:subpref:{sp}:{SIMPLIFY_TOL_BY_LEVEL['subpref']}")
-        ttip = "ds_nome" if "ds_nome" in g_show.columns else DIST_ID
-        add_polygons_selectable(m, g_show, "Distritos", DIST_ID, tooltip_col=ttip, selected_ids=set(),
-            fill_opacity=0.06, tooltip_prefix="Distrito: ", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
-            cache_key=f"dist:sp:{sp}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}")
-        if "ds_nome" in g_show.columns:
-            add_labels_on_map(m, g_show, "ds_nome", font_size=12)
-        add_boundary_overlay(m, g_parent, weight=2.0, cache_key=f"bnd:sp:{sp}")
-        set_export("_export_view", "distritos", g_show)
-
-    elif level == "isocrona":
-        d = _id_to_str(st.session_state.get("selected_distrito_id"))
-        if d is None:
-            reset_to("distrito"); return
-        sel_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids", set()))
-        g_iso = read_layer("iso"); g_dist = read_layer("dist")
-        if g_iso is None or g_dist is None:
-            st.stop()
-        g_parent_dist = subset_by_id(g_dist, DIST_ID, d)
-        title = f"Isócronas ({label_or_id(g_parent_dist, label_col='ds_nome', fallback_col=DIST_ID)})"
-        if sel_ids:
-            title += f" — selecionadas: {len(sel_ids)}"
-        if DIST_ID not in g_iso.columns:
-            st.error(f"isocronas sem '{DIST_ID}'. Colunas: {list(g_iso.columns)}"); st.stop()
-        if ISO_ID not in g_iso.columns:
-            st.error(f"isocronas sem '{ISO_ID}'. Colunas: {list(g_iso.columns)}"); st.stop()
-        g_show_iso = subset_by_parent(g_iso, ISO_PARENT, d)
-        if g_show_iso.empty and DIST_ID in g_iso.columns:
-            g_iso2 = g_iso.copy()
-            g_iso2[DIST_ID] = g_iso2[DIST_ID].astype(str).str.strip()
-            g_show_iso = g_iso2[g_iso2[DIST_ID] == str(d).strip()].copy()
-        if st.session_state.get("last_level") != "isocrona":
-            set_view_to_gdf(g_show_iso if not g_show_iso.empty else g_parent_dist, bump=0)
-            st.session_state["last_level"] = "isocrona"
-        m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-        add_parent_fill(m, g_parent_dist, "Distrito selecionado (sombra)",
-            simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
-            cache_key=f"parent:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['distrito']}")
-        g_show_viz = g_show_iso.copy()
-        if ISO_CLASS_COL in g_show_viz.columns:
-            pairs = g_show_viz[ISO_CLASS_COL].map(iso_label_color)
-            safe = [(str(p[0]), str(p[1])) if isinstance(p, (tuple, list)) and len(p) == 2
-                    else ("Sem classe", ISO_DEFAULT_COLOR) for p in pairs.tolist()]
-            labels, colors = zip(*safe) if safe else ([], [])
-            g_show_viz["__iso_label"] = list(labels)
-            g_show_viz["__iso_color"] = list(colors)
-        else:
-            g_show_viz["__iso_label"] = "Sem classe"
-            g_show_viz["__iso_color"] = ISO_DEFAULT_COLOR
-        if st.session_state.get("variable") == "Isócronas (classes)":
-            add_polygons_selectable_colored(m, g_show_viz, "Isócronas", ISO_ID, fill_color_col="__iso_color",
-                selected_ids=sel_ids, tooltip_col=ISO_ID,
-                fill_opacity=fo(ISO_FILL_OPACITY_CLASSES), selected_fill_opacity=0.0, tooltip_prefix="Isócrona: ",
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-                cache_key=f"isoVIZ:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}", default_fill=ISO_DEFAULT_COLOR)
-        else:
-            add_polygons_selectable(m, g_show_iso, "Isócronas", ISO_ID,
-                selected_ids=sel_ids, tooltip_col=ISO_ID,
-                fill_opacity=fo(ISO_FILL_OPACITY_DEFAULT), selected_fill_opacity=0.0, tooltip_prefix="Isócrona: ",
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-                cache_key=f"iso:dist:{d}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}")
-        add_boundary_overlay(m, g_parent_dist, weight=2.0, cache_key=f"bnd:dist:{d}")
-        g_sel = subset_by_id_multi(g_show_viz, ISO_ID, sel_ids) if sel_ids else None
-        set_export("_export_view", "isocronas_selecionadas", g_sel)
-
-    elif level == "quadra":
-        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids"))
-        if not iso_ids:
-            reset_to("isocrona"); return
-        post_view = st.session_state.get("post_iso_view", "quadra")
-        data = build_post_iso_data()
-        g_parent = data.get("g_parent")
-        lbl_map = {"quadra": "Quadras", "lote": "Lotes", "censo": "Setor censitário", "od": "Zonas OD"}
-        title = f"{lbl_map.get(post_view, 'Quadras')} — filtrado pelas isócronas selecionadas"
-        target = g_parent
-        pv_map = {"quadra": data.get("g_quadra"), "lote": data.get("g_lote"),
-                  "censo": data.get("g_censo"), "od": data.get("g_od")}
-        tgt = pv_map.get(post_view)
-        if tgt is not None and not tgt.empty:
-            target = tgt
-        if st.session_state.get("last_level") != "quadra":
-            if target is not None and not getattr(target, "empty", True):
-                set_view_to_gdf(target, bump=0)
-            st.session_state["last_level"] = "quadra"
-        m = make_carto_map(center=st.session_state["view_center"], zoom=st.session_state["view_zoom"])
-        iso_key = "|".join(sorted(list(iso_ids)))
-        if g_parent is not None and not g_parent.empty:
-            add_parent_fill(m, g_parent, "Isócronas selecionadas (sombra)",
-                fill_opacity=fo(PARENT_FILL_OPACITY),
-                simplify_tol=SIMPLIFY_TOL_BY_LEVEL["isocrona"],
-                cache_key=f"parent:iso:{iso_key}:{SIMPLIFY_TOL_BY_LEVEL['isocrona']}")
-
-        view_gdf, sel_key, id_for_sel = tgt, None, None
-        if post_view == "quadra":
-            g_quad = data.get("g_quadra")
-            id_col_map = data.get("quadra_id_col", QUADRA_UID)
-            sel_key, id_for_sel = "selected_quadra_ids", id_col_map
-            if g_quad is not None and not g_quad.empty:
-                g_quad_viz = attach_quadras_csv(g_quad)
-                view_gdf = g_quad_viz
-                if CLUSTER_COL in g_quad_viz.columns:
-                    g_quad_viz["__cluster_code"] = g_quad_viz[CLUSTER_COL].apply(_coerce_int)
-                    g_quad_viz["__cluster_color"] = g_quad_viz["__cluster_code"].apply(cluster_color)
-                if st.session_state.get("variable") == "Cluster" and "__cluster_color" in g_quad_viz.columns:
-                    add_polygons_selectable_colored(m, g_quad_viz, "Quadras", id_col_map,
-                        fill_color_col="__cluster_color",
-                        selected_ids=st.session_state.get("selected_quadra_ids", set()),
-                        tooltip_col=QUADRA_ID if QUADRA_ID in g_quad_viz.columns else id_col_map,
-                        fill_opacity=fo(0.9), selected_fill_opacity=0.0, tooltip_prefix="Quadra: ",
-                        simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
-                        cache_key=f"quad-ovl:{iso_key}", default_fill=CLUSTER_NULL_COLOR)
-                else:
-                    add_polygons_selectable(m, g_quad, "Quadras", id_col_map,
-                        tooltip_col=QUADRA_ID if QUADRA_ID in g_quad.columns else id_col_map,
-                        selected_ids=st.session_state.get("selected_quadra_ids", set()),
-                        fill_color="#ffffff", fill_opacity=fo(0.06), selected_fill_opacity=0.0,
-                        tooltip_prefix="Quadra: ", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["quadra"],
-                        cache_key=f"quadB-ovl:{iso_key}")
-            else:
-                st.warning("Nenhuma quadra encontrada para as isócronas selecionadas.")
-
-        elif post_view == "lote":
-            g_lote = data.get("g_lote")
-            sel_key, id_for_sel = "selected_lote_ids", LOTE_ID
-            if g_lote is not None and not g_lote.empty:
-                add_polygons_selectable(m, g_lote, "Lotes", LOTE_ID,
-                    tooltip_col=LOTE_ID if LOTE_ID in g_lote.columns else ISO_ID,
-                    selected_ids=st.session_state.get("selected_lote_ids", set()),
-                    fill_color="#b7d7a8", fill_opacity=fo(0.18), base_color=PB_BLACK, base_weight=1.0,
-                    selected_fill_opacity=0.0, tooltip_prefix="Lote: ", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["lote"],
-                    cache_key=f"lote:{_id_to_str(st.session_state.get('selected_distrito_id'))}:{iso_key}")
-            else:
-                st.warning("Nenhum lote encontrado para as isócronas selecionadas no distrito atual.")
-
-        elif post_view == "censo":
-            g_censo = data.get("g_censo")
-            sel_key, id_for_sel = "selected_censo_ids", CENSO_ID
-            if g_censo is not None and not g_censo.empty:
-                add_polygons_selectable(m, g_censo, "Setor censitário", CENSO_ID, tooltip_col=CENSO_ID,
-                    selected_ids=st.session_state.get("selected_censo_ids", set()),
-                    fill_color="#7aa6c2", fill_opacity=fo(0.10), selected_fill_opacity=0.0,
-                    tooltip_prefix="Setor: ", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["censo"],
-                    cache_key=f"censo:{iso_key}")
-            else:
-                st.warning("Nenhum setor censitário encontrado para as isócronas selecionadas.")
-
-        elif post_view == "od":
-            g_od = data.get("g_od")
-            sel_key, id_for_sel = "selected_od_ids", OD_ID
-            if g_od is not None and not g_od.empty:
-                add_polygons_selectable(m, g_od, "Zonas OD", OD_ID, tooltip_col=OD_ID,
-                    selected_ids=st.session_state.get("selected_od_ids", set()),
-                    fill_color="#d9b26f", fill_opacity=fo(0.16), base_color=PB_BLACK, base_weight=1.0,
-                    selected_fill_opacity=0.0, tooltip_prefix="Zona OD: ", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["od"],
-                    cache_key=f"od:{iso_key}")
-            else:
-                st.warning("Nenhuma zona OD encontrada para as isócronas selecionadas.")
-
-        # CSV: selecionados (se houver) senão tudo o que está em tela
-        if view_gdf is not None and not view_gdf.empty:
-            sel = ensure_set_of_str(st.session_state.get(sel_key, set())) if sel_key else set()
-            if sel and id_for_sel in view_gdf.columns:
-                view_gdf = subset_by_id_multi(view_gdf, id_for_sel, sel)
-            set_export("_export_view", f"{post_view}_isocronas", view_gdf)
-
-    # --- Mapa temático (abaixo dos limites) ---
-    if m is not None and tem_on:
-        iso_ids = ensure_set_of_str(st.session_state.get("selected_iso_ids"))
-        g_iso = read_layer("iso")
-        g_iso_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
-        gt = read_thematic(tem_key)
-        if gt is not None:
-            gf = filter_thematic(tem_key, gt, iso_ids, g_iso_sel)
-            gc, legend = classify_thematic(tem_key, gf) if gf is not None and not gf.empty else (gf, [])
-            add_thematic_to_map(m, tem_key, gc, legend)
-            title += f" | {THEMATIC_LAYERS[tem_key]['title']}"
-            set_export("_export_thematic", f"{tem_key}_isocronas", gc)
-        if g_iso_sel is not None and not g_iso_sel.empty:
-            add_boundary_overlay(m, g_iso_sel, weight=2.0, cache_key=f"bnd:iso:{'|'.join(sorted(iso_ids))}")
-
-    # camadas fixas + draw + print
-    if m is not None:
-        add_fixed_layers(m)
-        if st.session_state.get("selection_draw_mode", False):
-            add_draw_tools(m)
-        add_print_button(m)
-
-    st.markdown(f"### {title}")
-    if st_folium is None:
-        st.error("Falha ao importar `streamlit_folium`."); return
-    _ = st_folium(m, height=780, use_container_width=True, key=MAP_KEY,
-        returned_objects=["last_clicked", "last_object_clicked", "last_object_clicked_tooltip",
-                          "all_drawings", "last_active_drawing"])
-    try:
-        st.session_state["_export_map_html"] = m.get_root().render()
-    except Exception:
-        st.session_state["_export_map_html"] = None
-    st.session_state["_map_level_rendered"] = level
-
-# =============================================================================
-# APP
-# =============================================================================
-def main():
-    init_state()
-    inject_css()
-    render_header()
-    if gpd is None or folium is None or st_folium is None:
-        st.error("Este app requer `geopandas`, `folium` e `streamlit-folium`."); return
-
-    ui_sig = int(st.session_state.get("_ui_action_sig", 0))
-    ui_seen = int(st.session_state.get("_ui_action_sig_seen", 0))
-    ui_action = ui_sig != ui_seen
-    st.session_state["_ui_action_sig_seen"] = ui_sig
-    if ui_action:
-        st.session_state["last_click_sig"] = ""
-        st.session_state["last_draw_sig"] = ""
-
-    cur_level = st.session_state.get("level", "subpref")
-    rendered_level = st.session_state.get("_map_level_rendered")
-    map_state_prev = st.session_state.get(MAP_KEY, {}) or {}
-    allow_click = (not ui_action) and (rendered_level == cur_level)
-
-    if allow_click and isinstance(map_state_prev, dict) and map_state_prev:
-        consume_map_event(cur_level, map_state_prev, allow_click=True)
-        consume_draw_selection(cur_level, map_state_prev)
-
-    sanitize_level_state()
-
-    left, right = st.columns([4, 1], gap="large")
-    with left:
-        st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
-        render_map_panel()
-        st.markdown("</div>", unsafe_allow_html=True)
-    with right:
-        st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
-        control_panel()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-
-if __name__ == "__main__":
-    main()
+        st.caption("CSV disponível na visualização detalhada (com isócronas selecionadas).")
+    st.caption("Imagem: use o botão 🖨️ no canto superior esquerdo do mapa.")
