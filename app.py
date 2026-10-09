@@ -35,7 +35,7 @@ st.set_page_config(page_title="PlanBairros", page_icon="🏙️",
 
 PB_NAVY = "#14407D"
 PB_BROWN = "#C65534"
-PB_BTN = "#1C6880"
+PB_BTN = "#14407D"
 PB_BLACK = "#000000"
 
 # Fundo SEM API key (Esri Light Gray) + rótulos opcionais
@@ -61,8 +61,8 @@ ISO_FILL_OPACITY_DEFAULT = 0.05
 ISO_FILL_OPACITY_CLASSES = 0.05
 
 FIXED_LAYER_STYLE = {
-    "area_verde":   {"file": "area_verde.geojson",  "color": "#556B2F", "weight": 0,   "fill": True,  "fill_opacity": 0.55, "name": "Áreas verdes"},
-    "rios":         {"file": "rios.geojson",         "color": "#0047AB", "weight": 2.0, "fill": True,  "fill_opacity": 0.35, "name": "Rios"},
+    "area_verde":   {"file": "area_verde.geojson",  "color": "#B1BF7C", "weight": 0,   "fill": True,  "fill_opacity": 0.55, "name": "Áreas verdes"},
+    "rios":         {"file": "rios.geojson",         "color": "#14407D", "weight": 2.0, "fill": True,  "fill_opacity": 0.35, "name": "Rios"},
     "linhas_metro": {"file": "linhas metro.geojson", "color": "#000000", "weight": 2.8, "fill": False, "fill_opacity": 0.0,  "name": "Metrô"},
     "linhas_trem":  {"file": "linhas trem.geojson",  "color": "#000000", "weight": 2.2, "fill": False, "fill_opacity": 0.0,  "name": "Trem", "dash": "6 4"},
 }
@@ -113,41 +113,42 @@ LCZ_LABELS = {
     105: "Rocha ou pavimento", 106: "Solo exposto", 107: "Água",
 }
 LCZ_COLORS_BY_CODE = {
-    1: "#8B0000", 2: "#D10000", 3: "#FF0000", 4: "#BF4D00", 5: "#FF6600", 6: "#FFA366",
-    7: "#FAEE05", 8: "#B3B3B3", 9: "#FFCCAA", 10: "#555555", 101: "#006A00",
-    102: "#00AA00", 103: "#648526", 104: "#B9DB79", 105: "#000000", 106: "#FBF7AE", 107: "#6A6AFF",
+    1: "#7f3b08", 2: "#b35807", 3: "#e08215", 4: "#542688", 5: "#8073ac", 6: "#b2abd2",
+    7: "#b2182b", 8: "#d8daeb", 9: "#fddbc7", 10: "#c65534", 101: "#6ea097",
+    102: "#b2be7b", 103: "#F4DD63", 104: "#fee0b6", 105: "#f7f7f7", 106: "#f4a582", 107: "#14407D",
 }
 DENS_BINS = [(2000, "0 – 2.000 hab/hec"), (4000, "2.001 – 4.000 hab/hec"),
              (6000, "4.001 – 6.000 hab/hec"), (8000, "6.001 – 8.000 hab/hec"),
              (10000, "8.001 – 10.000 hab/hec"), (float("inf"), "> 10.000 hab/hec")]
-DENS_COLORS = ["#ffffb2", "#fed976", "#feb24c", "#fd8d3c", "#f03b20", "#bd0026"]
+# Escala monocromática de vermelhos
+DENS_COLORS = ["#fddbc7", "#f4a582", "#d6604d", "#c65534", "#b2182b", "#67001f"]
 
 THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
     "apa": {"title": "APA", "file": "apa.parquet", "label": "NOME_CAPS", "kind": "auto"},
     "bacia": {"title": "Bacias hidrográficas", "file": "bacia.parquet",
               "label": "nm_bacia_hidrografica_principal", "kind": "auto"},
-    "praca": {"title": "Praças", "file": "praca.parquet", "label": "nome", "kind": "single", "color": "#2e8b57"},
+    "praca": {"title": "Praças", "file": "praca.parquet", "label": "nome", "kind": "single", "color": "#6FA097"},
     "corredor_verde": {"title": "Corredores verdes", "file": "corredor_verde.parquet",
                        "label": "tx_proposta_planpavel", "kind": "class",
                        "class_col": "tx_proposta_corredor_planpavel", "fn": "corredor", "weight": 3,
-                       "colors": {"Corredor verde": "#2ca25f", "Corredor polinizador": "#e6a100"}},
+                       "colors": {"Corredor verde": "#6FA097", "Corredor polinizador": "#F4DD63"}},
     "favela": {"title": "Favelas", "file": "favela.parquet", "label": "nome", "kind": "class",
                "class_col": "propriedade_area", "fn": "favela",
-               "colors": {"Sem informação": "#bdbdbd", "Pública": "#3182bd",
-                          "Particular": "#e6550d", "Pública/particular": "#756bb1"}},
+               "colors": {"Sem informação": "#d8daeb", "Pública": "#8073ac",
+                          "Particular": "#e08215", "Pública/particular": "#542688"}},
     "declividade": {"title": "Declividade", "file": "Declividade.parquet", "label": "classe",
                     "kind": "class", "class_col": "classe", "fn": "decliv", "tt_leg": True,
-                    "colors": {"1 - 0 a 5%": "#1a9850", "2 - 5 a 25%": "#fee08b",
-                               "3 - 25 a 60%": "#fc8d59", "4 - acima de 60%": "#d73027"}},
+                    "colors": {"1 - 0 a 5%": "#fee0b6", "2 - 5 a 25%": "#fdb863",
+                               "3 - 25 a 60%": "#b35807", "4 - acima de 60%": "#7f3b08"}},
     "risco_geologico": {"title": "Risco geológico", "file": "risco_geologico.parquet",
                         "label": "rg_process", "kind": "class", "class_col": "rg_process", "fn": "risco",
-                        "colors": {"R1": "#fee5d9", "R2": "#fcae91", "R3": "#fb6a4a", "R4": "#cb181d",
-                                   "Área em monitoramento": "#6baed6", "Área encerrada": "#969696"}},
-    "arvores": {"title": "Árvores", "file": "arvores.parquet", "label": None, "kind": "points", "color": "#1b7a1b"},
+                        "colors": {"R1": "#fddbc7", "R2": "#f4a582", "R3": "#c65534", "R4": "#b2182b",
+                                   "Área em monitoramento": "#b2abd2", "Área encerrada": "#d8daeb"}},
+    "arvores": {"title": "Árvores", "file": "arvores.parquet", "label": None, "kind": "points", "color": "#6FA097"},
     "vias": {"title": "Vias", "file": "vias.parquet", "label": "cvc_classe", "kind": "class",
              "class_col": "cvc_classe", "fn": "vias", "weight": 4, "tt_leg": True,
-             "colors": {"Local": "#1f5fd1", "Coletora": "#f2c500", "Arterial": "#e31a1c",
-                        "Via de trânsito rápido": "#808080", "Via de pedestres": "#ff8c00"}},
+             "colors": {"Local": "#d8daeb", "Coletora": "#F4DD63", "Arterial": "#C65534",
+                        "Via de trânsito rápido": "#542688", "Via de pedestres": "#6FA097"}},
     "densidade": {"title": "Densidade demográfica", "file": "densidade_demografica.parquet",
                   "label": "hab_hec", "kind": "class", "class_col": "hab_hec", "fn": "dens",
                   "colors": dict(zip([b[1] for b in DENS_BINS], DENS_COLORS))},
@@ -155,9 +156,26 @@ THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
             "class_col": "DN", "fn": "lcz", "tt_leg": True,
             "colors": {LCZ_LABELS[k]: LCZ_COLORS_BY_CODE[k] for k in LCZ_LABELS}},
 }
-PALETTE_AUTO = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02",
-                "#a6761d", "#666666", "#1f78b4", "#b2df8a", "#fb9a99", "#cab2d6"]
+PALETTE_AUTO = ["#6FA097", "#D58243", "#8073ac", "#F4DD63", "#14407D", "#B1BF7C",
+                "#C65534", "#542688", "#fdb863", "#b2abd2", "#7f3b08", "#f4a582"]
 MAX_POINTS = 8000
+STATION_RADIUS = 2.5
+
+# =============================================================================
+# TABELAS EXTERNAS (OD 2023 / IPTU 2026)
+# =============================================================================
+OD23_URL = "https://drive.google.com/file/d/1jkgABlxJY4tTpD1CXB8h968hxSQFQqMG/view?usp=drive_link"
+IPTU_URL = "https://drive.google.com/file/d/1mTY_Y1uCAQ2GeZ1o8Kf9pZrqTn9v_sKE/view?usp=drive_link"
+# src: (nomes locais, secret, url, nome no cache, candidatos à coluna-chave, coluna da camada)
+EXT_TABLES = {
+    "od": (["od_23.parquet", "od_23.csv", "od_23.xlsx", "od_23"], "PB_OD23_FILE", OD23_URL,
+           "od_23.dat", ["Zona_D", "zona_d", "zonad", "zona_destino"], "od_id"),
+    "iptu": (["dashiptu_2026.csv"], "PB_IPTU_FILE", IPTU_URL, "dashiptu_2026.csv",
+             ["Lote_id", "lote_id", "id_lote", "lote", "sql"], "lote_id"),
+}
+ID_LIKE_RE = re.compile(r"(^|_)(zona|id|cod|codigo|sql|setor|lote|quadra|cd)(_|$)", re.I)
+# Escala monocromática de marrons (intensidade OD / IPTU)
+CHORO_COLORS = ["#fee0b6", "#fdb863", "#e08215", "#b35807", "#7f3b08"]
 
 # =============================================================================
 # VISUALIZAÇÕES / CSV
@@ -168,11 +186,14 @@ QUADRAS_CSV_FALLBACK_URL = "https://drive.google.com/file/d/1_WKryQlu_jZL1xsgAmQ
 
 CLUSTER_COL = "Cluster"
 ISO_CLASS_COL = "nova_class"
-CLUSTER_COLOR_MAP = {0: "#bf7db2", 1: "#f7bd6a", 2: "#cf651f", 3: "#cf651f", 4: "#793393"}
+CLUSTER_COLOR_MAP = {0: "#C65534", 1: "#F4DD63", 2: "#D58243", 3: "#6FA097", 4: "#14407D"}
+CLUSTER_LABELS = {0: "Tipo 1 — Periféricas de alta densidade", 1: "Tipo 2 — Mistas de densidade intermediária",
+                  2: "Tipo 3 — Periféricas de média densidade", 3: "Tipo 4 — Centrais verticalizadas e mistas",
+                  4: "Tipo 5 — Predominância de comércio e serviços"}
 CLUSTER_NULL_COLOR = "#c8c8c8"
 ISO_TRANSITION_SET = {1, 3, 6}
 ISO_TRANSITION_LABEL = "Área de transição"
-ISO_TRANSITION_COLOR = "#7f6a5c"
+ISO_TRANSITION_COLOR = "#fdb863"
 ISO_VALUE_TO_CLASSNUM = {0: 1, 2: 2, 4: 3, 5: 4, 7: 5, 8: 6, 9: 7}
 ISO_CLASSNUM_TO_COLOR = {1: "#f7f7f7", 2: "#d8daeb", 3: "#8073ac", 4: "#b2abd2",
                          5: "#b35806", 6: "#e08214", 7: "#542788"}
@@ -1044,6 +1065,156 @@ def attach_quadras_csv(g_quad):
     return g_quad
 
 
+# =============================================================================
+# TABELAS EXTERNAS — leitura / agregação / vínculo
+# =============================================================================
+def _norm_key(v):
+    s = _id_to_str(v)
+    if s is None:
+        return None
+    t = re.sub(r"[\s.\-/]", "", s)
+    if not t:
+        return None
+    return (t.lstrip("0") or "0") if t.isdigit() else t.upper()
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=8)
+def _read_table(path, mtime=0.0):
+    p = Path(path)
+    with open(p, "rb") as f:
+        head = f.read(4096)
+    if head[:4] == b"PAR1":
+        df = pd.read_parquet(p)
+        return df.drop(columns=[c for c in df.columns if str(c).lower() == "geometry"])
+    if head[:2] == b"PK":
+        return pd.read_excel(p, dtype=str)
+    first = head.decode("utf-8", "ignore").splitlines()[0] if head else ""
+    sep = max([";", ",", "\t", "|"], key=first.count)
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            return pd.read_csv(p, sep=sep, dtype=str, encoding=enc, low_memory=False)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+def _to_numeric_cols(df, skip):
+    out = df.copy()
+    for c in out.columns:
+        if c in skip or ID_LIKE_RE.search(str(c)) or pd.api.types.is_numeric_dtype(out[c]):
+            continue
+        s = out[c].astype("string").str.strip()
+        if s.str.contains(",", regex=False).any():
+            s = s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+        n = pd.to_numeric(s, errors="coerce")
+        nn = out[c].notna().sum()
+        if nn and n.notna().sum() >= 0.9 * nn:
+            out[c] = n
+    return out
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=4)
+def _load_joined_table(path, mtime, key_cands):
+    df = _read_table(path, mtime)
+    if df is None or df.empty:
+        return None, None, [], []
+    cols_all = [str(c) for c in df.columns]
+    low = {_norm_txt(c).replace(" ", "_"): c for c in df.columns}
+    key = next((low[_norm_txt(k)] for k in key_cands if _norm_txt(k) in low), None)
+    if key is None:
+        return None, None, [], cols_all
+    df = _to_numeric_cols(df, {key})
+    df["__k"] = df[key].map(_norm_key)
+    df = df[df["__k"].notna()]
+    num = [c for c in df.columns if c not in (key, "__k") and pd.api.types.is_numeric_dtype(df[c])
+           and not ID_LIKE_RE.search(str(c))]
+    grp = df.groupby("__k")
+    agg = grp[num].sum(min_count=1) if num else pd.DataFrame(index=grp.size().index)
+    agg.insert(0, "n_registros", grp.size())
+    txt = [c for c in df.columns if c not in num and c != "__k"]
+    if txt:
+        agg = agg.join(grp[txt].first())
+    return agg.reset_index(), key, [str(c) for c in num], cols_all
+
+
+def load_ext_table(src):
+    names, sk, url, dst, cands, _ = EXT_TABLES[src]
+    p = None
+    for n in names:
+        p = _find_local_file(n)
+        if p is not None:
+            break
+    if p is None:
+        raw = _get_secret(sk) or url
+        try:
+            p = download_drive_file(raw, DATA_CACHE_DIR / dst, label=dst)
+        except Exception as e:
+            st.session_state[f"_diag_{src}"] = {"erro": f"Falha ao baixar: {e}"}
+            return None, None, [], [], None
+    agg, key, num, cols = _load_joined_table(str(p), _meta(p)[1], tuple(cands))
+    return agg, key, num, cols, p
+
+
+def ext_variables(src):
+    agg, _k, num, _c, _p = load_ext_table(src)
+    return (["n_registros"] + num) if agg is not None else []
+
+
+def attach_table(g, id_col, src):
+    if g is None or g.empty or id_col not in g.columns:
+        return g
+    agg, key, _num, cols, p = load_ext_table(src)
+    if agg is None:
+        if p is not None:
+            st.session_state[f"_diag_{src}"] = {
+                "arquivo": p.name, "erro": f"coluna-chave {EXT_TABLES[src][4][0]!r} não encontrada",
+                "colunas_no_arquivo": cols[:80]}
+        return g
+    g2 = g.copy()
+    g2["__k"] = g2[id_col].map(_norm_key)
+    out = g2.merge(agg, on="__k", how="left", suffixes=("", f"_{src}"))
+    miss = out[out["n_registros"].isna()]
+    st.session_state[f"_diag_{src}"] = {
+        "arquivo": p.name, "coluna_chave_tabela": key, "coluna_chave_camada": id_col,
+        "feicoes_na_tela": int(len(out)), "feicoes_vinculadas": int(out["n_registros"].notna().sum()),
+        "chaves_na_tabela": int(len(agg)),
+        "ex_ids_camada_sem_vinculo": miss[id_col].head(5).tolist(),
+        "ex_chaves_tabela_normalizadas": agg["__k"].head(5).tolist(),
+        "colunas_no_arquivo": cols[:80]}
+    return out.drop(columns="__k")
+
+
+def _fmt_num(x):
+    try:
+        if pd.isna(x):
+            return "—"
+        return f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return str(x)
+
+
+def add_choropleth(m, gdf, id_col, val_col, name, prefix, selected_ids, cache_key, opacity=0.75):
+    g = gdf.copy()
+    v = pd.to_numeric(g[val_col], errors="coerce")
+    vv = v.dropna()
+    if vv.empty:
+        st.info(f"Sem valores para '{val_col}' nas feições exibidas."); return False
+    edges = sorted(set(vv.quantile([0, .2, .4, .6, .8, 1]).tolist()))
+    if len(edges) < 2:
+        edges = [float(vv.min()), float(vv.max()) + 1e-9]
+    k = len(edges) - 1
+    cols = CHORO_COLORS[-k:]
+    idx = pd.cut(v, bins=edges, labels=False, include_lowest=True)
+    g["__ch_color"] = [cols[int(i)] if pd.notna(i) else CLUSTER_NULL_COLOR for i in idx]
+    g["__ch_tt"] = [f"{_id_to_str(a)} — {val_col}: {_fmt_num(b)}" for a, b in zip(g[id_col], v)]
+    add_polygons_selectable_colored(m, g, name, id_col, "__ch_color", selected_ids=selected_ids,
+        tooltip_col="__ch_tt", fill_opacity=opacity, selected_fill_opacity=0.0,
+        tooltip_prefix=prefix, cache_key=cache_key, default_fill=CLUSTER_NULL_COLOR)
+    add_legend(m, val_col, [(f"{_fmt_num(edges[i])} – {_fmt_num(edges[i + 1])}", cols[i])
+                            for i in range(k)] + [("Sem dado", CLUSTER_NULL_COLOR)])
+    return True
+
+
 def cluster_color(code):
     return CLUSTER_NULL_COLOR if code is None else CLUSTER_COLOR_MAP.get(code, CLUSTER_NULL_COLOR)
 
@@ -1422,13 +1593,21 @@ def add_fixed_layers(m):
         if not geojson:
             continue
         fg = folium.FeatureGroup(name=s["name"], show=True)
+
+        def _fx_style(feat, c=s["color"], w=s["weight"], f=s["fill"], o=s["fill_opacity"], d=s.get("dash")):
+            gtype = ((feat or {}).get("geometry") or {}).get("type", "")
+            if "Point" in gtype:
+                return {"color": c, "weight": 1.0, "opacity": 0.9, "fill": True,
+                        "fillColor": "#ffffff", "fillOpacity": 1.0, "radius": STATION_RADIUS}
+            return {"color": c, "weight": w, "opacity": 1.0, "dashArray": d,
+                    "lineCap": LINE_CAP, "lineJoin": LINE_JOIN,
+                    "fill": f, "fillColor": c, "fillOpacity": o if f else 0.0}
+
         folium.GeoJson(
             data=geojson, pane="fixed_layers", smooth_factor=SMOOTH_FACTOR,
-            style_function=(lambda _f, c=s["color"], w=s["weight"], f=s["fill"],
-                            o=s["fill_opacity"], d=s.get("dash"): {
-                "color": c, "weight": w, "opacity": 1.0, "dashArray": d,
-                "lineCap": LINE_CAP, "lineJoin": LINE_JOIN,
-                "fill": f, "fillColor": c, "fillOpacity": o if f else 0.0}),
+            marker=folium.CircleMarker(radius=STATION_RADIUS, weight=1, fill=True,
+                                       fill_color="#ffffff", fill_opacity=1.0),
+            style_function=_fx_style,
         ).add_to(fg)
         fg.add_to(m)
 
@@ -1648,10 +1827,13 @@ def build_post_iso_data():
     g_censo = read_layer("censo")
     if g_censo is not None:
         out["g_censo"] = get_censo_subset_for_isos(g_censo, iso_ids)
+    post_view_now = st.session_state.get("post_iso_view", "quadra")
     g_od = read_layer("od")
     if g_od is not None:
         if ISO_ID in g_od.columns:
             out["g_od"] = subset_by_parent_multi(g_od, ISO_ID, iso_ids)
+            if post_view_now == "od":
+                out["g_od"] = attach_table(out["g_od"], OD_ID, "od")
         else:
             st.warning(f"ZonasOD sem '{ISO_ID}'. Colunas: {list(g_od.columns)}")
     post_view = st.session_state.get("post_iso_view", "quadra")
@@ -1667,7 +1849,7 @@ def build_post_iso_data():
         g_lote = read_lotes_by_distrito(distrito_id)
         if g_lote is not None:
             if ISO_ID in g_lote.columns:
-                out["g_lote"] = get_lotes_subset_for_isos(g_lote, iso_ids)
+                out["g_lote"] = attach_table(get_lotes_subset_for_isos(g_lote, iso_ids), LOTE_ID, "iptu")
             else:
                 st.warning(f"Lotes do distrito '{distrito_id}' sem '{ISO_ID}'.")
     return out
@@ -1849,6 +2031,7 @@ def control_panel():
     ss = st.session_state
     lvl = ss.get("level", "subpref")
 
+    render_info_buttons(lvl)
     st.subheader("Navegação", anchor=False)
     avail = _available_levels()
     ss["nav_level"] = lvl if lvl in avail else avail[0]
@@ -1876,6 +2059,14 @@ def control_panel():
                  format_func=lambda x: {"quadra": "Quadras", "lote": "Lotes",
                                         "censo": "Setor censitário", "od": "Zonas OD"}[x],
                  key="post_iso_view", disabled=(lvl != "quadra"), on_change=mark_ui_action)
+    pv = ss.get("post_iso_view", "quadra")
+    if lvl == "quadra" and pv in ("od", "lote"):
+        src = "od" if pv == "od" else "iptu"
+        opts = ["(nenhuma)"] + ext_variables(src)
+        if ss.get(f"var_{src}") not in opts:
+            ss[f"var_{src}"] = opts[0]
+        st.selectbox("Variável OD (soma por Zona_D)" if src == "od" else "Variável IPTU (por lote)",
+                     options=opts, key=f"var_{src}", on_change=mark_ui_action)
     if lvl == "quadra":
         st.button("Ajustar ao selecionado", use_container_width=True,
                   on_click=lambda: (mark_ui_action(), _fit_selected_post_level()))
@@ -2046,7 +2237,7 @@ def render_map_panel():
                         fill_opacity=fo(0.9), selected_fill_opacity=0.0, tooltip_prefix="Quadra: ",
                         cache_key=f"quad-cl:{iso_key}:{fo(1)}", default_fill=CLUSTER_NULL_COLOR)
                     if not tem_on:
-                        add_legend(m, "Cluster", [(f"Cluster {k}", v) for k, v in CLUSTER_COLOR_MAP.items()]
+                        add_legend(m, "Tipos de áreas urbanas", [(CLUSTER_LABELS[k], v) for k, v in CLUSTER_COLOR_MAP.items()]
                                    + [("Sem dado", CLUSTER_NULL_COLOR)])
                 else:
                     add_polygons_selectable(m, g_quad, "Quadras", id_col_map, tooltip_col=ttip,
@@ -2062,7 +2253,16 @@ def render_map_panel():
             name, fill, op, prefix, tol_k = styles[post_view]
             g_show, id_col, sel_key = _post_cfg(data)[post_view]
             id_for_sel = id_col
-            if g_show is not None and not g_show.empty:
+            src = {"od": "od", "lote": "iptu"}.get(post_view)
+            var = ss.get(f"var_{src}") if src else None
+            ck_base = f"{post_view}:{_id_to_str(ss.get('selected_distrito_id'))}:{iso_key}:{fo(1)}"
+            drawn = False
+            if g_show is not None and not g_show.empty and var and var != "(nenhuma)" and var in g_show.columns:
+                drawn = add_choropleth(m, g_show, id_col, var, name, prefix, ss.get(sel_key),
+                                       cache_key=f"{ck_base}:ch:{var}", opacity=fo(0.75))
+            if drawn:
+                pass
+            elif g_show is not None and not g_show.empty:
                 add_polygons_selectable(m, g_show, name, id_col, tooltip_col=id_col,
                     selected_ids=ss.get(sel_key), fill_color=fill, fill_opacity=fo(op),
                     selected_fill_opacity=0.0, tooltip_prefix=prefix,
@@ -2104,6 +2304,18 @@ def render_map_panel():
     st_folium(m, height=780, use_container_width=True, key=MAP_KEY,
               returned_objects=["last_clicked", "last_object_clicked", "last_object_clicked_tooltip",
                                 "all_drawings", "last_active_drawing"])
+    if level == "quadra" and ss.get("post_iso_view") in ("od", "lote"):
+        src = "od" if ss.get("post_iso_view") == "od" else "iptu"
+        diag = ss.get(f"_diag_{src}")
+        with st.expander("Diagnóstico de vínculos", expanded=False):
+            if not diag:
+                st.caption("Sem diagnóstico ainda.")
+            else:
+                if "erro" in diag:
+                    st.error(diag["erro"])
+                elif diag.get("feicoes_vinculadas", 0) == 0:
+                    st.warning("Nenhuma feição vinculada — verifique a grafia/formato das chaves abaixo.")
+                st.json(diag)
     try:
         ss["_export_map_html"] = m.get_root().render()
     except Exception:
@@ -2113,6 +2325,192 @@ def render_map_panel():
 # =============================================================================
 # APP
 # =============================================================================
+# =============================================================================
+# TEXTOS
+# =============================================================================
+FAPESP = ("**Apoio FAPESP:** Processos nº 2023/10015-7, 2021/04751-7, 2024/07947-8, 2024/08609-9, "
+          "2024/16700-6, 2024/19977-9, 2025/11843-6 e 2026/09424-8.")
+
+TXT_WELCOME = f"""
+Bem-vindo ao **Painel Interativo de Dados de apoio à elaboração de Planos de Bairro**, ferramenta integrante do Projeto PlanBairros.
+
+O PlanBairros foi desenvolvido na Escola Politécnica da Universidade de São Paulo (EPUSP), em parceria com a Faculdade de Arquitetura e Urbanismo da Universidade de São Paulo (FAUUSP), em cooperação técnica com a Secretaria Municipal de Urbanismo e Licenciamento (SMUL) e com apoio da Fundação de Amparo à Pesquisa do Estado de São Paulo (FAPESP).
+
+Um dos principais resultados do projeto é o Guia para Elaboração de Planos de Bairro no Município de São Paulo, que apresenta conceitos, métodos e orientações para apoiar a elaboração desses planos.
+
+Este painel complementa o Guia, oferecendo dados e informações territorializadas para apoiar diferentes etapas do processo, como a definição da área de abrangência, a leitura do território e seu monitoramento. Por meio de mapas, gráficos e tabelas interativos, é possível explorar diferentes aspectos do território e compreender como eles se distribuem na escala local.
+
+As informações apresentadas constituem uma base de apoio à elaboração dos Planos de Bairro e devem ser complementadas pela análise técnica, pelo trabalho de campo e pela participação social.
+
+{FAPESP}
+"""
+
+TXT_SOBRE = f"""
+## Sobre o projeto PlanBairros
+
+O projeto PlanBairros, intitulado “Elaboração de instrumento para apoio e fomento ao desenvolvimento de planos de bairro no município de São Paulo”, teve como objetivo principal desenvolver um referencial conceitual e metodológico para apoiar a elaboração de Planos de Bairro no município de São Paulo. Os Planos de Bairro são instrumentos previstos no Plano Diretor Estratégico de São Paulo (PDE), com potencial para aproximar o planejamento urbano das questões e demandas da escala local.
+
+Financiado pela Fundação de Amparo à Pesquisa do Estado de São Paulo (FAPESP), no âmbito do Programa de Pesquisa em Políticas Públicas (PPP), o projeto é sediado na Escola Politécnica da Universidade de São Paulo (EPUSP), desenvolvido em parceria com a Faculdade de Arquitetura e Urbanismo da Universidade de São Paulo (FAUUSP) e em cooperação técnica com a Secretaria Municipal de Urbanismo e Licenciamento (SMUL) da Prefeitura de São Paulo.
+
+A elaboração de Planos de Bairro em São Paulo é discutida desde a década de 1960. O Plano Diretor Estratégico de 2014, revisado em 2023, prevê que a Prefeitura coordene e fomente sua elaboração. Entretanto, ainda não havia um referencial conceitual e metodológico específico que orientasse esse processo. É a partir dessa lacuna que se desenvolve o PlanBairros.
+
+Um dos principais resultados do projeto é o Guia para Elaboração de Planos de Bairro no Município de São Paulo, concebido como referencial para apoiar o desenvolvimento, a implementação e o monitoramento desses planos. Sua elaboração foi fundamentada em estudos bibliográficos, históricos, institucionais, regulatórios e normativos, bem como no levantamento e na sistematização de dados abertos e de informações disponibilizadas pela Prefeitura de São Paulo. Também foram coletados dados primários em áreas de estudo e realizadas atividades participativas com gestores públicos, especialistas e população.
+
+Como suporte à aplicação do Guia, o PlanBairros desenvolveu este Painel Interativo de Dados, que reúne e organiza variáveis relacionadas ao planejamento na escala de bairro. A ferramenta permite consultar e visualizar informações territoriais por meio de mapas, gráficos e tabelas, apoiando as atividades de leitura, análise e comunicação que integram a elaboração de um Plano de Bairro.
+
+Os dados podem ser explorados em diferentes recortes territoriais, como setores censitários, quadras e lotes, conforme a escala em que cada informação está disponível. O painel reúne informações relacionadas, entre outros temas, à mobilidade e acessibilidade, equipamentos sociais, verde e meio ambiente, infraestrutura urbana e uso e ocupação do solo.
+
+A ferramenta constitui uma base inicial para a leitura do território, auxiliando na identificação de características, padrões e questões que precisam ser aprofundadas. Essa leitura deve ser complementada pela análise técnica, pelo trabalho de campo e pela participação social ao longo do processo de elaboração do Plano de Bairro.
+
+{FAPESP}
+"""
+
+TXT_USO = """
+## Como utilizar o Painel Interativo de Dados
+
+O uso do Painel Interativo de Dados acontece em dois momentos: primeiro, define-se uma área de abrangência para o Plano de Bairro; depois, selecionam-se os temas e dados que se deseja visualizar para conhecer e analisar o território.
+
+### Defina a área de abrangência
+
+1. Comece selecionando no mapa a Subprefeitura e, em seguida, o Distrito onde está localizado o bairro ou território de interesse. A partir dessa seleção, o painel apresentará uma tela específica para a definição da área de abrangência.
+2. Nessa tela, você encontrará polígonos territoriais previamente definidos, que servem como referência inicial para a construção do recorte do Plano de Bairro.
+   Os polígonos principais representam áreas caminháveis calculadas a partir de pontos de referência, considerando simultaneamente limites de 10 minutos de caminhada e 800 metros de distância pela rede. Sua configuração incorpora características da rede de circulação, da topografia e a presença de barreiras urbanas, podendo, por isso, apresentar diferentes formas e extensões no território.
+3. Além dos polígonos principais, o mapa apresenta áreas de transição, de menor dimensão. Elas permitem realizar ajustes mais detalhados no recorte, incorporando trechos que façam parte da dinâmica cotidiana do bairro, mesmo quando não estão integralmente incluídos nos polígonos principais.
+4. A seleção é feita diretamente no mapa. Escolha os polígonos principais que correspondem ao território de interesse e, quando necessário, acrescente áreas de transição. É possível combinar diferentes polígonos até chegar a uma área que se aproxime do bairro que se pretende analisar.
+5. A área de abrangência resulta da combinação das áreas selecionadas e passa a constituir a referência territorial para a consulta e a visualização dos dados no painel.
+6. Esse recorte não deve ser entendido como um limite definitivo do bairro. Ele constitui uma primeira aproximação técnica, que deverá ser discutida e ajustada ao longo da elaboração do Plano de Bairro, considerando também o conhecimento, as práticas cotidianas e a percepção da população sobre o território.
+
+### Escolha e explore os dados
+
+Com a área de abrangência definida, selecione os temas e variáveis que deseja visualizar. O painel reúne informações sobre diferentes aspectos do bairro, que podem ser consultadas por meio de mapas, gráficos e tabelas.
+
+Os dados são apresentados de acordo com a escala territorial disponível para cada informação, podendo incluir lotes, quadras, setores censitários, zonas OD e outros recortes territoriais. Dessa forma, é possível observar diferenças dentro da própria área de abrangência, identificar padrões e reconhecer questões que precisam ser aprofundadas.
+
+Essa primeira leitura também permite identificar informações que não estão disponíveis no painel ou que necessitam de maior detalhamento, orientando levantamentos complementares por meio de trabalho de campo e processos participativos.
+
+Os resultados podem ser registrados por meio de imagens e exportados em PDF, facilitando sua utilização em reuniões, atividades participativas, análises e relatórios.
+
+As informações disponíveis no painel constituem uma base inicial para a leitura do território e devem ser interpretadas em conjunto com a análise técnica, o trabalho de campo e o conhecimento da população, incorporado por meio dos processos participativos.
+"""
+
+TXT_ISO = """
+### Entenda como as áreas de referência foram definidas
+
+As áreas de abrangência apresentadas no painel foram desenvolvidas por meio de um método de análise geoespacial baseado em redes, concebido para representar áreas acessíveis a pé e apoiar a delimitação de unidades territoriais na escala de bairro.
+
+O método utiliza a quadra urbana como unidade espacial de referência e considera a rede de circulação de pedestres, a topografia e a presença de barreiras que condicionam os deslocamentos a pé, como rios, ferrovias, vias expressas e grandes áreas de acesso restrito. Travessias formalmente existentes, como pontes, viadutos e passagens, são consideradas para preservar a conectividade da rede.
+
+A análise parte de centralidades funcionais, inicialmente identificadas a partir da concentração de destinos de viagens associados a atividades de comércio e serviços. A partir desses pontos, são calculadas áreas caminháveis via isócronas, considerando simultaneamente um limite de 10 minutos de caminhada e 800 metros de distância pela rede.
+
+O cálculo considera uma velocidade de referência de 4,8 km/h em terreno plano, ajustada de acordo com a inclinação do percurso. Dessa forma, trechos mais íngremes aumentam o tempo necessário para caminhar e podem reduzir a extensão efetivamente alcançada. Os 800 metros representam, portanto, um limite máximo de distância percorrida pela rede, e não um raio fixo aplicado uniformemente ao território.
+
+As barreiras territoriais também condicionam a formação dessas áreas. Quando rios, ferrovias, vias expressas ou outras grandes descontinuidades não apresentam travessias disponíveis, a expansão da área caminhável é interrompida. Isso permite gerar polígonos que respondem às condições físicas e à configuração efetiva do território, em vez de círculos definidos apenas por distância geométrica.
+
+O procedimento é realizado de forma iterativa. Após a definição das primeiras áreas caminháveis, novos pontos de referência são gerados nas porções do território ainda não classificadas, e o processo é repetido até alcançar a cobertura do tecido urbano analisado.
+
+Como resultado, são produzidos dois componentes territoriais:
+
+- **Áreas principais** — correspondem às isócronas de escala de bairro, associadas às áreas caminháveis estruturadas a partir dos pontos de referência;
+- **Áreas de transição** — correspondem aos espaços intermediários resultantes das etapas subsequentes do processo, situados entre as áreas principais e que não representam, por si só, novas centralidades funcionais.
+
+A combinação de uma área principal com áreas de transição adjacentes permite construir uma área de influência mais ampla e contínua, oferecendo flexibilidade para a definição da área de abrangência do Plano de Bairro.
+
+Os limites resultantes não devem, portanto, ser entendidos como limites administrativos ou definitivos, mas como uma referência técnica inicial, que pode ser ajustada a partir da análise local e dos processos participativos. Esse princípio é denominado no método de limites flexíveis (*flexible borders*).
+
+**Saiba mais**
+
+BERTHOLDO, Emílio; PONTES DE AQUINO, Aida Paula; MARINS, Karin Regina de Castro. A graph-based geospatial framework for delineating neighborhood planning units with barrier-aware isochrones. *Cities*, v. 179, 107557, 2026. DOI: [10.1016/j.cities.2026.107557](http://www.doi.org/10.1016/j.cities.2026.107557).
+"""
+
+TXT_CLUSTER = """
+### Tipos de áreas urbanas
+
+Para apoiar a leitura do território, áreas com características urbanas semelhantes foram agrupadas em cinco tipos. A classificação considera aspectos relacionados à densidade populacional, aos usos do solo, às características das edificações, ao valor da terra e ao acesso ao transporte público.
+
+Os tipos representam diferentes padrões predominantes de ocupação urbana e ajudam a reconhecer semelhanças e diferenças entre as áreas da cidade. Não correspondem a categorias oficiais de zoneamento ou divisão territorial e devem ser utilizados como informação de apoio à leitura e à análise do território.
+
+**Tipo 1 — Áreas periféricas de alta densidade**
+Áreas predominantemente residenciais, com grande concentração de moradores e baixos valores da terra. Apresentam maior presença de edificações classificadas nos indicadores utilizados como de menor qualidade, tanto baixas quanto verticalizadas, e acesso intermediário ao transporte público. Entre os cinco tipos, é o que apresenta maior densidade populacional.
+
+**Tipo 2 — Áreas mistas de densidade intermediária**
+Áreas em que a moradia se combina com atividades de comércio e serviços, com densidade populacional e valores da terra intermediários. Predominam edificações mais baixas e classificadas como de qualidade intermediária. Apresentam acesso relativamente bom ao transporte público.
+
+**Tipo 3 — Áreas periféricas de média densidade**
+Áreas predominantemente residenciais, com baixos valores da terra e densidade populacional intermediária. Apresentam alguma verticalização, predominância de edificações classificadas como de menor qualidade e menor acesso ao transporte público.
+
+**Tipo 4 — Áreas centrais verticalizadas e de uso misto**
+Áreas caracterizadas pela verticalização e pela diversidade de usos, reunindo moradia, comércio e serviços. Apresentam edificações classificadas como de maior qualidade, altos valores da terra e excelente acesso ao transporte público. Apesar da verticalização, a presença expressiva de atividades comerciais e de serviços está associada a uma densidade de moradores relativamente baixa.
+
+**Tipo 5 — Áreas com predominância de comércio e serviços**
+Áreas verticalizadas com forte predominância de atividades comerciais e de serviços e baixa presença de moradores. Caracterizam-se por edifícios altos, elevados valores da terra e grande proximidade do transporte público.
+
+### Entenda como os tipos de áreas urbanas foram definidos
+
+A tipologia foi desenvolvida por meio de uma análise quantitativa das características urbanas do município de São Paulo, buscando identificar áreas que apresentam padrões semelhantes.
+
+Foram integrados indicadores referentes a três dimensões principais: ambiente construído, acessibilidade e contexto sociodemográfico. Após a padronização dos dados, foram aplicados métodos de redução de dimensionalidade, por meio da Análise de Componentes Principais (PCA), e diferentes algoritmos de clusterização, que permitem identificar grupos de áreas com características semelhantes.
+
+A definição dos agrupamentos considera, além da similaridade entre as características analisadas, critérios de validação e coerência espacial. O procedimento permite reconhecer padrões territoriais que nem sempre coincidem com limites administrativos e que podem contribuir para a compreensão das dinâmicas urbanas na escala do bairro.
+
+Os cinco tipos apresentados no painel constituem, portanto, uma síntese analítica das características predominantes do território. Eles não correspondem a categorias de zoneamento, divisões administrativas ou limites oficiais de bairros.
+
+A tipologia deve ser interpretada em conjunto com as demais informações disponíveis no painel e complementada pela análise técnica, pelo trabalho de campo e pelo conhecimento e percepção da população, incorporados ao longo do processo participativo de elaboração do Plano de Bairro.
+
+**Saiba mais**
+
+PONTES DE AQUINO, Aida Paula; BERTHOLDO, Emílio; MORAES, Gabriel Maggio de; MARINS, Karin Regina de Castro. A clustering framework proposal for defining neighborhood-scale dynamics: Evidence from São Paulo, Brazil. *Socio-Economic Planning Sciences*, v. 105, 102457, 2026. DOI: [10.1016/j.seps.2026.102457](http://www.doi.org/10.1016/j.seps.2026.102457).
+"""
+
+TXT_LCZ = """
+### Explicação das legendas de LCZ
+
+| LCZ | Classe | Definição / legenda |
+|---|---|---|
+| LCZ 1 | Alto-compacto | Edificações altas implantadas em arranjo compacto de maior adensamento. Os edifícios possuem mais de 10 pavimentos. Predominam áreas impermeáveis com pouca ou nenhuma vegetação. Materiais predominantes: concreto, pedra, aço e vidros |
+| LCZ 2 | Médio-compacto | Edificações médias implantadas em arranjo compacto de maior adensamento. Os edifícios possuem de 3 a 9 pavimentos. Predominam áreas impermeáveis com pouca ou nenhuma vegetação. Materiais predominantes: concreto, pedra, tijolos e materiais cerâmicos |
+| LCZ 3 | Baixo-compacto | Edificações baixas implantadas em arranjo compacto de maior adensamento. Os edifícios possuem de 1 a 3 pavimentos. Predominam áreas impermeáveis com pouca ou nenhuma vegetação. Materiais predominantes: concreto, pedra, tijolos e materiais cerâmicos |
+| LCZ 4 | Alto-aberto | Edificações altas implantadas em arranjo aberto de menor adensamento. Os edifícios possuem mais de 10 pavimentos. Predominam áreas permeáveis e vegetação. Materiais predominantes: concreto, pedra, vidros e aço |
+| LCZ 5 | Médio-aberto | Edifícios de altura média implantados em arranjo aberto de menor adensamento. Os edifícios possuem de 3 a 9 pavimentos. Predominam áreas permeáveis e vegetação. Materiais predominantes: concreto, pedra, vidros e aço |
+| LCZ 6 | Baixo-aberto | Edifícios baixos e espaçados implantados em arranjo aberto pouco adensado. Os edifícios possuem de 1 a 3 pavimentos. Presença significativa de vegetação e espaços livres. Materiais predominantes: concreto, tijolos, madeira, materiais cerâmicos e pedras |
+| LCZ 7 | Baixo-precário | Edifícios leves de baixa altura, com baixa inércia térmica, implantadas em áreas densamente construídas, pouco consolidadas e com edifícios de 1 pavimento. Pouca ou nenhuma vegetação arbórea e cobertura do solo compacta. Materiais predominantes: madeira, palha e metal corrugado |
+| LCZ 8 | Baixo-grande | Edificações de baixa altura em arranjos abertos, como galpões e estruturas comerciais ou industriais, implantadas em espaços amplos e predominantemente pavimentados. Os edifícios possuem de 1 a 3 pavimentos. Materiais predominantes: aço, concreto, pedra ou metal |
+| LCZ 9 | Ocupação esparsa | Composição esparsa de edifícios de altura baixa ou média em meio a ambientes naturais com abundância de áreas permeáveis |
+| LCZ 10 | Indústria pesada | Estruturas industriais de altura baixa e média. Cobertura do solo predominantemente impermeável ou compactada. Materiais predominantes: aço, concreto ou metal |
+| LCZ A | Veg. arbórea densa | Áreas com cobertura arbórea esparsa decídua ou perene. Cobertura do solo predominantemente permeável, com vegetação herbácea. Exemplo: florestas naturais ou cultivadas, parques urbanos |
+| LCZ B | Veg. arbórea esparsa | Áreas com cobertura arbórea esparsa decídua ou perene, nas quais as árvores estão distribuídas entre áreas abertas ou vegetação rasteira, com cobertura do solo predominantemente permeável. Exemplo: florestas naturais ou cultivadas, parques urbanos |
+| LCZ C | Vegetação arbustiva | Áreas dominadas por vegetação arbustiva, com árvores de pequeno porte e cobertura do solo predominantemente permeável. Exemplo: áreas arbustivas naturais ou de cultivo agrícola |
+| LCZ D | Vegetação herbácea | Áreas predominantemente cobertas por vegetação rasteira. Exemplo: gramíneas, pastagens, áreas agrícolas, parques urbanos e campos |
+| LCZ E | Rocha ou pavimento | Áreas dominadas por superfícies impermeáveis e pavimentadas, com pouca ou nenhuma vegetação. Exemplo: estacionamentos, pátios e grandes vias |
+| LCZ F | Solo exposto | Áreas com predominância de solo exposto e areia, apresentando pouca ou nenhuma vegetação. Exemplo: desertos ou áreas agrícolas |
+| LCZ G | Água | Superfícies predominantemente ocupadas por corpos d’água. Exemplo: rios, lagos, represas e grandes reservatórios |
+"""
+
+
+def _info_pop(title, body):
+    with st.popover(f"ⓘ {title}", use_container_width=True):
+        st.markdown(body)
+
+
+def render_info_buttons(lvl):
+    ss = st.session_state
+    if lvl == "isocrona":
+        _info_pop("Sobre as áreas de referência", TXT_ISO)
+    if lvl == "quadra" and ss.get("post_iso_view", "quadra") == "quadra" and ss.get("variable") == "Cluster":
+        _info_pop("Sobre os tipos de áreas urbanas", TXT_CLUSTER)
+    if ss.get("thematic_layer") == "lcz" and _thematic_enabled():
+        _info_pop("Sobre as zonas climáticas (LCZ)", TXT_LCZ)
+
+
+if hasattr(st, "dialog"):
+    @st.dialog("Painel Interativo de Dados — PlanBairros", width="large")
+    def welcome_dialog():
+        st.markdown(TXT_WELCOME)
+        if st.button("Fechar", type="primary", use_container_width=True):
+            st.rerun()
+else:
+    welcome_dialog = None
+
+
 def main():
     init_state()
     inject_css()
@@ -2136,15 +2534,26 @@ def main():
 
     sanitize_level_state()
 
-    left, right = st.columns([4, 1], gap="large")
-    with right:
-        st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
-        control_panel()
-        st.markdown("</div>", unsafe_allow_html=True)
-    with left:
-        st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
-        render_map_panel()
-        st.markdown("</div>", unsafe_allow_html=True)
+    if not ss.get("_welcome_seen"):
+        ss["_welcome_seen"] = True
+        if welcome_dialog is not None:
+            welcome_dialog()
+
+    tab_painel, tab_sobre, tab_uso = st.tabs(["Painel", "Sobre o projeto PlanBairros", "Como utilizar"])
+    with tab_painel:
+        left, right = st.columns([4, 1], gap="large")
+        with right:
+            st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
+            control_panel()
+            st.markdown("</div>", unsafe_allow_html=True)
+        with left:
+            st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
+            render_map_panel()
+            st.markdown("</div>", unsafe_allow_html=True)
+    with tab_sobre:
+        st.markdown(TXT_SOBRE)
+    with tab_uso:
+        st.markdown(TXT_USO)
 
 
 main()
