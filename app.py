@@ -211,13 +211,15 @@ QUADRA_UID = "quadra_uid"
 CENSO_ID = "censo_id"
 LOTE_ID = "lote_id"
 DS_CODIGO = "ds_codigo"
+SP_CODIGO = "sp_codigo"
+DS_CD_SUB = "ds_cd_sub"
 
 DIST_PARENT = SUBPREF_ID
 ISO_PARENT = DIST_ID
 CENSO_PARENT = ISO_ID
 
 LAYER_ID_COLS = {
-    "subpref": [SUBPREF_ID], "dist": [DIST_ID, DIST_PARENT, DS_CODIGO],
+    "subpref": [SUBPREF_ID, SP_CODIGO], "dist": [DIST_ID, DIST_PARENT, DS_CODIGO, DS_CD_SUB],
     "iso": [ISO_ID, ISO_PARENT, SUBPREF_ID, DS_CODIGO],
     "censo": [CENSO_ID, CENSO_PARENT, QUADRA_ID, ISO_ID],
     "od": [OD_ID, ISO_ID], "quadra": [QUADRA_ID, ISO_ID, CENSO_ID, QUADRA_UID],
@@ -1834,6 +1836,25 @@ def add_polygons_selectable_colored(m, gdf, name, id_col, fill_color_col, *, sel
 # =============================================================================
 # HELPERS PÓS-ISÓCRONA
 # =============================================================================
+def _sp_codigo_of_subpref(sp):
+    """Retorna o sp_codigo da subprefeitura clicada (subprefeitura.parquet)."""
+    g_sub = read_layer("subpref")
+    if g_sub is None or g_sub.empty or SP_CODIGO not in g_sub.columns or sp is None:
+        return None
+    row = g_sub[g_sub[SUBPREF_ID].map(_norm_key) == _norm_key(sp)]
+    return first_non_null_value(row, SP_CODIGO)
+
+
+def _dists_of_subpref(g_dist, sp):
+    """Filtra Distritos.parquet: ds_cd_sub == sp_codigo da subprefeitura clicada."""
+    if g_dist is None or g_dist.empty or DS_CD_SUB not in g_dist.columns or sp is None:
+        return _empty(g_dist)
+    cod = _sp_codigo_of_subpref(sp)
+    if cod is None:
+        return _empty(g_dist)
+    return g_dist[g_dist[DS_CD_SUB].map(_norm_key) == _norm_key(cod)].copy()
+
+
 def _ds_codigo_of_distrito(d):
     """Retorna o ds_codigo do distrito clicado (Distritos.parquet)."""
     g_dist = read_layer("dist")
@@ -1935,7 +1956,7 @@ def consume_map_event(level, map_state):
                 sp = _id_to_str(st.session_state.get("selected_subpref_id"))
                 g = read_layer("dist")
                 if g is not None and sp:
-                    picked = pick_feature_id(subset_by_parent(g, DIST_PARENT, sp), click, DIST_ID)
+                    picked = pick_feature_id(_dists_of_subpref(g, sp), click, DIST_ID)
         picked = picked or _pick_id_from_last_object(map_state, id_col)
         if not _register_click(picked, click):
             return
@@ -2189,7 +2210,16 @@ def render_map_panel():
             return
         g_parent = subset_by_id(g_sub, SUBPREF_ID, sp)
         title = f"Distritos ({label_or_id(g_parent, label_col='sp_nome', fallback_col=SUBPREF_ID)})"
-        g_show = subset_by_parent(g_dist, DIST_PARENT, sp)
+        if SP_CODIGO not in g_sub.columns:
+            st.error(f"subprefeitura sem '{SP_CODIGO}'. Colunas: {list(g_sub.columns)}"); return
+        if DS_CD_SUB not in g_dist.columns:
+            st.error(f"Distritos sem '{DS_CD_SUB}'. Colunas: {list(g_dist.columns)}"); return
+        g_show = _dists_of_subpref(g_dist, sp)
+        if g_show.empty:
+            st.warning(
+                f"Nenhum distrito para o sp_codigo da subprefeitura clicada: {_sp_codigo_of_subpref(sp)!r} | "
+                f"Subpref: {g_sub[SP_CODIGO].dropna().unique()[:8].tolist()} | "
+                f"Distritos: {g_dist[DS_CD_SUB].dropna().unique()[:8].tolist()}")
         if ss.get("last_level") != "distrito":
             set_view_to_gdf(g_show if not g_show.empty else g_parent); ss["last_level"] = "distrito"
         m = _new_map()
