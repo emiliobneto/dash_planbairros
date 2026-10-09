@@ -1836,42 +1836,95 @@ def add_polygons_selectable_colored(m, gdf, name, id_col, fill_color_col, *, sel
 # =============================================================================
 # HELPERS PÓS-ISÓCRONA
 # =============================================================================
-def _sp_codigo_of_subpref(sp):
-    """Retorna o sp_codigo da subprefeitura clicada (subprefeitura.parquet)."""
-    g_sub = read_layer("subpref")
-    if g_sub is None or g_sub.empty or SP_CODIGO not in g_sub.columns or sp is None:
+def _match_key(v):
+    """Chave tolerante: '01' == '1' == 1.0; ignora espaços/pontuação/caixa."""
+    k = _norm_key(v)
+    if k is None:
         return None
-    row = g_sub[g_sub[SUBPREF_ID].map(_norm_key) == _norm_key(sp)]
-    return first_non_null_value(row, SP_CODIGO)
+    try:
+        return str(int(float(k)))
+    except Exception:
+        return k
+
+
+def _col_ci(g, name):
+    """Encontra a coluna ignorando maiúsculas/espaços."""
+    if g is None or not name:
+        return None
+    return {str(c).strip().lower(): c for c in g.columns}.get(str(name).strip().lower())
+
+
+def _spatial_children(child, parent):
+    """Fallback espacial: filhos cujo ponto interno cai dentro do pai."""
+    if child is None or child.empty or parent is None or parent.empty:
+        return _empty(child)
+    try:
+        union = parent.geometry.union_all()
+    except Exception:
+        union = parent.geometry.unary_union
+    minx, miny, maxx, maxy = parent.total_bounds
+    c = child.cx[minx:maxx, miny:maxy]
+    if c.empty:
+        return _empty(child)
+    return c[c.geometry.representative_point().within(union)].copy()
+
+
+def _row_by_id(g, id_col, val):
+    if g is None or g.empty or id_col not in g.columns or val is None:
+        return _empty(g)
+    return g[g[id_col].map(_match_key) == _match_key(val)]
+
+
+def _sp_codigo_of_subpref(sp):
+    """sp_codigo da subprefeitura clicada (subprefeitura.parquet)."""
+    g_sub = read_layer("subpref")
+    col = _col_ci(g_sub, SP_CODIGO)
+    if col is None:
+        return None
+    return first_non_null_value(_row_by_id(g_sub, SUBPREF_ID, sp), col)
 
 
 def _dists_of_subpref(g_dist, sp):
-    """Filtra Distritos.parquet: ds_cd_sub == sp_codigo da subprefeitura clicada."""
-    if g_dist is None or g_dist.empty or DS_CD_SUB not in g_dist.columns or sp is None:
+    """Distritos: ds_cd_sub == sp_codigo; se vazio, recorte espacial."""
+    if g_dist is None or g_dist.empty or sp is None:
         return _empty(g_dist)
+    col = _col_ci(g_dist, DS_CD_SUB)
     cod = _sp_codigo_of_subpref(sp)
-    if cod is None:
-        return _empty(g_dist)
-    return g_dist[g_dist[DS_CD_SUB].map(_norm_key) == _norm_key(cod)].copy()
+    out = _empty(g_dist)
+    if col and cod is not None:
+        out = g_dist[g_dist[col].map(_match_key) == _match_key(cod)].copy()
+    if out.empty:
+        st.session_state["_link_mode_dist"] = "espacial"
+        out = _spatial_children(g_dist, _row_by_id(read_layer("subpref"), SUBPREF_ID, sp))
+    else:
+        st.session_state["_link_mode_dist"] = "atributo (sp_codigo = ds_cd_sub)"
+    return out
 
 
 def _ds_codigo_of_distrito(d):
-    """Retorna o ds_codigo do distrito clicado (Distritos.parquet)."""
+    """ds_codigo do distrito clicado (Distritos.parquet)."""
     g_dist = read_layer("dist")
-    if g_dist is None or g_dist.empty or DS_CODIGO not in g_dist.columns or d is None:
+    col = _col_ci(g_dist, DS_CODIGO)
+    if col is None:
         return None
-    row = g_dist[g_dist[DIST_ID].map(_norm_key) == _norm_key(d)]
-    return first_non_null_value(row, DS_CODIGO)
+    return first_non_null_value(_row_by_id(g_dist, DIST_ID, d), col)
 
 
 def _isos_of_distrito(g_iso, d):
-    """Filtra isocronas.parquet pelo ds_codigo do distrito clicado."""
-    if g_iso is None or g_iso.empty or DS_CODIGO not in g_iso.columns or d is None:
+    """Isócronas: ds_codigo == ds_codigo; se vazio, recorte espacial."""
+    if g_iso is None or g_iso.empty or d is None:
         return _empty(g_iso)
+    col = _col_ci(g_iso, DS_CODIGO)
     cod = _ds_codigo_of_distrito(d)
-    if cod is None:
-        return _empty(g_iso)
-    return g_iso[g_iso[DS_CODIGO].map(_norm_key) == _norm_key(cod)].copy()
+    out = _empty(g_iso)
+    if col and cod is not None:
+        out = g_iso[g_iso[col].map(_match_key) == _match_key(cod)].copy()
+    if out.empty:
+        st.session_state["_link_mode_iso"] = "espacial"
+        out = _spatial_children(g_iso, _row_by_id(read_layer("dist"), DIST_ID, d))
+    else:
+        st.session_state["_link_mode_iso"] = "atributo (ds_codigo = ds_codigo)"
+    return out
 
 
 def build_post_iso_data():
@@ -2210,16 +2263,19 @@ def render_map_panel():
             return
         g_parent = subset_by_id(g_sub, SUBPREF_ID, sp)
         title = f"Distritos ({label_or_id(g_parent, label_col='sp_nome', fallback_col=SUBPREF_ID)})"
-        if SP_CODIGO not in g_sub.columns:
-            st.error(f"subprefeitura sem '{SP_CODIGO}'. Colunas: {list(g_sub.columns)}"); return
-        if DS_CD_SUB not in g_dist.columns:
-            st.error(f"Distritos sem '{DS_CD_SUB}'. Colunas: {list(g_dist.columns)}"); return
         g_show = _dists_of_subpref(g_dist, sp)
+        c_sub = _col_ci(g_dist, DS_CD_SUB)
+        with st.expander("Diagnóstico — distritos", expanded=g_show.empty):
+            st.write({"vinculo": ss.get("_link_mode_dist"),
+                      "sp_id_clicado": sp,
+                      "sp_codigo_clicado": _sp_codigo_of_subpref(sp),
+                      "distritos_encontrados": int(len(g_show)),
+                      "colunas_subpref": list(g_sub.columns),
+                      "colunas_distritos": list(g_dist.columns),
+                      "ex_ds_cd_sub": (g_dist[c_sub].dropna().unique()[:8].tolist()
+                                       if c_sub else "coluna ausente")})
         if g_show.empty:
-            st.warning(
-                f"Nenhum distrito para o sp_codigo da subprefeitura clicada: {_sp_codigo_of_subpref(sp)!r} | "
-                f"Subpref: {g_sub[SP_CODIGO].dropna().unique()[:8].tolist()} | "
-                f"Distritos: {g_dist[DS_CD_SUB].dropna().unique()[:8].tolist()}")
+            st.warning("Nenhum distrito encontrado para a subprefeitura selecionada.")
         if ss.get("last_level") != "distrito":
             set_view_to_gdf(g_show if not g_show.empty else g_parent); ss["last_level"] = "distrito"
         m = _new_map()
@@ -2228,7 +2284,7 @@ def render_map_panel():
         ttip = "ds_nome" if "ds_nome" in g_show.columns else DIST_ID
         add_polygons_selectable(m, g_show, "Distritos", DIST_ID, tooltip_col=ttip,
             fill_opacity=0.06, tooltip_prefix="Distrito: ", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
-            cache_key=f"dist:sp:{sp}")
+            cache_key=f"dist:sp:{sp}:{len(g_show)}")
         if "ds_nome" in g_show.columns:
             add_labels_on_map(m, g_show, "ds_nome", font_size=12)
         add_boundary_overlay(m, g_parent, weight=2.0, cache_key=f"bnd:sp:{sp}")
@@ -2240,21 +2296,24 @@ def render_map_panel():
         g_iso, g_dist = read_layer("iso"), read_layer("dist")
         if g_iso is None or g_dist is None or d is None:
             return
-        for c in (DS_CODIGO, ISO_ID):
-            if c not in g_iso.columns:
-                st.error(f"isocronas sem '{c}'. Colunas: {list(g_iso.columns)}"); return
-        if DS_CODIGO not in g_dist.columns:
-            st.error(f"Distritos sem '{DS_CODIGO}'. Colunas: {list(g_dist.columns)}"); return
+        if ISO_ID not in g_iso.columns:
+            st.error(f"isocronas sem '{ISO_ID}'. Colunas: {list(g_iso.columns)}"); return
         g_parent_dist = subset_by_id(g_dist, DIST_ID, d)
         title = f"Isócronas ({label_or_id(g_parent_dist, label_col='ds_nome', fallback_col=DIST_ID)})"
         if sel_ids:
             title += f" — selecionadas: {len(sel_ids)}"
         g_show_iso = _isos_of_distrito(g_iso, d)
+        c_iso = _col_ci(g_iso, DS_CODIGO)
+        with st.expander("Diagnóstico — isócronas", expanded=g_show_iso.empty):
+            st.write({"vinculo": ss.get("_link_mode_iso"),
+                      "distrito_id_clicado": d,
+                      "ds_codigo_clicado": _ds_codigo_of_distrito(d),
+                      "isocronas_encontradas": int(len(g_show_iso)),
+                      "colunas_isocronas": list(g_iso.columns),
+                      "ex_ds_codigo_iso": (g_iso[c_iso].dropna().unique()[:8].tolist()
+                                           if c_iso else "coluna ausente")})
         if g_show_iso.empty:
-            st.warning(
-                f"Nenhuma isócrona para o ds_codigo do distrito clicado: {_ds_codigo_of_distrito(d)!r} | "
-                f"Distritos: {g_dist[DS_CODIGO].dropna().unique()[:8].tolist()} | "
-                f"Isócronas: {g_iso[DS_CODIGO].dropna().unique()[:8].tolist()}")
+            st.warning("Nenhuma isócrona encontrada para o distrito selecionado.")
         if ss.get("last_level") != "isocrona":
             set_view_to_gdf(g_show_iso if not g_show_iso.empty else g_parent_dist)
             ss["last_level"] = "isocrona"
@@ -2271,14 +2330,14 @@ def render_map_panel():
             add_polygons_selectable_colored(m, g_viz, "Isócronas", ISO_ID, "__iso_color",
                 selected_ids=sel_ids, tooltip_col=ISO_ID, fill_opacity=fo(ISO_FILL_OPACITY_CLASSES),
                 selected_fill_opacity=0.0, tooltip_prefix="Isócrona: ", simplify_tol=tol,
-                cache_key=f"isoVIZ:dist:{d}", default_fill=ISO_DEFAULT_COLOR)
+                cache_key=f"isoVIZ:dist:{d}:{len(g_show_iso)}", default_fill=ISO_DEFAULT_COLOR)
             legend = sorted({(l, c) for l, c in pairs})
             if not tem_on:
                 add_legend(m, "Isócronas (classes)", legend)
         else:
             add_polygons_selectable(m, g_show_iso, "Isócronas", ISO_ID, selected_ids=sel_ids,
                 tooltip_col=ISO_ID, fill_opacity=fo(ISO_FILL_OPACITY_DEFAULT), selected_fill_opacity=0.0,
-                tooltip_prefix="Isócrona: ", simplify_tol=tol, cache_key=f"iso:dist:{d}")
+                tooltip_prefix="Isócrona: ", simplify_tol=tol, cache_key=f"iso:dist:{d}:{len(g_show_iso)}")
         add_boundary_overlay(m, g_parent_dist, weight=2.0, cache_key=f"bnd:dist:{d}")
         set_export("_export_view", "isocronas_selecionadas",
                    subset_by_id_multi(g_viz, ISO_ID, sel_ids) if sel_ids else None)
