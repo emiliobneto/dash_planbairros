@@ -1307,7 +1307,7 @@ def add_legend(m, title, items):
         f"display:inline-block;margin-right:6px;border:1px solid #555;vertical-align:middle'></span>"
         f"{html.escape(str(l))}</div>" for l, c in items[:25])
     box = (f"<div style='background:#fff;padding:8px 10px;border-radius:8px;"
-           f"box-shadow:0 1px 4px rgba(0,0,0,.3);font:12px Roboto,Arial;max-height:320px;overflow:auto'>"
+           f"box-shadow:0 1px 4px rgba(0,0,0,.3);font:14px Roboto,Arial;max-height:380px;overflow:auto'>"
            f"<b>{html.escape(title)}</b>{rows}</div>")
     el = MacroElement()
     el._template = Template("""
@@ -1339,15 +1339,23 @@ def inject_css():
         .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
         .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; border-radius:8px; }}
         .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:14px 15px; width:100%; }}
-        .pb-title {{ font-size:2.25rem; font-weight:900; line-height:1.05; }}
-        .pb-subtitle {{ font-size:1.2rem; opacity:.95; margin-top:5px; }}
+        .pb-title {{ font-size:2.7rem; font-weight:900; line-height:1.05; }}
+        .pb-subtitle {{ font-size:1.44rem; opacity:.95; margin-top:5px; }}
         .stMarkdown p, .stMarkdown li, .stMarkdown td, .stMarkdown th {{
-            font-size:1.12rem !important; line-height:1.65 !important; }}
-        .stMarkdown h2 {{ font-size:1.9rem !important; }}
-        .stMarkdown h3 {{ font-size:1.45rem !important; }}
-        div[data-testid="stCaptionContainer"] p {{ font-size:0.98rem !important; }}
+            font-size:1.34rem !important; line-height:1.65 !important; }}
+        .stMarkdown h2 {{ font-size:2.28rem !important; }}
+        .stMarkdown h3 {{ font-size:1.74rem !important; }}
+        div[data-testid="stCaptionContainer"] p {{ font-size:1.18rem !important; }}
         label p, .stButton button p, .stDownloadButton button p,
-        div[data-baseweb="select"] div, button[data-baseweb="tab"] p {{ font-size:1.05rem !important; }}
+        div[data-baseweb="select"] div, button[data-baseweb="tab"] p {{ font-size:1.26rem !important; }}
+        /* Botões de informação flutuando sobre o mapa */
+        .st-key-pb_info {{ position:relative; height:0; overflow:visible; z-index:1001; }}
+        .st-key-pb_info > div {{ position:absolute; top:12px; right:60px; display:flex;
+            flex-direction:column; gap:6px; align-items:flex-end; width:auto !important; }}
+        .st-key-pb_info button {{ background:{PB_NAVY} !important; color:#fff !important;
+            border:2px solid #fff !important; border-radius:20px !important;
+            box-shadow:0 2px 6px rgba(0,0,0,.35) !important; }}
+        .st-key-pb_info button p {{ color:#fff !important; font-weight:700 !important; }}
         .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10);
             box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
         button[data-testid="stBaseButton-primary"],
@@ -2162,7 +2170,6 @@ def control_panel():
     ss = st.session_state
     lvl = ss.get("level", "subpref")
 
-    render_info_buttons(lvl)
     st.subheader("Navegação", anchor=False)
     avail = _available_levels()
     ss["nav_level"] = lvl if lvl in avail else avail[0]
@@ -2262,7 +2269,7 @@ def render_map_panel():
             fill_opacity=0.06, selected_fill_opacity=0.0, tooltip_prefix="Subpref: ",
             simplify_tol=tol, cache_key=f"subpref:{tol}")
         if "sp_nome" in g_sub.columns:
-            add_labels_on_map(m, g_sub, "sp_nome", font_size=13)
+            add_labels_on_map(m, g_sub, "sp_nome", font_size=16)
         set_export("_export_view", "subprefeituras", g_sub)
 
     elif level == "distrito":
@@ -2295,7 +2302,7 @@ def render_map_panel():
             fill_opacity=0.06, tooltip_prefix="Distrito: ", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
             cache_key=f"dist:sp:{sp}:{len(g_show)}:v2")
         if "ds_nome" in g_show.columns:
-            add_labels_on_map(m, g_show, "ds_nome", font_size=12)
+            add_labels_on_map(m, g_show, "ds_nome", font_size=14)
         add_boundary_overlay(m, g_parent, weight=2.0, cache_key=f"bnd:sp:{sp}")
         set_export("_export_view", "distritos", g_show)
 
@@ -2454,6 +2461,8 @@ def render_map_panel():
     add_print_button(m)
 
     st.markdown(f"### {title}")
+    with st.container(key="pb_info"):
+        render_info_buttons(level)
     st_folium(m, height=780, use_container_width=True, key=f"{MAP_KEY}_{level}",
               returned_objects=["last_clicked", "last_object_clicked", "last_object_clicked_tooltip",
                                 "all_drawings", "last_active_drawing"])
@@ -2640,7 +2649,7 @@ TXT_LCZ = """
 
 
 def _info_pop(title, body):
-    with st.popover(f"ⓘ {title}", use_container_width=True):
+    with st.popover(f"ⓘ {title}", use_container_width=False):
         st.markdown(body)
 
 
