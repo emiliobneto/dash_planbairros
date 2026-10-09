@@ -9,5 +9,15 @@ pandas
 numpy
 requests
 fiona
+streamlit>=1.36
+pandas>=2.0
+geopandas>=0.14
+shapely>=2.0
+pyproj>=3.6
+pyarrow>=14.0
+folium>=0.15
+branca>=0.7
+streamlit-folium>=0.20
+requests>=2.31
 
 
