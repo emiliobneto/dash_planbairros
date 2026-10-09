@@ -37,6 +37,8 @@ PB_NAVY = "#14407D"
 PB_BROWN = "#C65534"
 PB_BTN = "#14407D"
 PB_BLACK = "#000000"
+PB_ORANGE = "#D58243"
+PB_ORANGE_DARK = "#B35807"
 
 # Fundo SEM API key (Esri Light Gray) + rótulos opcionais
 BASEMAP_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
@@ -1352,9 +1354,10 @@ def inject_css():
         .st-key-pb_info {{ position:relative; height:0; overflow:visible; z-index:1001; }}
         .st-key-pb_info > div {{ position:absolute; top:12px; right:60px; display:flex;
             flex-direction:column; gap:6px; align-items:flex-end; width:auto !important; }}
-        .st-key-pb_info button {{ background:{PB_NAVY} !important; color:#fff !important;
+        .st-key-pb_info button {{ background:{PB_ORANGE} !important; color:#fff !important;
             border:2px solid #fff !important; border-radius:20px !important;
             box-shadow:0 2px 6px rgba(0,0,0,.35) !important; }}
+        .st-key-pb_info button:hover {{ background:{PB_ORANGE_DARK} !important; }}
         .st-key-pb_info button p {{ color:#fff !important; font-weight:700 !important; }}
         .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10);
             box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
