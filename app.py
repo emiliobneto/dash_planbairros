@@ -311,7 +311,7 @@ def _mk_aliases(base: str) -> Set[str]:
 
 COL_ALIASES: Dict[str, Set[str]] = {
     SUBPREF_ID: _mk_aliases(SUBPREF_ID),
-    DIST_ID: _mk_aliases(DIST_ID) | {"id_distrito", "dist_id", "codigo_distrito", "cd_distrito"},
+    DIST_ID: _mk_aliases(DIST_ID) | {"id_distrito", "dist_id"},
     ISO_ID: _mk_aliases(ISO_ID),
     OD_ID: _mk_aliases(OD_ID) | {"OD_ID", "zona_od", "zonaod", "id_od", "od"},
     QUADRA_ID: _mk_aliases(QUADRA_ID),
@@ -324,16 +324,22 @@ _ALIAS_LOOKUP = {a.strip().lower(): canon for canon, al in COL_ALIASES.items() f
 def standardize_columns(gdf):
     if gdf is None or gdf.empty:
         return gdf
+    existing = {str(c) for c in gdf.columns}
     ren: Dict[str, str] = {}
+    used: Set[str] = set()
     for c in gdf.columns:
         raw = str(c)
         cl = re.sub(r"\s+", " ", raw.strip())
         canon = _ALIAS_LOOKUP.get(cl.lower())
         if canon and canon != raw:
-            ren[raw] = canon
+            # só renomeia se a coluna canônica ainda não existe
+            if canon not in existing and canon not in used:
+                ren[raw] = canon
+                used.add(canon)
         elif raw != cl:
             ren[raw] = cl
-    return gdf.rename(columns=ren)
+    g = gdf.rename(columns=ren)
+    return g.loc[:, ~g.columns.duplicated()]
 
 
 def _id_to_str(v: Any) -> Optional[str]:
@@ -414,14 +420,26 @@ def subset_by_parent(child, parent_col, parent_val):
     if child is None or child.empty or parent_col not in child.columns or parent_val is None:
         return _empty(child)
     pv = _id_to_str(parent_val)
-    return _empty(child) if pv is None else child[child[parent_col] == pv]
+    if pv is None:
+        return _empty(child)
+    out = child[child[parent_col] == pv]
+    if out.empty:  # tolera "01" x "1", "1.0" x "1", espaços etc.
+        nk = _norm_key(pv)
+        out = child[child[parent_col].map(_norm_key) == nk]
+    return out
 
 
 def subset_by_parent_multi(child, parent_col, parent_vals):
     if child is None or child.empty or parent_col not in child.columns or not parent_vals:
         return _empty(child)
     pset = ensure_set_of_str(parent_vals)
-    return _empty(child) if not pset else child[child[parent_col].isin(list(pset))]
+    if not pset:
+        return _empty(child)
+    out = child[child[parent_col].isin(list(pset))]
+    if out.empty:
+        nset = {_norm_key(x) for x in pset}
+        out = child[child[parent_col].map(_norm_key).isin(nset)]
+    return out
 
 
 subset_by_id = subset_by_parent
@@ -1310,7 +1328,14 @@ def inject_css():
         .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; border-radius:8px; }}
         .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:14px 15px; width:100%; }}
         .pb-title {{ font-size:2.25rem; font-weight:900; line-height:1.05; }}
-        .pb-subtitle {{ font-size:1.05rem; opacity:.95; margin-top:5px; }}
+        .pb-subtitle {{ font-size:1.2rem; opacity:.95; margin-top:5px; }}
+        .stMarkdown p, .stMarkdown li, .stMarkdown td, .stMarkdown th {{
+            font-size:1.12rem !important; line-height:1.65 !important; }}
+        .stMarkdown h2 {{ font-size:1.9rem !important; }}
+        .stMarkdown h3 {{ font-size:1.45rem !important; }}
+        div[data-testid="stCaptionContainer"] p {{ font-size:0.98rem !important; }}
+        label p, .stButton button p, .stDownloadButton button p,
+        div[data-baseweb="select"] div, button[data-baseweb="tab"] p {{ font-size:1.05rem !important; }}
         .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10);
             box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
         button[data-testid="stBaseButton-primary"],
@@ -1554,9 +1579,10 @@ def make_base_map(center=(-23.55, -46.63), zoom=11):
     folium.TileLayer(tiles=BASEMAP_URL, attr=BASEMAP_ATTR, name="Mapa base",
                      overlay=False, control=False, max_zoom=19, max_native_zoom=16).add_to(m)
     try:
-        for name, z in (("parent_fill", 610), ("thematic", 625), ("detail_shapes", 640),
-                        ("fixed_layers", 660)):
+        for name, z in (("parent_fill", 610), ("thematic", 625), ("detail_shapes", 640)):
             folium.map.CustomPane(name, z_index=z).add_to(m)
+        # camadas fixas não capturam cliques (antes bloqueavam a seleção de polígonos)
+        folium.map.CustomPane("fixed_layers", z_index=660, pointer_events=False).add_to(m)
         folium.map.CustomPane("boundaries", z_index=680, pointer_events=False).add_to(m)
         folium.map.CustomPane("basemap_labels", z_index=690, pointer_events=False).add_to(m)
         folium.map.CustomPane("labels", z_index=700).add_to(m)
@@ -1687,7 +1713,7 @@ def add_labels_on_map(m, gdf, label_col, *, font_size=12, color="#000000", weigh
         pt = pts.loc[idx]
         if not txt_html or pt is None or pt.is_empty:
             continue
-        folium.Marker(location=[pt.y, pt.x], icon=folium.DivIcon(
+        folium.Marker(location=[pt.y, pt.x], interactive=False, icon=folium.DivIcon(
             icon_size=(150, 36), icon_anchor=(75, 18),
             html=f"""<div style="font-family:Roboto,Arial,sans-serif;font-size:{font_size}px;
                 color:{color};font-weight:{weight};text-align:center;white-space:nowrap;line-height:1.1;
@@ -1808,10 +1834,12 @@ def add_polygons_selectable_colored(m, gdf, name, id_col, fill_color_col, *, sel
 # HELPERS PÓS-ISÓCRONA
 # =============================================================================
 def _isos_of_distrito(g_iso, d):
-    g_show = subset_by_parent(g_iso, ISO_PARENT, d)
-    if g_show.empty and DIST_ID in g_iso.columns:
-        g_show = g_iso[g_iso[DIST_ID].astype(str).str.strip() == str(d).strip()].copy()
-    return g_show
+    """Filtra isocronas.parquet pelo distrito_id clicado em Distritos.parquet."""
+    if g_iso is None or g_iso.empty or DIST_ID not in g_iso.columns or d is None:
+        return _empty(g_iso)
+    alvo = _norm_key(d)
+    chaves = g_iso[DIST_ID].map(_norm_key)
+    return g_iso[chaves == alvo].copy()
 
 
 def build_post_iso_data():
@@ -1873,15 +1901,22 @@ def _register_click(picked, click):
     return True
 
 
+def _click_point(map_state):
+    for k in ("last_clicked", "last_object_clicked"):
+        c = (map_state or {}).get(k)
+        if isinstance(c, dict) and c.get("lat") is not None and c.get("lng") is not None:
+            return {"lat": c["lat"], "lng": c["lng"]}
+    return None
+
+
 def consume_map_event(level, map_state):
     tooltip_raw = (map_state or {}).get("last_object_clicked_tooltip")
-    click = (map_state or {}).get("last_clicked")
-    click = click if isinstance(click, dict) else None
+    click = _click_point(map_state)
 
     if level in ("subpref", "distrito"):
         id_col = SUBPREF_ID if level == "subpref" else DIST_ID
-        picked = _pick_id_from_last_object(map_state, id_col)
-        if not picked and click:
+        picked = None
+        if click:
             if level == "subpref":
                 g = read_layer("subpref")
                 picked = pick_feature_id(g, click, SUBPREF_ID) if g is not None else None
@@ -1890,6 +1925,7 @@ def consume_map_event(level, map_state):
                 g = read_layer("dist")
                 if g is not None and sp:
                     picked = pick_feature_id(subset_by_parent(g, DIST_PARENT, sp), click, DIST_ID)
+        picked = picked or _pick_id_from_last_object(map_state, id_col)
         if not _register_click(picked, click):
             return
         if level == "subpref":
@@ -1901,12 +1937,13 @@ def consume_map_event(level, map_state):
         return
 
     if level == "isocrona":
-        picked = _pick_id_from_last_object(map_state, ISO_ID) or parse_tooltip_id(tooltip_raw)
-        if not picked and click:
+        picked = None
+        if click:
             d = _id_to_str(st.session_state.get("selected_distrito_id"))
             g = read_layer("iso")
             if g is not None and d:
                 picked = pick_feature_id(_isos_of_distrito(g, d), click, ISO_ID)
+        picked = picked or _pick_id_from_last_object(map_state, ISO_ID) or parse_tooltip_id(tooltip_raw)
         if _register_click(picked, click):
             _toggle_in_set("selected_iso_ids", picked)
         return
@@ -2170,6 +2207,11 @@ def render_map_panel():
         if sel_ids:
             title += f" — selecionadas: {len(sel_ids)}"
         g_show_iso = _isos_of_distrito(g_iso, d)
+        if g_show_iso.empty:
+            st.warning(
+                f"Nenhuma isócrona para o distrito_id clicado: {d!r} | "
+                f"Distritos: {g_dist[DIST_ID].dropna().unique()[:8].tolist()} | "
+                f"Isócronas: {g_iso[DIST_ID].dropna().unique()[:8].tolist()}")
         if ss.get("last_level") != "isocrona":
             set_view_to_gdf(g_show_iso if not g_show_iso.empty else g_parent_dist)
             ss["last_level"] = "isocrona"
@@ -2301,7 +2343,7 @@ def render_map_panel():
     add_print_button(m)
 
     st.markdown(f"### {title}")
-    st_folium(m, height=780, use_container_width=True, key=MAP_KEY,
+    st_folium(m, height=780, use_container_width=True, key=f"{MAP_KEY}_{level}",
               returned_objects=["last_clicked", "last_object_clicked", "last_object_clicked_tooltip",
                                 "all_drawings", "last_active_drawing"])
     if level == "quadra" and ss.get("post_iso_view") in ("od", "lote"):
@@ -2527,7 +2569,7 @@ def main():
         ss["last_click_sig"] = ""; ss["last_draw_sig"] = ""
 
     cur_level = ss.get("level", "subpref")
-    map_state_prev = ss.get(MAP_KEY) or {}
+    map_state_prev = ss.get(f"{MAP_KEY}_{cur_level}") or {}
     if (not ui_action) and ss.get("_map_level_rendered") == cur_level and isinstance(map_state_prev, dict):
         consume_map_event(cur_level, map_state_prev)
         consume_draw_selection(cur_level, map_state_prev)
