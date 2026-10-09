@@ -314,7 +314,7 @@ def _mk_aliases(base: str) -> Set[str]:
 
 COL_ALIASES: Dict[str, Set[str]] = {
     SUBPREF_ID: _mk_aliases(SUBPREF_ID),
-    DIST_ID: _mk_aliases(DIST_ID) | {"id_distrito", "dist_id"},
+    DIST_ID: _mk_aliases(DIST_ID) | {"id_distrito", "dist_id", "ds_cod"},
     ISO_ID: _mk_aliases(ISO_ID),
     OD_ID: _mk_aliases(OD_ID) | {"OD_ID", "zona_od", "zonaod", "id_od", "od"},
     QUADRA_ID: _mk_aliases(QUADRA_ID),
@@ -816,6 +816,15 @@ def read_layer(layer_key):
     g = standardize_columns(g)
     g = _drop_bad_geoms(g)
     g = normalize_id_cols(g, LAYER_ID_COLS.get(layer_key, []))
+    # IDs ausentes: deriva dos códigos oficiais (ou índice)
+    if layer_key == "dist" and DIST_ID not in g.columns:
+        src = _col_ci(g, DS_CODIGO)
+        g[DIST_ID] = g[src].map(_id_to_str) if src else [str(i) for i in range(len(g))]
+    if layer_key == "subpref" and SUBPREF_ID not in g.columns:
+        src = _col_ci(g, SP_CODIGO)
+        g[SUBPREF_ID] = g[src].map(_id_to_str) if src else [str(i) for i in range(len(g))]
+    if layer_key == "iso" and ISO_ID not in g.columns:
+        g[ISO_ID] = [str(i) for i in range(len(g))]
     if layer_key == "quadra":
         if QUADRA_ID in g.columns:
             g[QUADRA_ID] = g[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
@@ -1878,7 +1887,7 @@ def _row_by_id(g, id_col, val):
 def _sp_codigo_of_subpref(sp):
     """sp_codigo da subprefeitura clicada (subprefeitura.parquet)."""
     g_sub = read_layer("subpref")
-    col = _col_ci(g_sub, SP_CODIGO)
+    col = _col_ci(g_sub, SP_CODIGO) or (SUBPREF_ID if g_sub is not None and SUBPREF_ID in g_sub.columns else None)
     if col is None:
         return None
     return first_non_null_value(_row_by_id(g_sub, SUBPREF_ID, sp), col)
@@ -1902,9 +1911,9 @@ def _dists_of_subpref(g_dist, sp):
 
 
 def _ds_codigo_of_distrito(d):
-    """ds_codigo do distrito clicado (Distritos.parquet)."""
+    """Código do distrito clicado (ds_codigo ou ds_cod → distrito_id)."""
     g_dist = read_layer("dist")
-    col = _col_ci(g_dist, DS_CODIGO)
+    col = _col_ci(g_dist, DS_CODIGO) or (DIST_ID if g_dist is not None and DIST_ID in g_dist.columns else None)
     if col is None:
         return None
     return first_non_null_value(_row_by_id(g_dist, DIST_ID, d), col)
@@ -2284,7 +2293,7 @@ def render_map_panel():
         ttip = "ds_nome" if "ds_nome" in g_show.columns else DIST_ID
         add_polygons_selectable(m, g_show, "Distritos", DIST_ID, tooltip_col=ttip,
             fill_opacity=0.06, tooltip_prefix="Distrito: ", simplify_tol=SIMPLIFY_TOL_BY_LEVEL["distrito"],
-            cache_key=f"dist:sp:{sp}:{len(g_show)}")
+            cache_key=f"dist:sp:{sp}:{len(g_show)}:v2")
         if "ds_nome" in g_show.columns:
             add_labels_on_map(m, g_show, "ds_nome", font_size=12)
         add_boundary_overlay(m, g_parent, weight=2.0, cache_key=f"bnd:sp:{sp}")
