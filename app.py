@@ -210,14 +210,15 @@ QUADRA_ID = "quadra_id"
 QUADRA_UID = "quadra_uid"
 CENSO_ID = "censo_id"
 LOTE_ID = "lote_id"
+DS_CODIGO = "ds_codigo"
 
 DIST_PARENT = SUBPREF_ID
 ISO_PARENT = DIST_ID
 CENSO_PARENT = ISO_ID
 
 LAYER_ID_COLS = {
-    "subpref": [SUBPREF_ID], "dist": [DIST_ID, DIST_PARENT],
-    "iso": [ISO_ID, ISO_PARENT, SUBPREF_ID],
+    "subpref": [SUBPREF_ID], "dist": [DIST_ID, DIST_PARENT, DS_CODIGO],
+    "iso": [ISO_ID, ISO_PARENT, SUBPREF_ID, DS_CODIGO],
     "censo": [CENSO_ID, CENSO_PARENT, QUADRA_ID, ISO_ID],
     "od": [OD_ID, ISO_ID], "quadra": [QUADRA_ID, ISO_ID, CENSO_ID, QUADRA_UID],
     "lote": [LOTE_ID, ISO_ID, DIST_ID],
@@ -1833,13 +1834,23 @@ def add_polygons_selectable_colored(m, gdf, name, id_col, fill_color_col, *, sel
 # =============================================================================
 # HELPERS PÓS-ISÓCRONA
 # =============================================================================
+def _ds_codigo_of_distrito(d):
+    """Retorna o ds_codigo do distrito clicado (Distritos.parquet)."""
+    g_dist = read_layer("dist")
+    if g_dist is None or g_dist.empty or DS_CODIGO not in g_dist.columns or d is None:
+        return None
+    row = g_dist[g_dist[DIST_ID].map(_norm_key) == _norm_key(d)]
+    return first_non_null_value(row, DS_CODIGO)
+
+
 def _isos_of_distrito(g_iso, d):
-    """Filtra isocronas.parquet pelo distrito_id clicado em Distritos.parquet."""
-    if g_iso is None or g_iso.empty or DIST_ID not in g_iso.columns or d is None:
+    """Filtra isocronas.parquet pelo ds_codigo do distrito clicado."""
+    if g_iso is None or g_iso.empty or DS_CODIGO not in g_iso.columns or d is None:
         return _empty(g_iso)
-    alvo = _norm_key(d)
-    chaves = g_iso[DIST_ID].map(_norm_key)
-    return g_iso[chaves == alvo].copy()
+    cod = _ds_codigo_of_distrito(d)
+    if cod is None:
+        return _empty(g_iso)
+    return g_iso[g_iso[DS_CODIGO].map(_norm_key) == _norm_key(cod)].copy()
 
 
 def build_post_iso_data():
@@ -2199,9 +2210,11 @@ def render_map_panel():
         g_iso, g_dist = read_layer("iso"), read_layer("dist")
         if g_iso is None or g_dist is None or d is None:
             return
-        for c in (DIST_ID, ISO_ID):
+        for c in (DS_CODIGO, ISO_ID):
             if c not in g_iso.columns:
                 st.error(f"isocronas sem '{c}'. Colunas: {list(g_iso.columns)}"); return
+        if DS_CODIGO not in g_dist.columns:
+            st.error(f"Distritos sem '{DS_CODIGO}'. Colunas: {list(g_dist.columns)}"); return
         g_parent_dist = subset_by_id(g_dist, DIST_ID, d)
         title = f"Isócronas ({label_or_id(g_parent_dist, label_col='ds_nome', fallback_col=DIST_ID)})"
         if sel_ids:
@@ -2209,9 +2222,9 @@ def render_map_panel():
         g_show_iso = _isos_of_distrito(g_iso, d)
         if g_show_iso.empty:
             st.warning(
-                f"Nenhuma isócrona para o distrito_id clicado: {d!r} | "
-                f"Distritos: {g_dist[DIST_ID].dropna().unique()[:8].tolist()} | "
-                f"Isócronas: {g_iso[DIST_ID].dropna().unique()[:8].tolist()}")
+                f"Nenhuma isócrona para o ds_codigo do distrito clicado: {_ds_codigo_of_distrito(d)!r} | "
+                f"Distritos: {g_dist[DS_CODIGO].dropna().unique()[:8].tolist()} | "
+                f"Isócronas: {g_iso[DS_CODIGO].dropna().unique()[:8].tolist()}")
         if ss.get("last_level") != "isocrona":
             set_view_to_gdf(g_show_iso if not g_show_iso.empty else g_parent_dist)
             ss["last_level"] = "isocrona"
