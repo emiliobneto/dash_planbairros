@@ -2298,7 +2298,6 @@ def control_panel():
         for k, cfg in THEMATIC_LAYERS.items():
             lbl = cfg["title"] + (" (município inteiro)" if cfg.get("full") else "")
             st.checkbox(lbl, key=f"tem_{k}", disabled=not tem_ok, on_change=mark_ui_action)
-)
     st.divider()
 
     st.checkbox("Habilitar seleção por caixa/laço", key="selection_draw_mode", on_change=mark_ui_action)
