@@ -100,11 +100,16 @@ DATA_SEARCH_DIRS = [LIMITES_DIR, LIMITES_DIR / "data", LIMITES_DIR / "tematicos"
 THEMATIC_DIR_SECRET_KEY = "PB_THEMATIC_DIR"
 THEMATIC_CACHE_DIR = DATA_CACHE_DIR / "tematicos"
 THEMATIC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+THEMATIC_FOLDER_URL = "https://drive.google.com/drive/folders/1vckY0nYEfVn32mU8bARx2kNvHlCTCOSR?usp=drive_link"
+THEMATIC_PARENT_FOLDER_URL = "https://drive.google.com/drive/folders/1vckY0nYEfVn32mU8bARx2kNvHlCTCOSR"
+THEMATIC_SUBFOLDER_NAME = "mapas"
 
 THEMATIC_DRIVE_LINKS: Dict[str, str] = {
-    "apa": "", "bacia": "", "praca": "", "corredor_verde": "", "favela": "",
-    "declividade": "", "risco_geologico": "", "arvores": "", "vias": "",
-    "densidade": "", "lcz": "",
+    "apa": "https://drive.google.com/file/d/1lC0vwzdPehJHOmU_NL4C_wy3pz-H_evX/view?usp=drive_link", "bacia": "https://drive.google.com/file/d/13dcVg7But62fiQ4MUOWzNMNTFvoH47yF/view?usp=drive_link", "praca": "https://drive.google.com/file/d/1m9ekcIQnInzcAS4v4cUbQeHeLjVdFGY6/view?usp=drive_link", 
+    "corredor_verde": "https://drive.google.com/file/d/1pQvT31hVWxbEGJFwP-lmxMxsP7w7104p/view?usp=drive_link", "favela": "https://drive.google.com/file/d/1A9F51pAiVK9pYhn-rzRVxh-04qvn8z2-/view?usp=drive_link",
+    "declividade": "https://drive.google.com/file/d/1e-T5hl2cmX_QmtBd4THHo41rWIg9XLCW/view?usp=drive_link", "risco_geologico": "https://drive.google.com/file/d/1Pl6GklXWe30GmZlz58-RkyYKESbxtTF6/view?usp=drive_link", 
+    "arvores": "https://drive.google.com/file/d/1MmHpwARSTbWnZBQBFZBvHcQF0GaV_ZGU/view?usp=drive_link", "vias": "https://drive.google.com/file/d/16hGt-7i_1QuEO4scp-bMZXYUO40gF-xq/view?usp=drive_link",
+    "densidade": "https://drive.google.com/file/d/1VYMxrdSustDrxNEGHprqd2rMpedtmKwC/view?usp=drive_link",
 }
 
 LCZ_LABELS = {
@@ -659,7 +664,8 @@ def ensure_thematic_file(key) -> Optional[Path]:
     found = _find_local_file(fn)
     if found is not None:
         return found
-    raw = _get_secret(f"PB_TEM_{key.upper()}") or THEMATIC_DRIVE_LINKS.get(key, "")
+    raw = (_get_secret(f"PB_TEM_{key.upper()}") or THEMATIC_DRIVE_LINKS.get(key, "")
+           or thematic_folder_index().get(fn.lower(), ""))
     if raw:
         try:
             return download_drive_file(raw, THEMATIC_CACHE_DIR / fn, label=fn)
@@ -729,7 +735,34 @@ def list_drive_folder_files(folder_id):
             continue
     return found
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def find_drive_subfolder_id(parent_id, name):
+    import requests
+    if not parent_id:
+        return ""
+    try:
+        r = requests.get(f"https://drive.google.com/drive/folders/{parent_id}",
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=60)
+        esc = re.escape(name)
+        for pat in (rf'\["([a-zA-Z0-9_-]{{25,}})","{esc}"', rf'\["{esc}","([a-zA-Z0-9_-]{{25,}})"'):
+            m = re.search(pat, r.text, re.I)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return ""
 
+
+def thematic_folder_index() -> Dict[str, str]:
+    """{nome_em_minúsculas: file_id} dos .parquet da pasta 'mapas'."""
+    raw = _get_secret("PB_THEMATIC_FOLDER_URL") or THEMATIC_FOLDER_URL
+    fid = extract_drive_folder_id(raw)
+    if not fid:
+        fid = find_drive_subfolder_id(extract_drive_folder_id(THEMATIC_PARENT_FOLDER_URL),
+                                      THEMATIC_SUBFOLDER_NAME)
+    files = list_drive_folder_files(fid) if fid else {}
+    return {k.lower(): v for k, v in files.items()}
+    
 def ensure_local_lote_file(distrito_id):
     did = _id_to_str(distrito_id)
     if not did:
