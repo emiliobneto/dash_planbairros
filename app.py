@@ -2315,7 +2315,7 @@ def control_panel():
                   disabled=not ok_iso, on_click=_go_detailed)
         st.caption("Selecione uma ou mais isócronas antes de avançar.")
 
-       pv = ss.get("post_iso_view", "quadra")
+    pv = ss.get("post_iso_view", "quadra")
     if lvl == "quadra" and pv in ("od", "lote"):
         src = "od" if pv == "od" else "iptu"
         opts = ["(nenhuma)"] + ext_variables(src)
