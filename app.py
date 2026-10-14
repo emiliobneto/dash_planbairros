@@ -2546,7 +2546,7 @@ def render_map_panel():
                     nm, src, idc, cor = OVERLAY_EXTRA[ov]
                     add_overlay_outline(m, data_ov.get(f"g_{src}"), nm, idc, cor)
             if g_iso_sel is not None and not g_iso_sel.empty:
-            add_boundary_overlay(m, g_iso_sel, weight=2.0, cache_key=f"bnd:iso:{'|'.join(sorted(iso_ids))}")
+                add_boundary_overlay(m, g_iso_sel, weight=2.0, cache_key=f"bnd:iso:{'|'.join(sorted(iso_ids))}")
 
     if m is None:
         return
