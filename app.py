@@ -2267,7 +2267,7 @@ def _selected_overlays():
     # contornos de setores/OD dependem do recorte das isócronas
     if not _iso_selected():
         return []
-    return [k for k in OVERLAY_EXTRA if st.session_state.get(k)]]
+    return [k for k in OVERLAY_EXTRA if st.session_state.get(k)]
 
 def add_overlay_outline(m, g, name, id_col, color):
     if m is None or g is None or g.empty or id_col not in g.columns:
