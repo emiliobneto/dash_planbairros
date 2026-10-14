@@ -1171,15 +1171,15 @@ def classify_thematic(key, g):
         g["__leg"] = cfg["title"]; g["__color"] = cfg["color"]
         legend = [(cfg["title"], cfg["color"])]
     else:
-       src = _col(g, cfg["class_col"])
-        colors = cfg["colors"]
-        if key == "densidade" and src:
-            bins = dens_bins()
-            labels = [b[1] for b in bins]
-            colors = dict(zip(labels, DENS_COLORS[-len(labels):]))
-            x = _dens_num(g[src])
-            edges = [-float("inf")] + [b[0] for b in bins[:-1]] + [float("inf")]
-            g["__leg"] = pd.cut(x, bins=edges, labels=labels, include_lowest=True) \
+    src = _col(g, cfg["class_col"])
+    colors = cfg["colors"]
+    if key == "densidade" and src:
+        bins = dens_bins()
+        labels = [b[1] for b in bins]
+        colors = dict(zip(labels, DENS_COLORS[-len(labels):]))
+         x = _dens_num(g[src])
+         edges = [-float("inf")] + [b[0] for b in bins[:-1]] + [float("inf")]
+          g["__leg"] = pd.cut(x, bins=edges, labels=labels, include_lowest=True) \
                            .astype(object).where(x.notna(), "Sem informação")
         else:
             g["__leg"] = g[src].map(CLASSIFIERS[cfg["fn"]]) if src else "Sem informação"
