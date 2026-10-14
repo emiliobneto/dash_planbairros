@@ -986,25 +986,30 @@ def read_thematic(key):
 
 
 def filter_thematic(key, g, iso_ids, g_iso_sel):
-    if THEMATIC_LAYERS[key].get("full"):
+    if g is None or g.empty or THEMATIC_LAYERS[key].get("full") or not iso_ids:
         return g
+    out = None
     if key == "densidade":
         censo = read_layer("censo")
         ids = set(get_censo_subset_for_isos(censo, iso_ids)[CENSO_ID].dropna()) if censo is not None else set()
         col = _col(g, "dd_setor") or (CENSO_ID if CENSO_ID in g.columns else None)
         if col and ids:
-            return g[g[col].map(_id_to_str).isin(ids)]
-    if ISO_ID in g.columns:
-        return subset_by_parent_multi(g, ISO_ID, iso_ids)
-    if g_iso_sel is None or g_iso_sel.empty:
-        return g.iloc[0:0]
-    try:
-        union = g_iso_sel.geometry.union_all()
-    except Exception:
-        union = g_iso_sel.geometry.unary_union
-    minx, miny, maxx, maxy = g_iso_sel.total_bounds
-    c = g.cx[minx:maxx, miny:maxy]
-    return c[c.intersects(union)]
+            out = g[g[col].map(_id_to_str).isin(ids)]
+    if (out is None or out.empty) and ISO_ID in g.columns:
+        out = subset_by_parent_multi(g, ISO_ID, iso_ids)
+    if (out is None or out.empty) and g_iso_sel is not None and not g_iso_sel.empty:
+        try:
+            union = g_iso_sel.geometry.union_all()
+        except Exception:
+            union = g_iso_sel.geometry.unary_union
+        minx, miny, maxx, maxy = g_iso_sel.total_bounds
+        c = g.cx[minx:maxx, miny:maxy]
+        out = c[c.intersects(union)]
+    if out is None or out.empty:
+        st.caption(f"{THEMATIC_LAYERS[key]['title']}: sem vínculo com o recorte — exibindo o município inteiro.")
+        return g
+    return out
+
 
 
 def _coerce_int(v):
@@ -2241,22 +2246,28 @@ def _fit_selected_post_level():
     if g is not None and ids and id_col in g.columns:
         set_view_to_gdf(subset_by_id_multi(g, id_col, ids), bump=bump, zmax=zmax)
 
+def _iso_selected():
+    return bool(ensure_set_of_str(st.session_state.get("selected_iso_ids")))
+
+
+def thematic_available(key) -> bool:
+    """Habilita a caixa quando o arquivo existe localmente ou há link/secret."""
+    fn = THEMATIC_LAYERS[key]["file"]
+    if any(_valid_file(d / fn) for d in thematic_dirs()) or _find_local_file(fn):
+        return True
+    return bool(_get_secret(f"PB_TEM_{key.upper()}") or THEMATIC_DRIVE_LINKS.get(key, ""))
 
 def _thematic_enabled():
-    lvl = st.session_state.get("level", "subpref")
-    return lvl in ("isocrona", "quadra") and bool(ensure_set_of_str(st.session_state.get("selected_iso_ids")))
+    return True
 
 def _selected_thematics():
-    if not _thematic_enabled():
-        return []
     return [k for k in THEMATIC_LAYERS if st.session_state.get(f"tem_{k}")]
 
-
 def _selected_overlays():
-    if not _thematic_enabled():
+    # contornos de setores/OD dependem do recorte das isócronas
+    if not _iso_selected():
         return []
-    return [k for k in OVERLAY_EXTRA if st.session_state.get(k)]
-
+    return [k for k in OVERLAY_EXTRA if st.session_state.get(k)]]
 
 def add_overlay_outline(m, g, name, id_col, color):
     if m is None or g is None or g.empty or id_col not in g.columns:
@@ -2271,13 +2282,11 @@ def add_overlay_outline(m, g, name, id_col, color):
                                    "fill": True, "fillOpacity": 0.0},
         tooltip=_mk_tooltip(id_col, f"{name}: ")).add_to(m)
 
-
 def _go_detailed():
     mark_ui_action()
     st.session_state["post_iso_view"] = "quadra"
     st.session_state["level"] = "quadra"
     st.session_state["last_level"] = None
-
 
 def control_panel():
     ss = st.session_state
@@ -2306,11 +2315,7 @@ def control_panel():
                   disabled=not ok_iso, on_click=_go_detailed)
         st.caption("Selecione uma ou mais isócronas antes de avançar.")
 
-    st.selectbox("Visualização pós-isócronas", options=["quadra", "lote", "censo", "od"],
-                 format_func=lambda x: {"quadra": "Quadras", "lote": "Lotes",
-                                        "censo": "Setor censitário", "od": "Zonas OD"}[x],
-                 key="post_iso_view", disabled=(lvl != "quadra"), on_change=mark_ui_action)
-    pv = ss.get("post_iso_view", "quadra")
+       pv = ss.get("post_iso_view", "quadra")
     if lvl == "quadra" and pv in ("od", "lote"):
         src = "od" if pv == "od" else "iptu"
         opts = ["(nenhuma)"] + ext_variables(src)
@@ -2322,15 +2327,18 @@ def control_panel():
         st.button("Ajustar ao selecionado", use_container_width=True,
                   on_click=lambda: (mark_ui_action(), _fit_selected_post_level()))
 
-    tem_ok = _thematic_enabled()
     with st.expander("Camadas para sobreposição", expanded=True):
-        if not tem_ok:
-            st.caption("Disponível após selecionar isócronas.")
+        st.caption("Sem isócronas selecionadas, as camadas aparecem no município inteiro.")
+        iso_ok = _iso_selected()
         for k, (lbl, *_r) in OVERLAY_EXTRA.items():
-            st.checkbox(lbl, key=k, disabled=not tem_ok, on_change=mark_ui_action)
+            st.checkbox(lbl + ("" if iso_ok else " (requer isócronas)"), key=k,
+                        disabled=not iso_ok, on_change=mark_ui_action)
         for k, cfg in THEMATIC_LAYERS.items():
-            lbl = cfg["title"] + (" (município inteiro)" if cfg.get("full") else "")
-            st.checkbox(lbl, key=f"tem_{k}", disabled=not tem_ok, on_change=mark_ui_action)
+            ok = thematic_available(k)
+            lbl = cfg["title"] + ("" if ok else " (indisponível)")
+            if not ok:
+                ss[f"tem_{k}"] = False
+            st.checkbox(lbl, key=f"tem_{k}", disabled=not ok, on_change=mark_ui_action)
     st.divider()
 
     st.checkbox("Habilitar seleção por caixa/laço", key="selection_draw_mode", on_change=mark_ui_action)
@@ -2353,6 +2361,38 @@ def control_panel():
 # =============================================================================
 # MAP RENDER
 # =============================================================================
+
+def draw_overlays(m, title):
+    ss = st.session_state
+    tem_keys, ovs = _selected_thematics(), _selected_overlays()
+    if m is None or not (tem_keys or ovs):
+        return title
+    iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
+    g_iso = read_layer("iso") if iso_ids else None
+    g_iso_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
+    exports, titles = [], []
+    for k in tem_keys:
+        gt = read_thematic(k)
+        if gt is None:
+            continue
+        gf = filter_thematic(k, gt, iso_ids, g_iso_sel)
+        gc, legend = classify_thematic(k, gf) if gf is not None and not gf.empty else (gf, [])
+        add_thematic_to_map(m, k, gc, legend)
+        titles.append(THEMATIC_LAYERS[k]["title"])
+        if gc is not None and not gc.empty:
+            exports.append(pd.DataFrame(gc.drop(columns="geometry", errors="ignore"))
+                           .assign(camada=THEMATIC_LAYERS[k]["title"]))
+    if exports:
+        ss["_export_thematic"] = ("tematicos", gdf_to_csv_bytes(pd.concat(exports, ignore_index=True)))
+    if ovs:
+        data_ov = build_post_iso_data()
+        for ov in ovs:
+            nm, src, idc, cor = OVERLAY_EXTRA[ov]
+            add_overlay_outline(m, data_ov.get(f"g_{src}"), nm, idc, cor)
+    if g_iso_sel is not None and not g_iso_sel.empty:
+        add_boundary_overlay(m, g_iso_sel, weight=2.0, cache_key=f"bnd:iso:{'|'.join(sorted(iso_ids))}")
+    return title + (" | " + ", ".join(titles) if titles else "")
+
 def render_map_panel():
     ss = st.session_state
     level = ss.get("level", "subpref")
@@ -2550,37 +2590,8 @@ def render_map_panel():
             if sel and id_for_sel in view_gdf.columns:
                 view_gdf = subset_by_id_multi(view_gdf, id_for_sel, sel)
             set_export("_export_view", f"{post_view}_isocronas", view_gdf)
-
-        ovs = _selected_overlays()
-        if m is not None and (tem_on or ovs):
-            iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
-            g_iso = read_layer("iso")
-            g_iso_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
-            exports, titles = [], []
-            for tem_key in tem_keys:
-                gt = read_thematic(tem_key)
-                if gt is None:
-                    continue
-                gf = filter_thematic(tem_key, gt, iso_ids, g_iso_sel)
-                gc, legend = classify_thematic(tem_key, gf) if gf is not None and not gf.empty else (gf, [])
-                add_thematic_to_map(m, tem_key, gc, legend)
-                titles.append(THEMATIC_LAYERS[tem_key]["title"])
-                if gc is not None and not gc.empty:
-                    exports.append(pd.DataFrame(gc.drop(columns="geometry", errors="ignore"))
-                                   .assign(camada=THEMATIC_LAYERS[tem_key]["title"]))
-            if titles:
-                title += " | " + ", ".join(titles)
-            if exports:
-                ss["_export_thematic"] = ("tematicos_isocronas",
-                                          gdf_to_csv_bytes(pd.concat(exports, ignore_index=True)))
-            if ovs:
-                data_ov = build_post_iso_data()
-                for ov in ovs:
-                    nm, src, idc, cor = OVERLAY_EXTRA[ov]
-                    add_overlay_outline(m, data_ov.get(f"g_{src}"), nm, idc, cor)
-            if g_iso_sel is not None and not g_iso_sel.empty:
-                add_boundary_overlay(m, g_iso_sel, weight=2.0, cache_key=f"bnd:iso:{'|'.join(sorted(iso_ids))}")
-
+            
+    title = draw_overlays(m, title)
     if m is None:
         return
     add_fixed_layers(m)
