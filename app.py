@@ -130,7 +130,7 @@ DENS_BINS = [(2000, "0 – 2.000 hab/hec"), (4000, "2.001 – 4.000 hab/hec"),
 DENS_COL = "densidade_demografica"
 DENS_N_CLASSES = 6
 # paleta crescente (clara -> escura)
-DENS_COLORS = ["#fee0b6", "#fdb863", "#e08215", "#c65534", "#b35807", "#7f3b08"]]
+DENS_COLORS = ["#fee0b6", "#fdb863", "#e08215", "#c65534", "#b35807", "#7f3b08"]
 
 THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
     "apa": {"title": "APA", "file": "apa.parquet", "label": "NOME_CAPS", "kind": "auto"},
