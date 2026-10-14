@@ -1518,14 +1518,16 @@ def inject_css():
         .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:14px 15px; width:100%; }}
         .pb-header .pb-title {{ font-size:2.7rem; font-weight:900; line-height:1.05; }}
         .pb-subtitle {{ font-size:1.44rem; opacity:.95; margin-top:5px; }}
-        h4.pb-title {{ margin:0 0 .25rem 0 !important; font-size:1.15rem !important; }}
+        h4.pb-title, .st-key-pb_card_map h3, .st-key-pb_card_map h3 * {{
+            margin:0 0 .35rem 0 !important; font-size:1.7rem !important; font-weight:700 !important; }}
 
         /* ---------- Tipografia ---------- */
-        .stTabs [data-baseweb="tab-list"] button[data-baseweb="tab"] p,
-        .stTabs [data-baseweb="tab-list"] button[data-baseweb="tab"] div[data-testid="stMarkdownContainer"] p {{
-            font-size:1.5rem !important; font-weight:700 !important; }}
-        .stTabs [data-baseweb="tab-list"] button[data-baseweb="tab"] {{
-            padding:.5rem 1rem !important; height:auto !important; }}
+        .stTabs button[role="tab"], .stTabs button[role="tab"] p,
+        .stTabs button[role="tab"] div, .stTabs button[role="tab"] span,
+        div[data-testid="stTabs"] button p, button[data-testid="stTab"] p {{
+            font-size:28px !important; font-weight:700 !important; line-height:1.2 !important; }}
+        .stTabs button[role="tab"] {{
+            padding:.6rem 1rem !important; height:auto !important; min-height:3rem !important; }}
         .stTabs [data-baseweb="tab-list"] {{ gap:1.5rem; }}
         .stMarkdown p, .stMarkdown li, .stMarkdown td, .stMarkdown th {{
             font-size:1.34rem !important; line-height:1.65 !important; }}
@@ -1566,7 +1568,6 @@ def inject_css():
             background:{PB_BTN} !important; color:#fff !important; border:1px solid {PB_BTN} !important; }}
         </style>
         """, unsafe_allow_html=True)
-
 
 def render_header():
     st.markdown(
