@@ -1526,7 +1526,7 @@ def inject_css():
         [data-testid="stTab"] [data-testid="stMarkdownContainer"] p,
         [role="tab"] [data-testid="stMarkdownContainer"] p,
         [data-testid="stTab"] p, [role="tab"] p {{
-            font-size:28px !important; font-weight:700 !important; line-height:1.2 !important; }}
+            font-size:22px !important; font-weight:700 !important; line-height:1.2 !important; }}
         [data-testid="stTab"], [role="tab"] {{
             padding:.6rem 1.2rem !important; height:auto !important; min-height:3rem !important; }}
         [role="tablist"], [data-baseweb="tab-list"] {{ gap:1.5rem !important; }}
