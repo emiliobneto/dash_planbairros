@@ -2758,9 +2758,7 @@ def render_info_buttons(lvl):
     if lvl == "quadra" and ss.get("post_iso_view", "quadra") == "quadra" and ss.get("variable") == "Cluster":
         _info_pop("Sobre os tipos de áreas urbanas", TXT_CLUSTER)
     if "lcz" in _selected_thematics():
-</invoke>:
         _info_pop("Sobre as zonas climáticas (LCZ)", TXT_LCZ)
-
 
 if hasattr(st, "dialog"):
     @st.dialog("Painel Interativo de Dados — PlanBairros", width="large")
