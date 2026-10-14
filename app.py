@@ -1385,9 +1385,9 @@ def _logo_data_uri():
 def inject_css():
     st.markdown(
         f"""
+        <style>
         .stTabs button[data-baseweb="tab"] p {{ font-size:12pt !important; font-weight:700 !important; }}
         .pb-footer {{ font-size:.95rem; color:#555; font-style:italic; margin-top:6px; }}
-        <style>
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
         html, body, .stApp {{ font-family: 'Roboto', Arial, sans-serif; }}
         .main .block-container {{ padding-top:.15rem !important; padding-bottom:.6rem !important; }}
