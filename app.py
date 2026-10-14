@@ -1056,7 +1056,7 @@ def _cls_lcz(v):
         code = int(t) if t.isdigit() else 101 + "ABCDEFG".index(t)
     else:
         code = _coerce_int(v)
-    return LCZ_LABELS.get(code, "Sem classe"))
+    return LCZ_LABELS.get(code, "Sem classe")
 
 
 CLASSIFIERS = {"corredor": _cls_corredor, "favela": _cls_favela, "decliv": _cls_decliv,
