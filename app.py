@@ -127,8 +127,10 @@ LCZ_COLORS_BY_CODE = {
 DENS_BINS = [(2000, "0 – 2.000 hab/hec"), (4000, "2.001 – 4.000 hab/hec"),
              (6000, "4.001 – 6.000 hab/hec"), (8000, "6.001 – 8.000 hab/hec"),
              (10000, "8.001 – 10.000 hab/hec"), (float("inf"), "> 10.000 hab/hec")]
-# Escala monocromática de vermelhos
-DENS_COLORS = ["#fee0b6", "#fdb863", "#c65534", "#e08215", "#b35807", "#7f3b08"]
+DENS_COL = "densidade_demografica"
+DENS_N_CLASSES = 6
+# paleta crescente (clara -> escura)
+DENS_COLORS = ["#fee0b6", "#fdb863", "#e08215", "#c65534", "#b35807", "#7f3b08"]]
 
 THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
     "apa": {"title": "APA", "file": "apa.parquet", "label": "NOME_CAPS", "kind": "auto"},
@@ -1014,17 +1016,6 @@ def read_thematic(key):
     except Exception as e:
         st.warning(f"Erro ao ler {p.name}: {e}")
         g = None
-    if g is None and key == "densidade":
-        try:
-            df = pd.read_parquet(p)
-            dd = _col(df, "dd_setor")
-            censo = read_layer("censo")
-            if dd and censo is not None:
-                df["__k"] = df[dd].map(_id_to_str)
-                g = censo[[CENSO_ID, "geometry"]].merge(df, left_on=CENSO_ID, right_on="__k", how="inner")
-                g = gpd.GeoDataFrame(g, geometry="geometry", crs=4326)
-        except Exception as e:
-            st.warning(f"Densidade: falha ao associar dd_setor = censo_id ({e}).")
     if g is None or g.empty:
         st.warning(f"Camada temática '{key}' vazia ou inválida."); return None
     g = normalize_id_cols(_drop_bad_geoms(standardize_columns(g)), [ISO_ID, CENSO_ID])
@@ -1119,17 +1110,34 @@ def _cls_vias(v):
     return "Outros"
 
 
-def _cls_dens(v):
-    try:
-        x = float(str(v).replace(",", "."))
-    except Exception:
-        return "Sem informação"
-    if pd.isna(x):
-        return "Sem informação"
-    for lim, lab in DENS_BINS:
-        if x <= lim:
-            return lab
-    return DENS_BINS[-1][1]
+def _dens_num(s):
+    return pd.to_numeric(s.astype(str).str.replace(",", ".", regex=False), errors="coerce")
+
+
+def dens_bins():
+    """[(limite_superior, rótulo)] calculados por quantis de densidade_demografica (município todo)."""
+    cached = st.session_state.get("_dens_bins")
+    if cached:
+        return cached
+    g = read_layer("censo")
+    col = _col(g, DENS_COL) if g is not None else None
+    if not col:
+        return []
+    v = _dens_num(g[col]).dropna()
+    if v.empty:
+        return []
+    edges = sorted(set(v.quantile([i / DENS_N_CLASSES for i in range(DENS_N_CLASSES + 1)]).round(0)))
+    if len(edges) < 2:
+        edges = [float(v.min()), float(v.max())]
+    fmt = lambda x: f"{x:,.0f}".replace(",", ".")
+    bins = [(edges[i + 1], f"{fmt(edges[i])} – {fmt(edges[i + 1])} hab/hec")
+            for i in range(len(edges) - 1)]
+    st.session_state["_dens_bins"] = bins
+    return bins
+
+
+def _cls_dens(v):  # mantido p/ CLASSIFIERS; a classificação real é vetorizada em classify_thematic
+    return "Sem informação"
 
 
 def _cls_lcz(v):
@@ -1163,9 +1171,18 @@ def classify_thematic(key, g):
         g["__leg"] = cfg["title"]; g["__color"] = cfg["color"]
         legend = [(cfg["title"], cfg["color"])]
     else:
-        src = _col(g, cfg["class_col"])
-        g["__leg"] = g[src].map(CLASSIFIERS[cfg["fn"]]) if src else "Sem informação"
+       src = _col(g, cfg["class_col"])
         colors = cfg["colors"]
+        if key == "densidade" and src:
+            bins = dens_bins()
+            labels = [b[1] for b in bins]
+            colors = dict(zip(labels, DENS_COLORS[-len(labels):]))
+            x = _dens_num(g[src])
+            edges = [-float("inf")] + [b[0] for b in bins[:-1]] + [float("inf")]
+            g["__leg"] = pd.cut(x, bins=edges, labels=labels, include_lowest=True) \
+                           .astype(object).where(x.notna(), "Sem informação")
+        else:
+            g["__leg"] = g[src].map(CLASSIFIERS[cfg["fn"]]) if src else "Sem informação"
         g["__color"] = g["__leg"].map(colors).fillna("#bdbdbd")
         present = set(g["__leg"].unique())
         legend = [(k, v) for k, v in colors.items() if k in present]
@@ -2715,6 +2732,7 @@ def render_map_panel():
                                 "last_object_clicked_tooltip", "all_drawings",
                                 "last_active_drawing"])
     ss["_last_map"] = m
+    ss["_map_level_rendered"] = level
     if level == "isocrona" or (level == "quadra" and ss.get("variable") == "Cluster"):
         st.markdown(f"<div class='pb-footer'>{FOOTER_TXT}</div>", unsafe_allow_html=True)
     if level == "quadra" and ss.get("post_iso_view") in ("od", "lote"):
@@ -2729,8 +2747,7 @@ def render_map_panel():
                 elif diag.get("feicoes_vinculadas", 0) == 0:
                     st.warning("Nenhuma feição vinculada — verifique a grafia/formato das chaves abaixo.")
                 st.json(diag)
-        ss["_map_level_rendered"] = level
-
+        
 # =============================================================================
 # APP
 # =============================================================================
