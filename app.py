@@ -326,7 +326,7 @@ def _mk_aliases(base: str) -> Set[str]:
 
 
 COL_ALIASES: Dict[str, Set[str]] = {
-    #SUBPREF_ID: _mk_aliases(SUBPREF_ID),
+    SUBPREF_ID: _mk_aliases(SUBPREF_ID),
     DIST_ID: _mk_aliases(DIST_ID) | {"id_distrito", "dist_id", "ds_cod"},
     ISO_ID: _mk_aliases(ISO_ID),
     OD_ID: _mk_aliases(OD_ID) | {"OD_ID", "zona_od", "zonaod", "id_od", "od"},
