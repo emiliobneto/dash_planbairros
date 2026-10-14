@@ -2518,34 +2518,34 @@ def render_map_panel():
                 view_gdf = subset_by_id_multi(view_gdf, id_for_sel, sel)
             set_export("_export_view", f"{post_view}_isocronas", view_gdf)
 
- ovs = _selected_overlays()
-    if m is not None and (tem_on or ovs):
-        iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
-        g_iso = read_layer("iso")
-        g_iso_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
-        exports, titles = [], []
-        for tem_key in tem_keys:
-            gt = read_thematic(tem_key)
-            if gt is None:
-                continue
-            gf = filter_thematic(tem_key, gt, iso_ids, g_iso_sel)
-            gc, legend = classify_thematic(tem_key, gf) if gf is not None and not gf.empty else (gf, [])
-            add_thematic_to_map(m, tem_key, gc, legend)
-            titles.append(THEMATIC_LAYERS[tem_key]["title"])
-            if gc is not None and not gc.empty:
-                exports.append(pd.DataFrame(gc.drop(columns="geometry", errors="ignore"))
-                               .assign(camada=THEMATIC_LAYERS[tem_key]["title"]))
-        if titles:
-            title += " | " + ", ".join(titles)
-        if exports:
-            ss["_export_thematic"] = ("tematicos_isocronas",
-                                      gdf_to_csv_bytes(pd.concat(exports, ignore_index=True)))
-        if ovs:
-            data_ov = build_post_iso_data()
-            for ov in ovs:
-                nm, src, idc, cor = OVERLAY_EXTRA[ov]
-                add_overlay_outline(m, data_ov.get(f"g_{src}"), nm, idc, cor)
-        if g_iso_sel is not None and not g_iso_sel.empty:
+     ovs = _selected_overlays()
+        if m is not None and (tem_on or ovs):
+            iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
+            g_iso = read_layer("iso")
+            g_iso_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
+            exports, titles = [], []
+            for tem_key in tem_keys:
+                gt = read_thematic(tem_key)
+                if gt is None:
+                    continue
+                gf = filter_thematic(tem_key, gt, iso_ids, g_iso_sel)
+                gc, legend = classify_thematic(tem_key, gf) if gf is not None and not gf.empty else (gf, [])
+                add_thematic_to_map(m, tem_key, gc, legend)
+                titles.append(THEMATIC_LAYERS[tem_key]["title"])
+                if gc is not None and not gc.empty:
+                    exports.append(pd.DataFrame(gc.drop(columns="geometry", errors="ignore"))
+                                   .assign(camada=THEMATIC_LAYERS[tem_key]["title"]))
+            if titles:
+                title += " | " + ", ".join(titles)
+            if exports:
+                ss["_export_thematic"] = ("tematicos_isocronas",
+                                          gdf_to_csv_bytes(pd.concat(exports, ignore_index=True)))
+            if ovs:
+                data_ov = build_post_iso_data()
+                for ov in ovs:
+                    nm, src, idc, cor = OVERLAY_EXTRA[ov]
+                    add_overlay_outline(m, data_ov.get(f"g_{src}"), nm, idc, cor)
+            if g_iso_sel is not None and not g_iso_sel.empty:
             add_boundary_overlay(m, g_iso_sel, weight=2.0, cache_key=f"bnd:iso:{'|'.join(sorted(iso_ids))}")
 
     if m is None:
