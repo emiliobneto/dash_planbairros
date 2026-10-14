@@ -2520,7 +2520,7 @@ def render_map_panel():
         m = _new_map()
         ttip = "sp_nome" if "sp_nome" in g_sub.columns else SUBPREF_ID
         tol = SIMPLIFY_TOL_BY_LEVEL["subpref"]
-        add_polygons_selectable(m, g_sub, "Subprefeituras", SUBPREF_ID, tooltip_col=ttip,
+        add_polygons_selectable(m, g_sub, "Subprefeituras", SUBPREF_ID, tooltip_col=ttip, base_weight=3,
             fill_opacity=0.06, selected_fill_opacity=0.0, tooltip_prefix="Subpref: ",
             simplify_tol=tol, cache_key=f"subpref:{tol}")
         if "sp_nome" in g_sub.columns:
@@ -2558,7 +2558,7 @@ def render_map_panel():
             cache_key=f"dist:sp:{sp}:{len(g_show)}:v2")
         if "ds_nome" in g_show.columns:
             add_labels_on_map(m, g_show, "ds_nome", font_size=14)
-        add_boundary_overlay(m, g_parent, weight=2.0, cache_key=f"bnd:sp:{sp}")
+        add_boundary_overlay(m, g_parent, weight=4, cache_key=f"bnd:sp:{sp}")
         set_export("_export_view", "distritos", g_show)
 
     elif level == "isocrona":
