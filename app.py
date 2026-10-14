@@ -65,8 +65,8 @@ ISO_FILL_OPACITY_CLASSES = 0.05
 FIXED_LAYER_STYLE = {
     "area_verde":   {"file": "area_verde.geojson",  "color": "#B1BF7C", "weight": 0,   "fill": True,  "fill_opacity": 0.55, "name": "Áreas verdes"},
     "rios":         {"file": "rios.geojson",         "color": "#14407D", "weight": 2.0, "fill": True,  "fill_opacity": 0.35, "name": "Rios"},
-    "linhas_metro": {"file": "linhas metro.geojson", "color": "#000000", "weight": 2.0, "fill": False, "fill_opacity": 0.0,  "name": "Metrô"},
-    "linhas_trem":  {"file": "linhas trem.geojson",  "color": "#000000", "weight": 1.5, "fill": False, "fill_opacity": 0.0,  "name": "Trem", "dash": "6 4"},
+    "linhas_metro": {"file": "linhas metro.geojson", "color": "#7A2021", "weight": 1.5, "fill": False, "fill_opacity": 0.0,  "name": "Metrô"},
+    "linhas_trem":  {"file": "linhas trem.geojson",  "color": "#7A2021", "weight": 1.5, "fill": False, "fill_opacity": 0.0,  "name": "Trem", "dash": "6 4"},
 }
 
 # =============================================================================
