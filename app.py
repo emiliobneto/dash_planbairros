@@ -154,9 +154,10 @@ THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
     "densidade": {"title": "Densidade demográfica", "file": "densidade_demografica.parquet",
                   "label": "hab_hec", "kind": "class", "class_col": "hab_hec", "fn": "dens",
                   "colors": dict(zip([b[1] for b in DENS_BINS], DENS_COLORS))},
-    "lcz": {"title": "Zona climática local", "file": "LCZ.parquet", "label": "DN", "kind": "class",
-            "class_col": "DN", "fn": "lcz", "tt_leg": True,
+    "lcz": {"title": "Zona climática local", "file": "LCZ.kmz", "label": "DN", "kind": "class",
+            "class_col": "DN", "fn": "lcz", "tt_leg": True, "full": True,
             "colors": {LCZ_LABELS[k]: LCZ_COLORS_BY_CODE[k] for k in LCZ_LABELS}},
+
 }
 PALETTE_AUTO = ["#6FA097", "#D58243", "#8073ac", "#F4DD63", "#14407D", "#B1BF7C",
                 "#C65534", "#542688", "#fdb863", "#b2abd2", "#7f3b08", "#f4a582"]
@@ -171,7 +172,7 @@ IPTU_URL = "https://drive.google.com/file/d/1mTY_Y1uCAQ2GeZ1o8Kf9pZrqTn9v_sKE/vi
 # src: (nomes locais, secret, url, nome no cache, candidatos à coluna-chave, coluna da camada)
 EXT_TABLES = {
     "od": (["od_23.parquet", "od_23.csv", "od_23.xlsx", "od_23"], "PB_OD23_FILE", OD23_URL,
-           "od_23.dat", ["Zona_D", "zona_d", "zonad", "zona_destino"], "od_id"),
+           "od_23.dat", ["ZONA_D", "Zona_D", "zona_d", "zonad", "zona_destino"], "od_id"),
     "iptu": (["dashiptu_2026.csv"], "PB_IPTU_FILE", IPTU_URL, "dashiptu_2026.csv",
              ["Lote_id", "lote_id", "id_lote", "lote", "sql"], "lote_id"),
 }
@@ -179,6 +180,11 @@ ID_LIKE_RE = re.compile(r"(^|_)(zona|id|cod|codigo|sql|setor|lote|quadra|cd)(_|$
 # Escala monocromática de marrons (intensidade OD / IPTU)
 CHORO_COLORS = ["#fee0b6", "#fdb863", "#e08215", "#b35807", "#7f3b08"]
 
+FOOTER_TXT = "Informações não oficiais. Elementos desenvolvidos como resutlado da pesquisa Planbairro"
+OVERLAY_EXTRA = {
+    "ov_censo": ("Setores censitários (contorno)", "censo", "censo_id", "#14407D"),
+    "ov_od": ("Zonas OD (contorno)", "od", "od_id", "#C65534"),
+}
 # =============================================================================
 # VISUALIZAÇÕES / CSV
 # =============================================================================
@@ -472,10 +478,17 @@ def get_quadras_subset_for_mode(g_quad, *, iso_ids, filter_censo_ids):
 
 
 def get_censo_subset_for_isos(g_censo, iso_ids):
-    if g_censo is None or g_censo.empty:
+    if g_censo is None or g_censo.empty or not iso_ids:
         return _empty(g_censo)
-    col = CENSO_PARENT if CENSO_PARENT in g_censo.columns else None
-    return subset_by_parent_multi(g_censo, col, iso_ids) if col else _empty(g_censo)
+    col = _col_ci(g_censo, ISO_ID)
+    out = subset_by_parent_multi(g_censo, col, iso_ids) if col else _empty(g_censo)
+    if out is None or out.empty:  # fallback: setores dentro das isócronas
+        g_iso = read_layer("iso")
+        par = subset_by_parent_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
+        out = _spatial_children(g_censo, par)
+    if out is not None and CENSO_ID in out.columns:
+        out = out.drop_duplicates(CENSO_ID)
+    return out
 
 
 def get_lotes_subset_for_isos(g_lote, iso_ids):
@@ -875,7 +888,37 @@ def _norm_txt(v) -> str:
     s = unicodedata.normalize("NFKD", str(v)).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"\s+", " ", s).strip().lower()
 
-
+@st.cache_data(show_spinner="Lendo LCZ.kmz…", ttl=3600, max_entries=2)
+def read_kmz(path):
+    import zipfile, tempfile
+    tmp = tempfile.mkdtemp()
+    with zipfile.ZipFile(path) as z:
+        z.extractall(tmp)
+        kmls = [n for n in z.namelist() if n.lower().endswith(".kml")]
+    parts = []
+    for k in kmls:
+        p = os.path.join(tmp, k)
+        try:
+            layers = list(gpd.list_layers(p)["name"])
+        except Exception:
+            layers = [None]
+        for lyr in layers:
+            try:
+                gl = gpd.read_file(p, layer=lyr) if lyr else gpd.read_file(p)
+                gl["camada_kml"] = str(lyr or k)
+                parts.append(gl)
+            except Exception:
+                continue
+    if not parts:
+        return None
+    g = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry",
+                         crs=parts[0].crs or 4326)
+    g = g.to_crs(4326) if g.crs.to_epsg() != 4326 else g
+    g = g[g.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
+    name = g["Name"].fillna("").astype(str) if "Name" in g.columns else ""
+    g["DN"] = (name + " " + g["camada_kml"].astype(str)).str.strip()
+    return g
+    
 def read_thematic(key):
     p = ensure_thematic_file(key)
     if p is None:
@@ -887,8 +930,9 @@ def read_thematic(key):
         return cached
     g = None
     try:
-        g = read_gdf_parquet(str(p))
-    except Exception:
+        g = read_kmz(str(p)) if p.suffix.lower() == ".kmz" else read_gdf_parquet(str(p))
+    except Exception as e:
+        st.warning(f"Erro ao ler {p.name}: {e}")
         g = None
     if g is None and key == "densidade":
         try:
@@ -909,7 +953,7 @@ def read_thematic(key):
 
 
 def filter_thematic(key, g, iso_ids, g_iso_sel):
-    if g is None or g.empty:
+    if THEMATIC_LAYERS[key].get("full"):
         return g
     if key == "densidade":
         censo = read_layer("censo")
@@ -1005,7 +1049,14 @@ def _cls_dens(v):
 
 
 def _cls_lcz(v):
-    return LCZ_LABELS.get(_coerce_int(v), "Sem classe")
+    s = "" if v is None else str(v).strip().upper()
+    m = re.search(r"(?:LCZ\s*)?\b(10|[1-9]|[A-G])\b", s)
+    if m:
+        t = m.group(1)
+        code = int(t) if t.isdigit() else 101 + "ABCDEFG".index(t)
+    else:
+        code = _coerce_int(v)
+    return LCZ_LABELS.get(code, "Sem classe"))
 
 
 CLASSIFIERS = {"corredor": _cls_corredor, "favela": _cls_favela, "decliv": _cls_decliv,
@@ -1334,6 +1385,8 @@ def _logo_data_uri():
 def inject_css():
     st.markdown(
         f"""
+        .stTabs button[data-baseweb="tab"] p {{ font-size:12pt !important; font-weight:700 !important; }}
+        .pb-footer {{ font-size:.95rem; color:#555; font-style:italic; margin-top:6px; }}
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
         html, body, .stApp {{ font-family: 'Roboto', Arial, sans-serif; }}
@@ -1961,12 +2014,11 @@ def build_post_iso_data():
     if g_censo is not None:
         out["g_censo"] = get_censo_subset_for_isos(g_censo, iso_ids)
     post_view_now = st.session_state.get("post_iso_view", "quadra")
-    g_od = read_layer("od")
+        g_od = read_layer("od")
     if g_od is not None:
-        if ISO_ID in g_od.columns:
-            out["g_od"] = subset_by_parent_multi(g_od, ISO_ID, iso_ids)
-            if post_view_now == "od":
-                out["g_od"] = attach_table(out["g_od"], OD_ID, "od")
+        col_iso = _col_ci(g_od, ISO_ID)
+        if col_iso:
+            out["g_od"] = attach_table(subset_by_parent_multi(g_od, col_iso, iso_ids), OD_ID, "od")
         else:
             st.warning(f"ZonasOD sem '{ISO_ID}'. Colunas: {list(g_od.columns)}")
     post_view = st.session_state.get("post_iso_view", "quadra")
@@ -2161,6 +2213,31 @@ def _thematic_enabled():
     lvl = st.session_state.get("level", "subpref")
     return lvl in ("isocrona", "quadra") and bool(ensure_set_of_str(st.session_state.get("selected_iso_ids")))
 
+def _selected_thematics():
+    if not _thematic_enabled():
+        return []
+    return [k for k in THEMATIC_LAYERS if st.session_state.get(f"tem_{k}")]
+
+
+def _selected_overlays():
+    if not _thematic_enabled():
+        return []
+    return [k for k in OVERLAY_EXTRA if st.session_state.get(k)]
+
+
+def add_overlay_outline(m, g, name, id_col, color):
+    if m is None or g is None or g.empty or id_col not in g.columns:
+        return
+    mini = g[[id_col, "geometry"]].copy()
+    mini[id_col] = mini[id_col].map(_id_to_str)
+    gj = _simplify_to_geojson(mini, 0.00003, [id_col])
+    if not gj:
+        return
+    folium.GeoJson(data=gj, name=name, pane="thematic", smooth_factor=SMOOTH_FACTOR,
+        style_function=lambda _f: {"color": color, "weight": 1.6, "opacity": 1.0, "dashArray": "4 3",
+                                   "fill": True, "fillOpacity": 0.0},
+        tooltip=_mk_tooltip(id_col, f"{name}: ")).add_to(m)
+
 
 def _go_detailed():
     mark_ui_action()
@@ -2213,13 +2290,15 @@ def control_panel():
                   on_click=lambda: (mark_ui_action(), _fit_selected_post_level()))
 
     tem_ok = _thematic_enabled()
-    if not tem_ok:
-        ss["thematic_layer"] = "Nenhum"
-    st.selectbox("Mapa temático", options=["Nenhum"] + list(THEMATIC_LAYERS.keys()),
-                 format_func=lambda k: "Nenhum" if k == "Nenhum" else THEMATIC_LAYERS[k]["title"],
-                 key="thematic_layer", disabled=not tem_ok, on_change=mark_ui_action)
-    if not tem_ok:
-        st.caption("Disponível após selecionar isócronas.")
+    with st.expander("Camadas para sobreposição", expanded=True):
+        if not tem_ok:
+            st.caption("Disponível após selecionar isócronas.")
+        for k, (lbl, *_r) in OVERLAY_EXTRA.items():
+            st.checkbox(lbl, key=k, disabled=not tem_ok, on_change=mark_ui_action)
+        for k, cfg in THEMATIC_LAYERS.items():
+            lbl = cfg["title"] + (" (município inteiro)" if cfg.get("full") else "")
+            st.checkbox(lbl, key=f"tem_{k}", disabled=not tem_ok, on_change=mark_ui_action)
+)
     st.divider()
 
     st.checkbox("Habilitar seleção por caixa/laço", key="selection_draw_mode", on_change=mark_ui_action)
@@ -2247,8 +2326,8 @@ def render_map_panel():
     level = ss.get("level", "subpref")
     ensure_variable_for_level(level)
     title, m = "", None
-    tem_key = ss.get("thematic_layer", "Nenhum")
-    tem_on = tem_key != "Nenhum" and _thematic_enabled()
+    tem_keys = _selected_thematics()
+    tem_on = bool(tem_keys)
     fo = (lambda x: 0.0) if tem_on else (lambda x: x)
     ss["_export_view"] = None
     ss["_export_thematic"] = None
@@ -2440,18 +2519,33 @@ def render_map_panel():
                 view_gdf = subset_by_id_multi(view_gdf, id_for_sel, sel)
             set_export("_export_view", f"{post_view}_isocronas", view_gdf)
 
-    # --- Mapa temático (abaixo dos limites) ---
-    if m is not None and tem_on:
+ ovs = _selected_overlays()
+    if m is not None and (tem_on or ovs):
         iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
         g_iso = read_layer("iso")
         g_iso_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
-        gt = read_thematic(tem_key)
-        if gt is not None:
+        exports, titles = [], []
+        for tem_key in tem_keys:
+            gt = read_thematic(tem_key)
+            if gt is None:
+                continue
             gf = filter_thematic(tem_key, gt, iso_ids, g_iso_sel)
             gc, legend = classify_thematic(tem_key, gf) if gf is not None and not gf.empty else (gf, [])
             add_thematic_to_map(m, tem_key, gc, legend)
-            title += f" | {THEMATIC_LAYERS[tem_key]['title']}"
-            set_export("_export_thematic", f"{tem_key}_isocronas", gc)
+            titles.append(THEMATIC_LAYERS[tem_key]["title"])
+            if gc is not None and not gc.empty:
+                exports.append(pd.DataFrame(gc.drop(columns="geometry", errors="ignore"))
+                               .assign(camada=THEMATIC_LAYERS[tem_key]["title"]))
+        if titles:
+            title += " | " + ", ".join(titles)
+        if exports:
+            ss["_export_thematic"] = ("tematicos_isocronas",
+                                      gdf_to_csv_bytes(pd.concat(exports, ignore_index=True)))
+        if ovs:
+            data_ov = build_post_iso_data()
+            for ov in ovs:
+                nm, src, idc, cor = OVERLAY_EXTRA[ov]
+                add_overlay_outline(m, data_ov.get(f"g_{src}"), nm, idc, cor)
         if g_iso_sel is not None and not g_iso_sel.empty:
             add_boundary_overlay(m, g_iso_sel, weight=2.0, cache_key=f"bnd:iso:{'|'.join(sorted(iso_ids))}")
 
@@ -2469,6 +2563,8 @@ def render_map_panel():
     st_folium(m, height=780, use_container_width=True, key=f"{MAP_KEY}_{level}",
               returned_objects=["last_clicked", "last_object_clicked", "last_object_clicked_tooltip",
                                 "all_drawings", "last_active_drawing"])
+    if level == "isocrona" or (level == "quadra" and ss.get("variable") == "Cluster"):
+        st.markdown(f"<div class='pb-footer'>{FOOTER_TXT}</div>", unsafe_allow_html=True)
     if level == "quadra" and ss.get("post_iso_view") in ("od", "lote"):
         src = "od" if ss.get("post_iso_view") == "od" else "iptu"
         diag = ss.get(f"_diag_{src}")
@@ -2662,7 +2758,8 @@ def render_info_buttons(lvl):
         _info_pop("Sobre as áreas de referência", TXT_ISO)
     if lvl == "quadra" and ss.get("post_iso_view", "quadra") == "quadra" and ss.get("variable") == "Cluster":
         _info_pop("Sobre os tipos de áreas urbanas", TXT_CLUSTER)
-    if ss.get("thematic_layer") == "lcz" and _thematic_enabled():
+    if "lcz" in _selected_thematics():
+</invoke>:
         _info_pop("Sobre as zonas climáticas (LCZ)", TXT_LCZ)
 
 
