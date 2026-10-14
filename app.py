@@ -1521,7 +1521,12 @@ def inject_css():
         h4.pb-title {{ margin:0 0 .25rem 0 !important; font-size:1.15rem !important; }}
 
         /* ---------- Tipografia ---------- */
-        .stTabs button[data-baseweb="tab"] p {{ font-size:12pt !important; font-weight:700 !important; }}
+        .stTabs [data-baseweb="tab-list"] button[data-baseweb="tab"] p,
+        .stTabs [data-baseweb="tab-list"] button[data-baseweb="tab"] div[data-testid="stMarkdownContainer"] p {{
+            font-size:1.5rem !important; font-weight:700 !important; }}
+        .stTabs [data-baseweb="tab-list"] button[data-baseweb="tab"] {{
+            padding:.5rem 1rem !important; height:auto !important; }}
+        .stTabs [data-baseweb="tab-list"] {{ gap:1.5rem; }}
         .stMarkdown p, .stMarkdown li, .stMarkdown td, .stMarkdown th {{
             font-size:1.34rem !important; line-height:1.65 !important; }}
         .stMarkdown h2 {{ font-size:2.28rem !important; }}
@@ -1561,7 +1566,6 @@ def inject_css():
             background:{PB_BTN} !important; color:#fff !important; border:1px solid {PB_BTN} !important; }}
         </style>
         """, unsafe_allow_html=True)
-
 
 
 def render_header():
