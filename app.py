@@ -190,6 +190,9 @@ OVERLAY_EXTRA = {
     "ov_censo": ("Setores censitários (contorno)", "censo", "censo_id", "#14407D"),
     "ov_od": ("Zonas OD (contorno)", "od", "od_id", "#C65534"),
 }
+MUNI_LAYER_KEYS = ["subpref", "subprefeituras", "distrito", "municipio"]  # ajuste se preciso
+MAP_HEIGHT = 820          # fallback; o CSS ajusta à altura da tela
+MAP_PAD_DEG = 0.25        # folga do maxBounds (graus)
 # =============================================================================
 # VISUALIZAÇÕES / CSV
 # =============================================================================
@@ -951,7 +954,54 @@ def read_kmz(path):
     name = g["Name"].fillna("").astype(str) if "Name" in g.columns else ""
     g["DN"] = (name + " " + g["camada_kml"].astype(str)).str.strip()
     return g
-    
+
+@st.cache_resource(show_spinner=False)
+def municipio_gdf():
+    """Polígono único do município (dissolve da camada administrativa)."""
+    for k in MUNI_LAYER_KEYS:
+        try:
+            g = read_layer(k)
+        except Exception:
+            g = None
+        if g is not None and not g.empty:
+            g = g.to_crs(4326) if g.crs and g.crs.to_epsg() != 4326 else g
+            try:
+                geom = g.geometry.union_all()
+            except Exception:
+                geom = g.geometry.unary_union
+            return gpd.GeoDataFrame(geometry=[geom.buffer(0)], crs=4326)
+    return None
+
+
+def clip_to_municipio(g):
+    """Recorta qualquer camada ao município (usa bbox antes para ganhar velocidade)."""
+    mun = municipio_gdf()
+    if g is None or g.empty or mun is None:
+        return g
+    try:
+        g = g.to_crs(4326) if g.crs and g.crs.to_epsg() != 4326 else g
+        minx, miny, maxx, maxy = mun.total_bounds
+        g = g.cx[minx:maxx, miny:maxy]
+        return gpd.clip(g, mun) if not g.empty else g
+    except Exception:
+        return g
+
+def fit_map(m, g_ref=None):
+    """Enquadra no recorte (isócronas) ou, sem recorte, no município."""
+    ref = g_ref if g_ref is not None and not g_ref.empty else municipio_gdf()
+    if m is None or ref is None or ref.empty:
+        return
+    minx, miny, maxx, maxy = ref.total_bounds
+    m.fit_bounds([[miny, minx], [maxy, maxx]], padding=(4, 4))
+    mun = municipio_gdf()
+    if mun is not None:
+        a, b, c, d = mun.total_bounds
+        p = MAP_PAD_DEG
+        m.options["maxBounds"] = [[b - p, a - p], [d + p, c + p]]
+        m.options["maxBoundsViscosity"] = 0.8
+    m.options["minZoom"] = 9
+    m.options["zoomSnap"] = 0.25
+
 def read_thematic(key):
     p = ensure_thematic_file(key)
     if p is None:
@@ -960,6 +1010,7 @@ def read_thematic(key):
     g = None
     try:
         g = read_kmz(str(p)) if p.suffix.lower() == ".kmz" else read_gdf_parquet(str(p))
+        g = clip_to_municipio(g)
     except Exception as e:
         st.warning(f"Erro ao ler {p.name}: {e}")
         g = None
@@ -1482,6 +1533,14 @@ def inject_css():
         button[data-testid="stBaseButton-primary"],
         div[data-testid="stBaseButton-primary"] > button {{
             background:{PB_BTN} !important; color:#fff !important; border:1px solid {PB_BTN} !important; }}
+        .block-container {{ padding-top:.6rem !important; padding-bottom:0 !important;
+                padding-left:1rem !important; padding-right:1rem !important;
+                max-width:100% !important; }}
+        iframe[title="streamlit_folium.st_folium"] {{ height:calc(100vh - 120px) !important;
+                                                     min-height:560px; }}
+        div[data-testid="stVerticalBlock"] > div:empty {{ display:none !important; }}
+        div[data-testid="stElementContainer"]:has(> div:empty) {{ display:none !important; }}
+        h4.pb-title {{ margin:0 0 .25rem 0 !important; font-size:1.15rem !important; }}
         </style>
         """, unsafe_allow_html=True)
 
@@ -2613,13 +2672,19 @@ def render_map_panel():
     add_fixed_layers(m)
     if ss.get("selection_draw_mode", False):
         add_draw_tools(m)
+
+    iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
+    g_iso = read_layer("iso") if iso_ids else None
+    g_ref = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
+    fit_map(m, g_ref)
+
     folium.LayerControl(collapsed=True, position="topright").add_to(m)
     add_print_button(m)
 
-    st.markdown(f"### {title}")
+    st.markdown(f"<h4 class='pb-title'>{title}</h4>", unsafe_allow_html=True)
     with st.container(key="pb_info"):
         render_info_buttons(level)
-    st_folium(m, height=780, use_container_width=True, key=f"{MAP_KEY}_{level}",
+    st_folium(m, height=MAP_HEIGHT, use_container_width=True, key=f"{MAP_KEY}_{level}",
               returned_objects=["last_clicked", "last_object_clicked",
                                 "last_object_clicked_tooltip", "all_drawings",
                                 "last_active_drawing"])
@@ -2858,15 +2923,13 @@ def main():
 
     tab_painel, tab_sobre, tab_uso = st.tabs(["Painel", "Sobre o projeto PlanBairros", "Como utilizar"])
     with tab_painel:
-        left, right = st.columns([4, 1], gap="large")
+        left, right = st.columns([5, 1.3], gap="small")
         with right:
-            st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
-            control_panel()
-            st.markdown("</div>", unsafe_allow_html=True)
+            with st.container(key="pb_card_ctrl"):
+                control_panel()
         with left:
-            st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
-            render_map_panel()
-            st.markdown("</div>", unsafe_allow_html=True)
+            with st.container(key="pb_card_map"):
+                render_map_panel()
     with tab_sobre:
         st.markdown(TXT_SOBRE)
     with tab_uso:
