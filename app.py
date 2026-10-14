@@ -2607,7 +2607,7 @@ def render_map_panel():
                 view_gdf = subset_by_id_multi(view_gdf, id_for_sel, sel)
             set_export("_export_view", f"{post_view}_isocronas", view_gdf)
             
-    title = draw_overlays(m, title)
+title = draw_overlays(m, title)
     if m is None:
         return
     add_fixed_layers(m)
@@ -2619,7 +2619,7 @@ def render_map_panel():
     st.markdown(f"### {title}")
     with st.container(key="pb_info"):
         render_info_buttons(level)
-     st_folium(m, height=780, use_container_width=True, key=f"{MAP_KEY}_{level}",
+    st_folium(m, height=780, use_container_width=True, key=f"{MAP_KEY}_{level}",
               returned_objects=["last_clicked", "last_object_clicked",
                                 "last_object_clicked_tooltip", "all_drawings",
                                 "last_active_drawing"])
