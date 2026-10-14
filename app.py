@@ -2518,7 +2518,7 @@ def render_map_panel():
                 view_gdf = subset_by_id_multi(view_gdf, id_for_sel, sel)
             set_export("_export_view", f"{post_view}_isocronas", view_gdf)
 
-     ovs = _selected_overlays()
+        ovs = _selected_overlays()
         if m is not None and (tem_on or ovs):
             iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
             g_iso = read_layer("iso")
