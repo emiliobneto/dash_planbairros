@@ -2607,7 +2607,7 @@ def render_map_panel():
                 view_gdf = subset_by_id_multi(view_gdf, id_for_sel, sel)
             set_export("_export_view", f"{post_view}_isocronas", view_gdf)
             
-title = draw_overlays(m, title)
+    title = draw_overlays(m, title)
     if m is None:
         return
     add_fixed_layers(m)
