@@ -1522,13 +1522,14 @@ def inject_css():
             margin:0 0 .35rem 0 !important; font-size:1.7rem !important; font-weight:700 !important; }}
 
         /* ---------- Tipografia ---------- */
-        .stTabs button[role="tab"], .stTabs button[role="tab"] p,
-        .stTabs button[role="tab"] div, .stTabs button[role="tab"] span,
-        div[data-testid="stTabs"] button p, button[data-testid="stTab"] p {{
+        [data-testid="stTab"], [role="tab"],
+        [data-testid="stTab"] [data-testid="stMarkdownContainer"] p,
+        [role="tab"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stTab"] p, [role="tab"] p {{
             font-size:28px !important; font-weight:700 !important; line-height:1.2 !important; }}
-        .stTabs button[role="tab"] {{
-            padding:.6rem 1rem !important; height:auto !important; min-height:3rem !important; }}
-        .stTabs [data-baseweb="tab-list"] {{ gap:1.5rem; }}
+        [data-testid="stTab"], [role="tab"] {{
+            padding:.6rem 1.2rem !important; height:auto !important; min-height:3rem !important; }}
+        [role="tablist"], [data-baseweb="tab-list"] {{ gap:1.5rem !important; }}
         .stMarkdown p, .stMarkdown li, .stMarkdown td, .stMarkdown th {{
             font-size:1.34rem !important; line-height:1.65 !important; }}
         .stMarkdown h2 {{ font-size:2.28rem !important; }}
@@ -1568,6 +1569,7 @@ def inject_css():
             background:{PB_BTN} !important; color:#fff !important; border:1px solid {PB_BTN} !important; }}
         </style>
         """, unsafe_allow_html=True)
+
 
 def render_header():
     st.markdown(
