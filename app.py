@@ -2014,7 +2014,7 @@ def build_post_iso_data():
     if g_censo is not None:
         out["g_censo"] = get_censo_subset_for_isos(g_censo, iso_ids)
     post_view_now = st.session_state.get("post_iso_view", "quadra")
-        g_od = read_layer("od")
+    g_od = read_layer("od")
     if g_od is not None:
         col_iso = _col_ci(g_od, ISO_ID)
         if col_iso:
