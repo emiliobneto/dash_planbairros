@@ -786,7 +786,7 @@ def ensure_local_lote_file(distrito_id):
 # READ
 # =============================================================================
 @st.cache_resource(show_spinner=False, max_entries=24)
-def read_gdf_parquet(path)
+def read_gdf_parquet(path):
     if gpd is None:
         return None
     p = Path(path)
