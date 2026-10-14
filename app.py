@@ -128,7 +128,7 @@ DENS_BINS = [(2000, "0 – 2.000 hab/hec"), (4000, "2.001 – 4.000 hab/hec"),
              (6000, "4.001 – 6.000 hab/hec"), (8000, "6.001 – 8.000 hab/hec"),
              (10000, "8.001 – 10.000 hab/hec"), (float("inf"), "> 10.000 hab/hec")]
 # Escala monocromática de vermelhos
-DENS_COLORS = ["#fddbc7", "#f4a582", "#d6604d", "#c65534", "#b2182b", "#67001f"]
+DENS_COLORS = ["#fee0b6", "#fdb863", "#c65534", "#e08215", "#b35807", "#7f3b08"]
 
 THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
     "apa": {"title": "APA", "file": "apa.parquet", "label": "NOME_CAPS", "kind": "auto"},
