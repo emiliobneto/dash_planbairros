@@ -785,8 +785,8 @@ def ensure_local_lote_file(distrito_id):
 # =============================================================================
 # READ
 # =============================================================================
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
-def read_gdf_parquet(path):
+@st.cache_resource(show_spinner=False, max_entries=24)
+def read_gdf_parquet(path)
     if gpd is None:
         return None
     p = Path(path)
@@ -957,10 +957,6 @@ def read_thematic(key):
     if p is None:
         st.warning(f"Arquivo '{THEMATIC_LAYERS[key]['file']}' não encontrado no repositório.")
         return None
-    ck, meta = f"tem__{key}", _meta(p)
-    cached = _cache_get(ck, meta)
-    if cached is not None:
-        return cached
     g = None
     try:
         g = read_kmz(str(p)) if p.suffix.lower() == ".kmz" else read_gdf_parquet(str(p))
@@ -981,7 +977,6 @@ def read_thematic(key):
     if g is None or g.empty:
         st.warning(f"Camada temática '{key}' vazia ou inválida."); return None
     g = normalize_id_cols(_drop_bad_geoms(standardize_columns(g)), [ISO_ID, CENSO_ID])
-    _cache_set(ck, meta, g)
     return g
 
 
@@ -1128,6 +1123,38 @@ def classify_thematic(key, g):
         if key == "densidade":
             g["__tt"] = g["__tt"] + " hab/hec"
     return g, legend
+    
+THEMATIC_SIMPLIFY = {"vias": 0.00005, "lcz": 0.0002, "declividade": 0.0002,
+                     "densidade": 0.0001, "bacia": 0.0002, "apa": 0.0001}
+MAX_FEATURES_FULL = 25000   # limite de feições no município inteiro
+MAX_THEMATIC_ON = 4          # camadas simultâneas
+@st.cache_resource(show_spinner=False, max_entries=24)
+def thematic_geojson(key, iso_key, meta):
+    """Retorna (geojson_str, legenda, csv_bytes, n) — calculado uma vez."""
+    g = read_thematic(key)
+    if g is None or g.empty:
+        return "", [], b"", 0
+    iso_ids = set(iso_key.split("|")) if iso_key else set()
+    g_iso = read_layer("iso") if iso_ids else None
+    g_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
+    cfg = THEMATIC_LAYERS[key]
+    keep = [c for c in {_col(g, cfg.get("label")), _col(g, cfg.get("class_col")),
+                        _col(g, "dd_setor"), ISO_ID, CENSO_ID} if c and c in g.columns]
+    g = g[keep + ["geometry"]]                      # só colunas úteis
+    g = filter_thematic(key, g, iso_ids, g_sel)
+    if g is None or g.empty:
+        return "", [], b"", 0
+    if not iso_ids and len(g) > MAX_FEATURES_FULL:  # município inteiro: limita
+        g = g.iloc[:MAX_FEATURES_FULL]
+    gc, legend = classify_thematic(key, g)
+    csv = gdf_to_csv_bytes(gc)
+    if cfg["kind"] == "points":
+        gc = gc.set_geometry(gc.geometry.representative_point()).iloc[:MAX_POINTS]
+        tol = 0.0
+    else:
+        tol = THEMATIC_SIMPLIFY.get(key, 0.00003 if iso_ids else 0.0001)
+    gj = _simplify_to_geojson(gc, tol, ["__color", "__tt", "__leg"])
+    return gj, legend, csv, len(gc)
 
 # =============================================================================
 # CSV CLUSTER
@@ -1768,39 +1795,25 @@ def add_boundary_overlay(m, gdf, *, color=PB_BLACK, weight=1.6, simplify_tol=0.0
                                    "lineCap": LINE_CAP, "lineJoin": LINE_JOIN}).add_to(m)
 
 
-def add_thematic_to_map(m, key, g, legend):
+def add_thematic_to_map(m, key, geojson, legend):
     cfg = THEMATIC_LAYERS[key]
-    if g is None or g.empty:
-        st.info(f"{cfg['title']}: nenhuma feição nas isócronas selecionadas.")
+    if not geojson:
+        st.info(f"{cfg['title']}: nenhuma feição para exibir.")
         return
-    if cfg["kind"] == "points":
-        pts = g.geometry.representative_point()
-        if len(pts) > MAX_POINTS:
-            st.caption(f"Exibindo {MAX_POINTS} de {len(pts)} árvores.")
-            pts = pts.iloc[:MAX_POINTS]
-        fg = folium.FeatureGroup(name=cfg["title"], show=True)
-        for p in pts:
-            folium.CircleMarker(location=[p.y, p.x], radius=3, color=cfg["color"], weight=1,
-                                fill=True, fill_color=cfg["color"], fill_opacity=0.9,
-                                pane="thematic").add_to(fg)
-        fg.add_to(m)
-    else:
-        geojson = _simplify_to_geojson(g, 0.0, ["__color", "__tt", "__leg"])
-        if not geojson:
-            return
-        w = cfg.get("weight", 0.6)
+    w = cfg.get("weight", 0.6)
 
-        def _style(f, w=w):
-            c = (f.get("properties") or {}).get("__color", "#888888")
-            return {"color": c, "weight": w, "opacity": 1.0, "fillColor": c,
-                    "fillOpacity": 0.6, "lineCap": LINE_CAP, "lineJoin": LINE_JOIN}
+    def _style(f, w=w):
+        c = (f.get("properties") or {}).get("__color", "#888888")
+        return {"color": c, "weight": w, "opacity": 1.0, "fillColor": c, "fillOpacity": 0.6,
+                "radius": 3, "lineCap": LINE_CAP, "lineJoin": LINE_JOIN}
 
-        tt = GeoJsonTooltip(fields=["__tt", "__leg"], aliases=[f"{cfg['title']}:", "Legenda:"],
-                            sticky=True, labels=True) if GeoJsonTooltip else None
-        folium.GeoJson(data=geojson, name=cfg["title"], pane="thematic",
-                       smooth_factor=SMOOTH_FACTOR, style_function=_style, tooltip=tt).add_to(m)
+    is_pts = cfg["kind"] == "points"
+    tt = None if is_pts or GeoJsonTooltip is None else GeoJsonTooltip(
+        fields=["__tt", "__leg"], aliases=[f"{cfg['title']}:", "Legenda:"], sticky=True)
+    folium.GeoJson(data=geojson, name=cfg["title"], pane="thematic", smooth_factor=SMOOTH_FACTOR,
+                   style_function=_style, tooltip=tt,
+                   marker=folium.CircleMarker(radius=3, fill=True) if is_pts else None).add_to(m)
     add_legend(m, cfg["title"], legend)
-
 
 def _format_label_multiline(text):
     txt = str(text or "").strip()
@@ -2333,12 +2346,17 @@ def control_panel():
         for k, (lbl, *_r) in OVERLAY_EXTRA.items():
             st.checkbox(lbl + ("" if iso_ok else " (requer isócronas)"), key=k,
                         disabled=not iso_ok, on_change=mark_ui_action)
+        n_on = len(_selected_thematics())
         for k, cfg in THEMATIC_LAYERS.items():
             ok = thematic_available(k)
-            lbl = cfg["title"] + ("" if ok else " (indisponível)")
+            on = bool(ss.get(f"tem_{k}"))
+            dis = (not ok) or (n_on >= MAX_THEMATIC_ON and not on)
             if not ok:
                 ss[f"tem_{k}"] = False
-            st.checkbox(lbl, key=f"tem_{k}", disabled=not ok, on_change=mark_ui_action)
+            st.checkbox(cfg["title"] + ("" if ok else " (indisponível)"),
+                        key=f"tem_{k}", disabled=dis, on_change=mark_ui_action)
+        if n_on >= MAX_THEMATIC_ON:
+            st.caption(f"Máximo de {MAX_THEMATIC_ON} camadas simultâneas.")
     st.divider()
 
     st.checkbox("Habilitar seleção por caixa/laço", key="selection_draw_mode", on_change=mark_ui_action)
@@ -2347,15 +2365,13 @@ def control_panel():
 
     st.subheader("Downloads", anchor=False)
     ev, et = ss.get("_export_view"), ss.get("_export_thematic")
-    st.download_button("CSV — visualização em tela", data=(ev[1] if ev else b""),
-                       file_name=f"{ev[0] if ev else 'visualizacao'}.csv", mime="text/csv",
-                       use_container_width=True, disabled=not ev)
-    st.download_button("CSV — mapa temático", data=(et[1] if et else b""),
-                       file_name=f"{et[0] if et else 'tematico'}.csv", mime="text/csv",
-                       use_container_width=True, disabled=not et)
-    mh = ss.get("_export_map_html")
-    st.download_button("Mapa (HTML interativo)", data=(mh or ""), file_name="planbairros_mapa.html",
-                       mime="text/html", use_container_width=True, disabled=not mh)
+    if st.button("Gerar mapa HTML", use_container_width=True):
+        mm = ss.get("_last_map")
+        ss["_export_map_html"] = mm.get_root().render() if mm is not None else None
+    mh = ss.pop("_export_map_html", None)
+    if mh:
+        st.download_button("Baixar HTML", data=mh, file_name="planbairros_mapa.html",
+                           mime="text/html", use_container_width=True)
     st.caption("Imagem PNG: use o botão 📷 no canto superior esquerdo do mapa.")
 
 # =============================================================================
@@ -2370,20 +2386,20 @@ def draw_overlays(m, title):
     iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
     g_iso = read_layer("iso") if iso_ids else None
     g_iso_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
-    exports, titles = [], []
-    for k in tem_keys:
-        gt = read_thematic(k)
-        if gt is None:
+    iso_key = "|".join(sorted(iso_ids))
+    csvs, titles = [], []
+    for k in tem_keys[:MAX_THEMATIC_ON]:
+        p = ensure_thematic_file(k)
+        if p is None:
             continue
-        gf = filter_thematic(k, gt, iso_ids, g_iso_sel)
-        gc, legend = classify_thematic(k, gf) if gf is not None and not gf.empty else (gf, [])
-        add_thematic_to_map(m, k, gc, legend)
+        gj, legend, csv, n = thematic_geojson(k, iso_key, _meta(p))
+        add_thematic_to_map(m, k, gj, legend)
         titles.append(THEMATIC_LAYERS[k]["title"])
-        if gc is not None and not gc.empty:
-            exports.append(pd.DataFrame(gc.drop(columns="geometry", errors="ignore"))
-                           .assign(camada=THEMATIC_LAYERS[k]["title"]))
-    if exports:
-        ss["_export_thematic"] = ("tematicos", gdf_to_csv_bytes(pd.concat(exports, ignore_index=True)))
+        if csv:
+            csvs.append(csv)
+    if csvs:
+        ss["_export_thematic"] = ("tematicos", csvs[0] if len(csvs) == 1
+                                  else b"\n".join(csvs))
     if ovs:
         data_ov = build_post_iso_data()
         for ov in ovs:
@@ -2603,9 +2619,11 @@ def render_map_panel():
     st.markdown(f"### {title}")
     with st.container(key="pb_info"):
         render_info_buttons(level)
-    st_folium(m, height=780, use_container_width=True, key=f"{MAP_KEY}_{level}",
-              returned_objects=["last_clicked", "last_object_clicked", "last_object_clicked_tooltip",
-                                "all_drawings", "last_active_drawing"])
+     st_folium(m, height=780, use_container_width=True, key=f"{MAP_KEY}_{level}",
+              returned_objects=["last_clicked", "last_object_clicked",
+                                "last_object_clicked_tooltip", "all_drawings",
+                                "last_active_drawing"])
+    ss["_last_map"] = m
     if level == "isocrona" or (level == "quadra" and ss.get("variable") == "Cluster"):
         st.markdown(f"<div class='pb-footer'>{FOOTER_TXT}</div>", unsafe_allow_html=True)
     if level == "quadra" and ss.get("post_iso_view") in ("od", "lote"):
@@ -2620,11 +2638,7 @@ def render_map_panel():
                 elif diag.get("feicoes_vinculadas", 0) == 0:
                     st.warning("Nenhuma feição vinculada — verifique a grafia/formato das chaves abaixo.")
                 st.json(diag)
-    try:
-        ss["_export_map_html"] = m.get_root().render()
-    except Exception:
-        ss["_export_map_html"] = None
-    ss["_map_level_rendered"] = level
+        ss["_map_level_rendered"] = level
 
 # =============================================================================
 # APP
