@@ -191,7 +191,7 @@ OVERLAY_EXTRA = {
     "ov_od": ("Zonas OD (contorno)", "od", "od_id", "#C65534"),
 }
 MUNI_LAYER_KEYS = ["subpref", "subprefeituras", "distrito", "municipio"]  # ajuste se preciso
-MAP_HEIGHT = 820          # fallback; o CSS ajusta à altura da tela
+MAP_HEIGHT = 1000          # fallback; o CSS ajusta à altura da tela
 MAP_PAD_DEG = 0.25        # folga do maxBounds (graus)
 # =============================================================================
 # VISUALIZAÇÕES / CSV
@@ -1502,24 +1502,50 @@ def inject_css():
     st.markdown(
         f"""
         <style>
-        .stTabs button[data-baseweb="tab"] p {{ font-size:12pt !important; font-weight:700 !important; }}
-        .pb-footer {{ font-size:.95rem; color:#555; font-style:italic; margin-top:6px; }}
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700;900&display=swap');
-        html, body, .stApp {{ font-family: 'Roboto', Arial, sans-serif; }}
-        .main .block-container {{ padding-top:.15rem !important; padding-bottom:.6rem !important; }}
+        html, body, .stApp {{ font-family:'Roboto', Arial, sans-serif; }}
+
+        /* ---------- Layout geral ---------- */
+        .block-container, .main .block-container {{
+            padding:.4rem 1rem 0 1rem !important; max-width:100% !important; }}
+        header[data-testid="stHeader"] {{ height:0 !important; background:transparent !important; }}
+        div[data-testid="stVerticalBlock"] > div:empty {{ display:none !important; }}
+        div[data-testid="stElementContainer"]:has(> div:empty) {{ display:none !important; }}
+
+        /* ---------- Cabeçalho ---------- */
         .pb-row {{ display:flex; align-items:center; gap:12px; margin-bottom:0; }}
         .pb-logo {{ height:{LOGO_HEIGHT}px; width:auto; display:block; border-radius:8px; }}
         .pb-header {{ background:{PB_NAVY}; color:#fff; border-radius:14px; padding:14px 15px; width:100%; }}
-        .pb-title {{ font-size:2.7rem; font-weight:900; line-height:1.05; }}
+        .pb-header .pb-title {{ font-size:2.7rem; font-weight:900; line-height:1.05; }}
         .pb-subtitle {{ font-size:1.44rem; opacity:.95; margin-top:5px; }}
+        h4.pb-title {{ margin:0 0 .25rem 0 !important; font-size:1.15rem !important; }}
+
+        /* ---------- Tipografia ---------- */
+        .stTabs button[data-baseweb="tab"] p {{ font-size:12pt !important; font-weight:700 !important; }}
         .stMarkdown p, .stMarkdown li, .stMarkdown td, .stMarkdown th {{
             font-size:1.34rem !important; line-height:1.65 !important; }}
         .stMarkdown h2 {{ font-size:2.28rem !important; }}
         .stMarkdown h3 {{ font-size:1.74rem !important; }}
         div[data-testid="stCaptionContainer"] p {{ font-size:1.18rem !important; }}
         label p, .stButton button p, .stDownloadButton button p,
-        div[data-baseweb="select"] div, button[data-baseweb="tab"] p {{ font-size:1.26rem !important; }}
-        /* Botões de informação flutuando sobre o mapa */
+        div[data-baseweb="select"] div {{ font-size:1.26rem !important; }}
+        .pb-footer {{ font-size:.95rem; color:#555; font-style:italic; margin-top:6px; }}
+
+        /* ---------- Cards (mapa e controles) ---------- */
+        .pb-card, .st-key-pb_card_map, .st-key-pb_card_ctrl {{
+            background:#fff; border:1px solid rgba(20,64,125,.10);
+            box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; }}
+        .pb-card, .st-key-pb_card_ctrl {{ padding:12px; }}
+        .st-key-pb_card_map {{ padding:6px !important; }}
+        .st-key-pb_card_ctrl {{ max-height:calc(100vh - 150px); overflow-y:auto; }}
+
+        /* ---------- Mapa ocupando a altura da tela ---------- */
+        .st-key-pb_card_map iframe,
+        .st-key-pb_card_map div[data-testid="stCustomComponentV1"],
+        .st-key-pb_card_map div[data-testid="stElementContainer"]:has(iframe) {{
+            height:calc(100vh - 150px) !important; min-height:600px !important; }}
+
+        /* ---------- Botões de informação sobre o mapa ---------- */
         .st-key-pb_info {{ position:relative; height:0; overflow:visible; z-index:1001; }}
         .st-key-pb_info > div {{ position:absolute; top:12px; right:60px; display:flex;
             flex-direction:column; gap:6px; align-items:flex-end; width:auto !important; }}
@@ -1528,21 +1554,14 @@ def inject_css():
             box-shadow:0 2px 6px rgba(0,0,0,.35) !important; }}
         .st-key-pb_info button:hover {{ background:{PB_ORANGE_DARK} !important; }}
         .st-key-pb_info button p {{ color:#fff !important; font-weight:700 !important; }}
-        .pb-card {{ background:#fff; border:1px solid rgba(20,64,125,.10);
-            box-shadow:0 1px 2px rgba(0,0,0,.04); border-radius:14px; padding:12px; }}
+
+        /* ---------- Botão primário ---------- */
         button[data-testid="stBaseButton-primary"],
         div[data-testid="stBaseButton-primary"] > button {{
             background:{PB_BTN} !important; color:#fff !important; border:1px solid {PB_BTN} !important; }}
-        .block-container {{ padding-top:.6rem !important; padding-bottom:0 !important;
-                padding-left:1rem !important; padding-right:1rem !important;
-                max-width:100% !important; }}
-        iframe[title="streamlit_folium.st_folium"] {{ height:calc(100vh - 120px) !important;
-                                                     min-height:560px; }}
-        div[data-testid="stVerticalBlock"] > div:empty {{ display:none !important; }}
-        div[data-testid="stElementContainer"]:has(> div:empty) {{ display:none !important; }}
-        h4.pb-title {{ margin:0 0 .25rem 0 !important; font-size:1.15rem !important; }}
         </style>
         """, unsafe_allow_html=True)
+
 
 
 def render_header():
@@ -2923,7 +2942,7 @@ def main():
 
     tab_painel, tab_sobre, tab_uso = st.tabs(["Painel", "Sobre o projeto PlanBairros", "Como utilizar"])
     with tab_painel:
-        left, right = st.columns([5, 1.3], gap="small")
+        left, right = st.columns([4, 1.2], gap="small")
         with right:
             with st.container(key="pb_card_ctrl"):
                 control_panel()
