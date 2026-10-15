@@ -247,7 +247,7 @@ LAYER_ID_COLS = {
 LOCAL_FILENAMES = {
     "subpref": "subprefeitura.parquet",
     "dist": "Distritos.parquet",
-    "iso": "https://drive.google.com/file/d/1Ktaqe11xyKWelysBR-8_2ZtvRt8y1KS5/view?usp=drive_link",
+    "iso": "isocronas.parquet",
     "censo": "SetoresCensitarios2023.parquet",
     "od": "ZonasOD2023.parquet",
     "quadra": "Quadras.parquet",
