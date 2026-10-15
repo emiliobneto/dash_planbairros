@@ -2523,7 +2523,7 @@ def control_panel():
     if lvl == "isocrona":
         st.button("Ajustar às isócronas selecionadas", use_container_width=True, disabled=not ok_iso,
                   on_click=lambda: (mark_ui_action(), _fit_selected_isos()))
-        st.button("Avançar para Visualização detalhada", type="primary", use_container_width=True,
+        st.button("Quadras", type="primary", use_container_width=True,
                   disabled=not ok_iso, on_click=_go_detailed)
         st.caption("Selecione uma ou mais isócronas antes de avançar.")
 
