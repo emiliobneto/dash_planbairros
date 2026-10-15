@@ -320,7 +320,7 @@ SECRETS_KEYS = {
 FALLBACK_URLS = {
     "subpref": "", "dist": "", "iso": "", "censo": "", "od": "",
     "quadra": "https://drive.google.com/file/d/1Ivy2PyGHqFgIxSMoK3N9oik2wr5v912U/view?usp=drive_link",
-    "isocronas":"https://drive.google.com/file/d/1Ktaqe11xyKWelysBR-8_2ZtvRt8y1KS5/view?usp=drive_link",
+    "iso":"https://drive.google.com/file/d/1Ktaqe11xyKWelysBR-8_2ZtvRt8y1KS5/view?usp=drive_link",
 }
 
 # =============================================================================
