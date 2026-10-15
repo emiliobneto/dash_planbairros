@@ -2190,7 +2190,7 @@ def build_post_iso_data():
             id_col = QUADRA_UID if QUADRA_UID in g_quad_show.columns else QUADRA_ID
             out["g_quadra"] = g_quad_show
             out["quadra_id_col"] = id_col
-     if post_view == "lote":
+    if post_view == "lote":
         g_lote = read_lotes_for_isos(iso_ids)
         if g_lote is not None:
             sub = get_lotes_subset_for_isos(g_lote, iso_ids)
