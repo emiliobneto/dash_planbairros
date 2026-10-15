@@ -195,6 +195,11 @@ OVERLAY_EXTRA = {
 MUNI_LAYER_KEYS = ["subpref", "subprefeituras", "distrito", "municipio"]  # ajuste se preciso
 MAP_HEIGHT = 1000          # fallback; o CSS ajusta à altura da tela
 MAP_PAD_DEG = 0.25        # folga do maxBounds (graus)
+
+POST_VIEWS = {"quadra": "Quadras",
+              "censo": "Setores censitários",
+              "od": "Zonas OD (+ od_23.csv)",
+              "lote": "Lotes (+ dashiptu_2026.csv)"}
 # =============================================================================
 # VISUALIZAÇÕES / CSV
 # =============================================================================
@@ -2185,15 +2190,105 @@ def build_post_iso_data():
             id_col = QUADRA_UID if QUADRA_UID in g_quad_show.columns else QUADRA_ID
             out["g_quadra"] = g_quad_show
             out["quadra_id_col"] = id_col
-    if post_view == "lote" and distrito_id is not None:
-        g_lote = read_lotes_by_distrito(distrito_id)
+     if post_view == "lote":
+        g_lote = read_lotes_for_isos(iso_ids)
         if g_lote is not None:
-            if ISO_ID in g_lote.columns:
-                out["g_lote"] = attach_table(get_lotes_subset_for_isos(g_lote, iso_ids), LOTE_ID, "iptu")
-            else:
-                st.warning(f"Lotes do distrito '{distrito_id}' sem '{ISO_ID}'.")
+            sub = get_lotes_subset_for_isos(g_lote, iso_ids)
+            if sub is None or sub.empty:            # sem iso_id → recorte espacial
+                sub = _spatial_children(g_lote, out["g_parent"])
+            out["g_lote"] = attach_table(sub, LOTE_ID, "iptu")
+        else:
+            st.warning(f"Nenhum arquivo de lotes para os distritos {sorted(_distritos_of_isos(iso_ids))}.")
     return out
 
+def _on_post_view_change():
+    ss = st.session_state
+    ss["post_iso_view"] = ss.get("pv_select", "quadra")
+    for k in ("selected_censo_ids", "selected_od_ids", "selected_quadra_ids", "selected_lote_ids"):
+        ss[k] = set()
+    ss["last_level"] = None            # reenquadra na nova camada
+    _geojson_cache_reset()
+    mark_ui_action()
+
+
+def _distritos_of_isos(iso_ids):
+    """Códigos de distrito (nº do arquivo Distrito_N.parquet) das isócronas selecionadas."""
+    ids = set()
+    g_iso = read_layer("iso")
+    if g_iso is not None and iso_ids:
+        col = _col_ci(g_iso, DS_CODIGO) or _col_ci(g_iso, DIST_ID)
+        if col:
+            sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
+            ids = {_match_key(v) for v in sel[col].dropna()} - {None}
+    if not ids:  # fallback: distrito clicado no nível anterior
+        d = _id_to_str(st.session_state.get("selected_distrito_id"))
+        cod = _ds_codigo_of_distrito(d) if d else None
+        k = _match_key(cod or d)
+        ids = {k} if k else set()
+    return ids
+
+
+def read_lotes_for_isos(iso_ids):
+    """Carrega SOMENTE os Distrito_<n>.parquet dos distritos das isócronas."""
+    parts = []
+    for did in sorted(_distritos_of_isos(iso_ids)):
+        g = read_lotes_by_distrito(did)
+        if g is not None and not g.empty:
+            parts.append(g)
+    if not parts:
+        return None
+    return gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs=parts[0].crs)
+
+
+def _censo_variables():
+    """Colunas numéricas do SetoresCensitarios2023.parquet (densidade primeiro)."""
+    g = read_layer("censo")
+    if g is None:
+        return []
+    out = []
+    for c in g.columns:
+        if c == "geometry" or ID_LIKE_RE.search(str(c)):
+            continue
+        x = _dens_num(g[c]) if not pd.api.types.is_numeric_dtype(g[c]) else g[c]
+        if x.notna().sum() >= 0.5 * max(g[c].notna().sum(), 1):
+            out.append(str(c))
+    dc = _col(g, DENS_COL)
+    if dc in out:
+        out.remove(dc); out.insert(0, dc)
+    return out
+
+
+def post_variables(pv):
+    if pv == "censo":
+        return _censo_variables()
+    if pv == "od":
+        return ext_variables("od")      # todas as colunas numéricas do od_23.csv
+    if pv == "lote":
+        return ext_variables("iptu")    # todas as colunas numéricas do dashiptu_2026.csv
+    return []
+
+
+def add_density_layer(m, g, sel_ids, cache_key, opacity):
+    """Setores coloridos pelos bins de densidade_demografica."""
+    col, bins = _col(g, DENS_COL), dens_bins()
+    if not col or not bins or CENSO_ID not in g.columns:
+        return False
+    labels = [b[1] for b in bins]
+    cols = DENS_COLORS[-len(labels):]
+    x = _dens_num(g[col])
+    edges = [-float("inf")] + [b[0] for b in bins[:-1]] + [float("inf")]
+    leg = pd.cut(x, bins=edges, labels=labels, include_lowest=True).astype(object)
+    g = g.copy()
+    g["__ch_color"] = leg.map(dict(zip(labels, cols))).fillna(CLUSTER_NULL_COLOR)
+    g["__ch_tt"] = [f"{_id_to_str(a)} — {_fmt_num(v)} hab/hec" for a, v in zip(g[CENSO_ID], x)]
+    add_polygons_selectable_colored(m, g, "Setor censitário", CENSO_ID, "__ch_color",
+        selected_ids=sel_ids, tooltip_col="__ch_tt", fill_opacity=opacity,
+        selected_fill_opacity=0.0, tooltip_prefix="Setor: ",
+        simplify_tol=SIMPLIFY_TOL_BY_LEVEL["censo"], cache_key=cache_key,
+        default_fill=CLUSTER_NULL_COLOR)
+    add_legend(m, "Densidade demográfica (hab/hec)",
+               list(zip(labels, cols)) + [("Sem dado", CLUSTER_NULL_COLOR)])
+    return True
 
 def _post_cfg(data):
     return {"censo": (data.get("g_censo"), CENSO_ID, "selected_censo_ids"),
@@ -2432,14 +2527,21 @@ def control_panel():
                   disabled=not ok_iso, on_click=_go_detailed)
         st.caption("Selecione uma ou mais isócronas antes de avançar.")
 
-    pv = ss.get("post_iso_view", "quadra")
-    if lvl == "quadra" and pv in ("od", "lote"):
-        src = "od" if pv == "od" else "iptu"
-        opts = ["(nenhuma)"] + ext_variables(src)
-        if ss.get(f"var_{src}") not in opts:
-            ss[f"var_{src}"] = opts[0]
-        st.selectbox("Variável OD (soma por Zona_D)" if src == "od" else "Variável IPTU (por lote)",
-                     options=opts, key=f"var_{src}", on_change=mark_ui_action)
+    if lvl == "quadra":
+        ss["pv_select"] = ss.get("post_iso_view", "quadra")
+        st.radio("Camada de visualização", list(POST_VIEWS), format_func=POST_VIEWS.get,
+                 key="pv_select", on_change=_on_post_view_change)
+        pv = ss.get("post_iso_view", "quadra")
+        if pv in ("censo", "od", "lote"):
+            opts = ["(nenhuma)"] + post_variables(pv)
+            vk = f"var_{pv}"
+            if ss.get(vk) not in opts:
+                dc = next((o for o in opts if o.lower() == DENS_COL), None)
+                ss[vk] = dc if pv == "censo" and dc else opts[0]
+            lbl = {"censo": "Variável do setor censitário",
+                   "od": "Variável OD (soma por ZONA_D)",
+                   "lote": "Variável IPTU (por lote)"}[pv]
+            st.selectbox(lbl, options=opts, key=vk, on_change=mark_ui_action)
     if lvl == "quadra":
         st.button("Ajustar ao selecionado", use_container_width=True,
                   on_click=lambda: (mark_ui_action(), _fit_selected_post_level()))
@@ -2687,13 +2789,16 @@ def render_map_panel():
             name, fill, op, prefix, tol_k = styles[post_view]
             g_show, id_col, sel_key = _post_cfg(data)[post_view]
             id_for_sel = id_col
-            src = {"od": "od", "lote": "iptu"}.get(post_view)
-            var = ss.get(f"var_{src}") if src else None
+            var = ss.get(f"var_{post_view}")
             ck_base = f"{post_view}:{_id_to_str(ss.get('selected_distrito_id'))}:{iso_key}:{fo(1)}"
             drawn = False
-            if g_show is not None and not g_show.empty and var and var != "(nenhuma)" and var in g_show.columns:
-                drawn = add_choropleth(m, g_show, id_col, var, name, prefix, ss.get(sel_key),
-                                       cache_key=f"{ck_base}:ch:{var}", opacity=fo(0.75))
+            ok_var = (g_show is not None and not g_show.empty and var
+                      and var != "(nenhuma)" and var in g_show.columns)
+            if ok_var and post_view == "censo" and var.lower() == DENS_COL:
+                drawn = add_density_layer(m, g_show, ss.get(sel_key), f"{ck_base}:dens", fo(0.75))
+            elif ok_var:
+                if post_view == "censo":
+                    g_show = g_show.copy(); g_show[var] = _dens_num(g_show[var])
             if drawn:
                 pass
             elif g_show is not None and not g_show.empty:
@@ -2822,7 +2927,7 @@ As informações disponíveis no painel constituem uma base inicial para a leitu
 """
 
 TXT_ISO = """
-### Entenda como as áreas de referência foram definidas
+### Entenda como as áreas de abrangência foram definidas
 
 As áreas de abrangência apresentadas no painel foram desenvolvidas por meio de um método de análise geoespacial baseado em redes, concebido para representar áreas acessíveis a pé e apoiar a delimitação de unidades territoriais na escala de bairro.
 
