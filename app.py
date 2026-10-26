@@ -45,14 +45,19 @@ BASEMAP_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World
 BASEMAP_LABELS_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
 BASEMAP_ATTR = "Tiles © Esri — Esri, HERE, Garmin, © OpenStreetMap contributors"
 
-SMOOTH_FACTOR = 1.0
+SMOOTH_FACTOR = 0.5
 LINE_CAP = "round"
 LINE_JOIN = "round"
 
 PARENT_FILL_OPACITY = 0.20
 PARENT_STROKE_OPACITY = 1.0
-PARENT_STROKE_WEIGHT = 1.0
+PARENT_STROKE_WEIGHT = 0.75
 PARENT_STROKE_DASH = None
+SUBPREF_WEIGHT = 2.25          
+SUBPREF_BND_WEIGHT = 3.0       
+ISO_SEL_COLOR = PB_ORANGE
+ISO_SEL_WEIGHT = 3.5
+ISO_SEL_FILL_OPACITY = 0.18
 
 SIMPLIFY_TOL_BY_LEVEL = {
     "subpref": 0.0002, "distrito": 0.0001, "isocrona": 0.00005,
@@ -1710,7 +1715,7 @@ def _session_geojson_get(key):
     return st.session_state.get("_geojson_cache", {}).get(key)
 
 
-def _session_geojson_set(key, value, max_items=120):
+def _session_geojson_set(key, value, max_items=30):
     cache = st.session_state.get("_geojson_cache", {})
     order = st.session_state.get("_geojson_cache_order", [])
     if key in order:
@@ -1722,17 +1727,27 @@ def _session_geojson_set(key, value, max_items=120):
     st.session_state["_geojson_cache_order"] = order
 
 
+def _simplify_geoms(gs, tol):
+    try:
+        import shapely
+        geoms = shapely.make_valid(shapely.set_precision(gs.values, 1e-7))
+        if hasattr(shapely, "coverage_simplify"):
+            out = shapely.coverage_simplify(geoms, tol, simplify_boundary=True)
+        else:
+            out = shapely.simplify(geoms, tol, preserve_topology=True)
+        return gpd.GeoSeries(out, index=gs.index, crs=gs.crs)
+    except Exception:
+        return gs.simplify(tol, preserve_topology=True)
+
+
 def _simplify_to_geojson(gdf, simplify_tol, keep_cols=None):
     if gdf is None or gdf.empty:
         return ""
     keep_cols = [c for c in (keep_cols or []) if c in gdf.columns]
     g = _drop_bad_geoms(gdf[keep_cols + ["geometry"]].copy())
     if simplify_tol and simplify_tol > 0:
-        try:
-            g["geometry"] = g["geometry"].simplify(simplify_tol, preserve_topology=True)
-            g = _drop_bad_geoms(g)
-        except Exception:
-            pass
+        g["geometry"] = _simplify_geoms(g.geometry, simplify_tol)
+        g = _drop_bad_geoms(g)
     try:
         return g.to_json()
     except Exception:
@@ -2065,6 +2080,23 @@ def add_polygons_selectable_colored(m, gdf, name, id_col, fill_color_col, *, sel
     fg_base.add_to(m)
     _add_selected_overlay(m, gdf, id_col, ensure_set_of_str(selected_ids), name, pane, simplify_tol,
                           selected_color, selected_weight, "#ffffff", selected_fill_opacity)
+
+def build_iso_selection_fg(g_iso_dist, sel_ids):
+    """Camada de seleção (laranja) enviada separada ao st_folium — não recarrega o mapa."""
+    fg = folium.FeatureGroup(name="Isócronas selecionadas")
+    if not sel_ids or g_iso_dist is None or g_iso_dist.empty:
+        return fg
+    sel = g_iso_dist[g_iso_dist[ISO_ID].isin(list(sel_ids))][[ISO_ID, "geometry"]]
+    gj = _simplify_to_geojson(sel, SIMPLIFY_TOL_BY_LEVEL["isocrona"], [ISO_ID])
+    if gj:
+        folium.GeoJson(
+            data=gj, pane="boundaries", smooth_factor=SMOOTH_FACTOR,
+            style_function=lambda _f: {
+                "color": ISO_SEL_COLOR, "weight": ISO_SEL_WEIGHT, "opacity": 1.0,
+                "fillColor": ISO_SEL_COLOR, "fillOpacity": ISO_SEL_FILL_OPACITY,
+                "lineCap": LINE_CAP, "lineJoin": LINE_JOIN},
+        ).add_to(fg)
+    return fg
 
 # =============================================================================
 # HELPERS PÓS-ISÓCRONA
@@ -2526,6 +2558,10 @@ def control_panel():
         st.button("Quadras", type="primary", use_container_width=True,
                   disabled=not ok_iso, on_click=_go_detailed)
         st.caption("Selecione uma ou mais isócronas antes de avançar.")
+        n_sel = len(ensure_set_of_str(ss.get("selected_iso_ids")))
+        if n_sel:
+            st.caption(f"Isócronas selecionadas: **{n_sel}**")
+
 
     if lvl == "quadra":
         ss["pv_select"] = ss.get("post_iso_view", "quadra")
@@ -2592,7 +2628,7 @@ def draw_overlays(m, title):
     iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
     g_iso = read_layer("iso") if iso_ids else None
     g_iso_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
-    iso_key = "|".join(sorted(iso_ids))
+    iso_key = "" if ss.get("level") == "isocrona" else "|".join(sorted(iso_ids))
     csvs, titles = [], []
     for k in tem_keys[:MAX_THEMATIC_ON]:
         p = ensure_thematic_file(k)
@@ -2611,7 +2647,7 @@ def draw_overlays(m, title):
         for ov in ovs:
             nm, src, idc, cor = OVERLAY_EXTRA[ov]
             add_overlay_outline(m, data_ov.get(f"g_{src}"), nm, idc, cor)
-    if g_iso_sel is not None and not g_iso_sel.empty:
+    if g_iso_sel is not None and not g_iso_sel.empty and ss.get("level") != "isocrona":
         add_boundary_overlay(m, g_iso_sel, weight=2.0, cache_key=f"bnd:iso:{'|'.join(sorted(iso_ids))}")
     return title + (" | " + ", ".join(titles) if titles else "")
 
@@ -2625,6 +2661,8 @@ def render_map_panel():
     fo = (lambda x: 0.0) if tem_on else (lambda x: x)
     ss["_export_view"] = None
     ss["_export_thematic"] = None
+    sel_fg = None
+
 
     def _new_map():
         return make_base_map(center=ss["view_center"], zoom=ss["view_zoom"])
@@ -2641,7 +2679,7 @@ def render_map_panel():
         m = _new_map()
         ttip = "sp_nome" if "sp_nome" in g_sub.columns else SUBPREF_ID
         tol = SIMPLIFY_TOL_BY_LEVEL["subpref"]
-        add_polygons_selectable(m, g_sub, "Subprefeituras", SUBPREF_ID, tooltip_col=ttip, base_weight=3,
+        add_polygons_selectable(m, g_sub, "Subprefeituras", SUBPREF_ID, tooltip_col=ttip, base_weight=SUBPREF_WEIGHT,
             fill_opacity=0.06, selected_fill_opacity=0.0, tooltip_prefix="Subpref: ",
             simplify_tol=tol, cache_key=f"subpref:{tol}")
         if "sp_nome" in g_sub.columns:
@@ -2679,7 +2717,7 @@ def render_map_panel():
             cache_key=f"dist:sp:{sp}:{len(g_show)}:v2")
         if "ds_nome" in g_show.columns:
             add_labels_on_map(m, g_show, "ds_nome", font_size=14)
-        add_boundary_overlay(m, g_parent, weight=4, cache_key=f"bnd:sp:{sp}")
+        add_boundary_overlay(m, g_parent, weight=SUBPREF_BND_WEIGHT, cache_key=f"bnd:sp:{sp}")
         set_export("_export_view", "distritos", g_show)
 
     elif level == "isocrona":
@@ -2692,8 +2730,6 @@ def render_map_panel():
             st.error(f"isocronas sem '{ISO_ID}'. Colunas: {list(g_iso.columns)}"); return
         g_parent_dist = subset_by_id(g_dist, DIST_ID, d)
         title = f"Isócronas ({label_or_id(g_parent_dist, label_col='ds_nome', fallback_col=DIST_ID)})"
-        if sel_ids:
-            title += f" — selecionadas: {len(sel_ids)}"
         g_show_iso = _isos_of_distrito(g_iso, d)
         c_iso = _col_ci(g_iso, DS_CODIGO)
         with st.expander("Diagnóstico — isócronas", expanded=g_show_iso.empty):
@@ -2720,17 +2756,19 @@ def render_map_panel():
         tol = SIMPLIFY_TOL_BY_LEVEL["isocrona"]
         if ss.get("variable") == "Isócronas (classes)":
             add_polygons_selectable_colored(m, g_viz, "Isócronas", ISO_ID, "__iso_color",
-                selected_ids=sel_ids, tooltip_col=ISO_ID, fill_opacity=fo(ISO_FILL_OPACITY_CLASSES),
-                selected_fill_opacity=0.0, tooltip_prefix="Isócrona: ", simplify_tol=tol,
+                selected_ids=None, tooltip_col=ISO_ID, fill_opacity=fo(ISO_FILL_OPACITY_CLASSES),
+                tooltip_prefix="Isócrona: ", simplify_tol=tol,
                 cache_key=f"isoVIZ:dist:{d}:{len(g_show_iso)}", default_fill=ISO_DEFAULT_COLOR)
-            legend = sorted({(l, c) for l, c in pairs})
             if not tem_on:
-                add_legend(m, "Isócronas (classes)", legend)
+                add_legend(m, "Isócronas (classes)", sorted({(l, c) for l, c in pairs}))
         else:
-            add_polygons_selectable(m, g_show_iso, "Isócronas", ISO_ID, selected_ids=sel_ids,
-                tooltip_col=ISO_ID, fill_opacity=fo(ISO_FILL_OPACITY_DEFAULT), selected_fill_opacity=0.0,
-                tooltip_prefix="Isócrona: ", simplify_tol=tol, cache_key=f"iso:dist:{d}:{len(g_show_iso)}")
+            add_polygons_selectable(m, g_show_iso, "Isócronas", ISO_ID, selected_ids=None,
+                tooltip_col=ISO_ID, fill_opacity=fo(ISO_FILL_OPACITY_DEFAULT),
+                tooltip_prefix="Isócrona: ", simplify_tol=tol,
+                cache_key=f"iso:dist:{d}:{len(g_show_iso)}")
         add_boundary_overlay(m, g_parent_dist, weight=2.0, cache_key=f"bnd:dist:{d}")
+        sel_fg = build_iso_selection_fg(g_show_iso, sel_ids)
+        ss["_iso_fit_ref"] = g_show_iso
         set_export("_export_view", "isocronas_selecionadas",
                    subset_by_id_multi(g_viz, ISO_ID, sel_ids) if sel_ids else None)
 
@@ -2823,10 +2861,12 @@ def render_map_panel():
     if ss.get("selection_draw_mode", False):
         add_draw_tools(m)
 
-    iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
-    g_iso = read_layer("iso") if iso_ids else None
-    g_ref = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
-    fit_map(m, g_ref)
+    if level == "isocrona":
+        fit_map(m, ss.get("_iso_fit_ref"))      # fixo no distrito: não muda ao selecionar
+    else:
+        iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
+        g_iso = read_layer("iso") if iso_ids else None
+        fit_map(m, subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None)
 
     folium.LayerControl(collapsed=True, position="topright").add_to(m)
     add_print_button(m)
@@ -2835,6 +2875,7 @@ def render_map_panel():
     with st.container(key="pb_info"):
         render_info_buttons(level)
     st_folium(m, height=MAP_HEIGHT, use_container_width=True, key=f"{MAP_KEY}_{level}",
+              feature_group_to_add=sel_fg,
               returned_objects=["last_clicked", "last_object_clicked",
                                 "last_object_clicked_tooltip", "all_drawings",
                                 "last_active_drawing"])
