@@ -115,6 +115,7 @@ THEMATIC_DRIVE_LINKS: Dict[str, str] = {
     "declividade": "https://drive.google.com/file/d/1e-T5hl2cmX_QmtBd4THHo41rWIg9XLCW/view?usp=drive_link", "risco_geologico": "https://drive.google.com/file/d/1Pl6GklXWe30GmZlz58-RkyYKESbxtTF6/view?usp=drive_link", 
     "arvores": "https://drive.google.com/file/d/1MmHpwARSTbWnZBQBFZBvHcQF0GaV_ZGU/view?usp=drive_link", "vias": "https://drive.google.com/file/d/16hGt-7i_1QuEO4scp-bMZXYUO40gF-xq/view?usp=drive_link",
     "densidade": "https://drive.google.com/file/d/1VYMxrdSustDrxNEGHprqd2rMpedtmKwC/view?usp=drive_link",
+    "lcz": "https://drive.google.com/file/d/1v3aVumc20VUgOxX9Flyjwz4pfAN_GhqJ/view?usp=drive_link"
 }
 
 LCZ_LABELS = {
@@ -938,8 +939,6 @@ def _norm_txt(v) -> str:
     s = unicodedata.normalize("NFKD", str(v)).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"\s+", " ", s).strip().lower()
 
-@st.cache_data(show_spinner="Lendo LCZ.kmz…", ttl=3600, max_entries=2)
-
 @st.cache_resource(show_spinner=False)
 def municipio_gdf():
     """Polígono único do município (dissolve da camada administrativa)."""
@@ -994,7 +993,7 @@ def read_thematic(key):
         return None
     g = None
     try:
-        g = read_kmz(str(p)) if p.suffix.lower() == ".kmz" else read_gdf_parquet(str(p))
+        g = read_gdf_parquet(str(p))
         if g is not None and ISO_ID not in g.columns:
             g = clip_to_municipio(g)
     except Exception as e:
@@ -2474,12 +2473,16 @@ def thematic_available(key) -> bool:
 def _thematic_enabled():
     return True
 
+def _overlays_allowed():
+    return st.session_state.get("level") == "quadra" and _iso_selected()
+
 def _selected_thematics():
+    if not _overlays_allowed():
+        return []
     return [k for k in THEMATIC_LAYERS if st.session_state.get(f"tem_{k}")]
 
 def _selected_overlays():
-    # contornos de setores/OD dependem do recorte das isócronas
-    if not _iso_selected():
+    if not _overlays_allowed():
         return []
     return [k for k in OVERLAY_EXTRA if st.session_state.get(k)]
 
@@ -2551,9 +2554,8 @@ def control_panel():
     if lvl == "quadra":
         st.button("Ajustar ao selecionado", use_container_width=True,
                   on_click=lambda: (mark_ui_action(), _fit_selected_post_level()))
-    with st.expander("Camadas para sobreposição", expanded=True):
-        if not _iso_selected():
-            st.caption("Selecione isócronas para visualizar as camadas.")
+    if lvl == "quadra":
+      with st.expander("Camadas para sobreposição", expanded=True):
         for k, (lbl, *_r) in OVERLAY_EXTRA.items():
             st.checkbox(lbl, key=k, on_change=mark_ui_action)
         n_on = len(_selected_thematics())
