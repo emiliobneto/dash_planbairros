@@ -166,10 +166,9 @@ THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
     "densidade": {"title": "Densidade demográfica", "file": "densidade_demografica.parquet",
                   "label": "hab_hec", "kind": "class", "class_col": "hab_hec", "fn": "dens",
                   "colors": dict(zip([b[1] for b in DENS_BINS], DENS_COLORS))},
-    "lcz": {"title": "Zona climática local", "file": "LCZ.kmz", "label": "DN", "kind": "class",
-            "class_col": "DN", "fn": "lcz", "tt_leg": True, "full": True,
+    "lcz": {"title": "Zona climática local", "file": "LCZ.parquet", "label": "DN", "kind": "class",
+            "class_col": "DN", "fn": "lcz", "tt_leg": True,
             "colors": {LCZ_LABELS[k]: LCZ_COLORS_BY_CODE[k] for k in LCZ_LABELS}},
-
 }
 PALETTE_AUTO = ["#6FA097", "#D58243", "#8073ac", "#F4DD63", "#14407D", "#B1BF7C",
                 "#C65534", "#542688", "#fdb863", "#b2abd2", "#7f3b08", "#f4a582"]
@@ -196,7 +195,9 @@ FOOTER_TXT = "Informações não oficiais. Elementos desenvolvidos como resutlad
 OVERLAY_EXTRA = {
     "ov_censo": ("Setores censitários (contorno)", "censo", "censo_id", "#14407D"),
     "ov_od": ("Zonas OD (contorno)", "od", "od_id", "#C65534"),
+    "ov_quadra": ("Quadras (contorno)", "quadra", "quadra_id", "#542688"),
 }
+
 MUNI_LAYER_KEYS = ["subpref", "subprefeituras", "distrito", "municipio"]  # ajuste se preciso
 MAP_HEIGHT = 1000          # fallback; o CSS ajusta à altura da tela
 MAP_PAD_DEG = 0.25        # folga do maxBounds (graus)
@@ -938,35 +939,6 @@ def _norm_txt(v) -> str:
     return re.sub(r"\s+", " ", s).strip().lower()
 
 @st.cache_data(show_spinner="Lendo LCZ.kmz…", ttl=3600, max_entries=2)
-def read_kmz(path):
-    import zipfile, tempfile
-    tmp = tempfile.mkdtemp()
-    with zipfile.ZipFile(path) as z:
-        z.extractall(tmp)
-        kmls = [n for n in z.namelist() if n.lower().endswith(".kml")]
-    parts = []
-    for k in kmls:
-        p = os.path.join(tmp, k)
-        try:
-            layers = list(gpd.list_layers(p)["name"])
-        except Exception:
-            layers = [None]
-        for lyr in layers:
-            try:
-                gl = gpd.read_file(p, layer=lyr) if lyr else gpd.read_file(p)
-                gl["camada_kml"] = str(lyr or k)
-                parts.append(gl)
-            except Exception:
-                continue
-    if not parts:
-        return None
-    g = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry",
-                         crs=parts[0].crs or 4326)
-    g = g.to_crs(4326) if g.crs.to_epsg() != 4326 else g
-    g = g[g.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
-    name = g["Name"].fillna("").astype(str) if "Name" in g.columns else ""
-    g["DN"] = (name + " " + g["camada_kml"].astype(str)).str.strip()
-    return g
 
 @st.cache_resource(show_spinner=False)
 def municipio_gdf():
@@ -1023,7 +995,8 @@ def read_thematic(key):
     g = None
     try:
         g = read_kmz(str(p)) if p.suffix.lower() == ".kmz" else read_gdf_parquet(str(p))
-        g = clip_to_municipio(g)
+        if g is not None and ISO_ID not in g.columns:
+            g = clip_to_municipio(g)
     except Exception as e:
         st.warning(f"Erro ao ler {p.name}: {e}")
         g = None
@@ -1033,30 +1006,25 @@ def read_thematic(key):
     return g
 
 
-def filter_thematic(key, g, iso_ids, g_iso_sel):
-    if g is None or g.empty or THEMATIC_LAYERS[key].get("full") or not iso_ids:
-        return g
-    out = None
-    if key == "densidade":
-        censo = read_layer("censo")
-        ids = set(get_censo_subset_for_isos(censo, iso_ids)[CENSO_ID].dropna()) if censo is not None else set()
-        col = _col(g, "dd_setor") or (CENSO_ID if CENSO_ID in g.columns else None)
-        if col and ids:
-            out = g[g[col].map(_id_to_str).isin(ids)]
-    if (out is None or out.empty) and ISO_ID in g.columns:
-        out = subset_by_parent_multi(g, ISO_ID, iso_ids)
-    if (out is None or out.empty) and g_iso_sel is not None and not g_iso_sel.empty:
-        try:
-            union = g_iso_sel.geometry.union_all()
-        except Exception:
-            union = g_iso_sel.geometry.unary_union
-        minx, miny, maxx, maxy = g_iso_sel.total_bounds
-        c = g.cx[minx:maxx, miny:maxy]
-        out = c[c.intersects(union)]
-    if out is None or out.empty:
-        st.caption(f"{THEMATIC_LAYERS[key]['title']}: sem vínculo com o recorte — exibindo o município inteiro.")
-        return g
-    return out
+def filter_thematic(g, iso_ids):
+    """Retorna só as feições das isócronas selecionadas. Sem seleção, retorna vazio."""
+    if g is None or g.empty or not iso_ids:
+        return g.iloc[0:0] if g is not None else None
+    iso_ids = ensure_set_of_str(iso_ids)
+
+    # 1) vínculo por atributo (LCZ, setores/OD já enriquecidos)
+    if ISO_ID in g.columns:
+        return g[g[ISO_ID].astype(str).isin(iso_ids)]
+
+    # 2) vínculo espacial
+    g_iso = read_layer("iso")
+    sel = g_iso[g_iso[ISO_ID].astype(str).isin(iso_ids)]
+    if sel.empty:
+        return g.iloc[0:0]
+    area = sel.to_crs(g.crs).union_all() if hasattr(sel, "union_all") else sel.to_crs(g.crs).unary_union
+    cand = g.iloc[g.sindex.query(area, predicate="intersects")]
+    return gpd.clip(cand, area)   # corta na borda da isócrona
+
 
 
 
@@ -1152,14 +1120,19 @@ def _cls_dens(v):  # mantido p/ CLASSIFIERS; a classificação real é vetorizad
 
 
 def _cls_lcz(v):
-    s = "" if v is None else str(v).strip().upper()
-    m = re.search(r"(?:LCZ\s*)?\b(10|[1-9]|[A-G])\b", s)
-    if m:
+    """Aceita 1–10, 101–107, 11–17 (A–G em raster) e textos 'LCZ 8' / 'A'."""
+    code = _coerce_int(v)
+    if code is None:
+        s = "" if v is None else str(v).strip().upper()
+        m = re.search(r"(?:LCZ\s*)?\b(10|[1-9]|[A-G])\b", s)
+        if not m:
+            return "Sem classe"
         t = m.group(1)
         code = int(t) if t.isdigit() else 101 + "ABCDEFG".index(t)
-    else:
-        code = _coerce_int(v)
+    if 11 <= code <= 17:
+        code += 90                     # 11→101 (A) … 17→107 (G)
     return LCZ_LABELS.get(code, "Sem classe")
+
 
 
 CLASSIFIERS = {"corredor": _cls_corredor, "favela": _cls_favela, "decliv": _cls_decliv,
@@ -1204,9 +1177,8 @@ def classify_thematic(key, g):
             g["__tt"] = g["__tt"] + " hab/hec"
     return g, legend
     
-THEMATIC_SIMPLIFY = {"vias": 0.00005, "lcz": 0.0002, "declividade": 0.0002,
+THEMATIC_SIMPLIFY = {"vias": 0.00005, "lcz": 0.00002, "declividade": 0.0002,
                      "densidade": 0.0001, "bacia": 0.0002, "apa": 0.0001}
-MAX_FEATURES_FULL = 25000   # limite de feições no município inteiro
 MAX_THEMATIC_ON = 4          # camadas simultâneas
 @st.cache_resource(show_spinner=False, max_entries=24)
 def thematic_geojson(key, iso_key, meta):
@@ -1215,24 +1187,22 @@ def thematic_geojson(key, iso_key, meta):
     if g is None or g.empty:
         return "", [], b"", 0
     iso_ids = set(iso_key.split("|")) if iso_key else set()
-    g_iso = read_layer("iso") if iso_ids else None
-    g_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
+    if not iso_ids:
+        return "", [], b"", 0
     cfg = THEMATIC_LAYERS[key]
     keep = [c for c in {_col(g, cfg.get("label")), _col(g, cfg.get("class_col")),
                         _col(g, "dd_setor"), ISO_ID, CENSO_ID} if c and c in g.columns]
     g = g[keep + ["geometry"]]                      # só colunas úteis
-    g = filter_thematic(key, g, iso_ids, g_sel)
+    g = filter_thematic(g, iso_ids)
     if g is None or g.empty:
         return "", [], b"", 0
-    if not iso_ids and len(g) > MAX_FEATURES_FULL:  # município inteiro: limita
-        g = g.iloc[:MAX_FEATURES_FULL]
     gc, legend = classify_thematic(key, g)
     csv = gdf_to_csv_bytes(gc)
     if cfg["kind"] == "points":
         gc = gc.set_geometry(gc.geometry.representative_point()).iloc[:MAX_POINTS]
         tol = 0.0
     else:
-        tol = THEMATIC_SIMPLIFY.get(key, 0.00003 if iso_ids else 0.0001)
+        tol = THEMATIC_SIMPLIFY.get(key, 0.00003)
     gj = _simplify_to_geojson(gc, tol, ["__color", "__tt", "__leg"])
     return gj, legend, csv, len(gc)
 
@@ -1608,7 +1578,7 @@ def render_header():
             <img src="{_logo_data_uri()}" class="pb-logo" />
             <div style="display:flex;flex-direction:column">
               <div class="pb-title">PlanBairros</div>
-              <div class="pb-subtitle">Plataforma de visualização e planejamento em escala de bairro</div>
+              <div class="pb-subtitle">Painel interativo de dados</div>
             </div>
           </div>
         </div>
@@ -2581,13 +2551,11 @@ def control_panel():
     if lvl == "quadra":
         st.button("Ajustar ao selecionado", use_container_width=True,
                   on_click=lambda: (mark_ui_action(), _fit_selected_post_level()))
-
     with st.expander("Camadas para sobreposição", expanded=True):
-        st.caption("Sem isócronas selecionadas, as camadas aparecem no município inteiro.")
-        iso_ok = _iso_selected()
+        if not _iso_selected():
+            st.caption("Selecione isócronas para visualizar as camadas.")
         for k, (lbl, *_r) in OVERLAY_EXTRA.items():
-            st.checkbox(lbl + ("" if iso_ok else " (requer isócronas)"), key=k,
-                        disabled=not iso_ok, on_change=mark_ui_action)
+            st.checkbox(lbl, key=k, on_change=mark_ui_action)
         n_on = len(_selected_thematics())
         for k, cfg in THEMATIC_LAYERS.items():
             ok = thematic_available(k)
@@ -2626,9 +2594,11 @@ def draw_overlays(m, title):
     if m is None or not (tem_keys or ovs):
         return title
     iso_ids = ensure_set_of_str(ss.get("selected_iso_ids"))
-    g_iso = read_layer("iso") if iso_ids else None
+    if not iso_ids:
+        return title                     # nunca exibe o município completo
+    g_iso = read_layer("iso")
     g_iso_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
-    iso_key = "" if ss.get("level") == "isocrona" else "|".join(sorted(iso_ids))
+    iso_key = "|".join(sorted(iso_ids))
     csvs, titles = [], []
     for k in tem_keys[:MAX_THEMATIC_ON]:
         p = ensure_thematic_file(k)
@@ -2644,6 +2614,10 @@ def draw_overlays(m, title):
                                   else b"\n".join(csvs))
     if ovs:
         data_ov = build_post_iso_data()
+        if "ov_quadra" in ovs and data_ov.get("g_quadra") is None:
+            g_q = read_layer("quadra")
+            data_ov["g_quadra"] = get_quadras_subset_for_mode(
+                g_q, iso_ids=iso_ids, filter_censo_ids=set()) if g_q is not None else None
         for ov in ovs:
             nm, src, idc, cor = OVERLAY_EXTRA[ov]
             add_overlay_outline(m, data_ov.get(f"g_{src}"), nm, idc, cor)
