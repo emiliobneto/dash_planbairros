@@ -1577,7 +1577,7 @@ def render_header():
             <img src="{_logo_data_uri()}" class="pb-logo" />
             <div style="display:flex;flex-direction:column">
               <div class="pb-title">PlanBairros</div>
-              <div class="pb-subtitle">Painel interativo de dados</div>
+              <div class="pb-subtitle">Painel interativo de dados para planejamento de bairros</div>
             </div>
           </div>
         </div>
