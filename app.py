@@ -1182,7 +1182,7 @@ def _cls_lcz(v):
 CLASSIFIERS = {"corredor": _cls_corredor, "favela": _cls_favela, "decliv": _cls_decliv,
                "risco": _cls_risco, "vias": _cls_vias, "dens": _cls_dens, "lcz": _cls_lcz}
 
-    def _class_src(g, cfg):
+def _class_src(g, cfg):
     """Coluna de classe; se não existir, tenta achar uma parecida."""
     c = _col(g, cfg.get("class_col"))
     if c or g is None:
