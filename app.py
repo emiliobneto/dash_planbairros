@@ -1723,7 +1723,7 @@ def add_legend(m, title, items):
     el = MacroElement()
     el._template = Template("""
     {% macro script(this, kwargs) %}
-    var lg = L.control({position:'bottomright'});
+    var lg = L.control({position:'topleft'});
     lg.onAdd = function(){var d = L.DomUtil.create('div'); d.innerHTML = """ + json.dumps(box) + """; return d;};
     lg.addTo({{this._parent.get_name()}});
     {% endmacro %}""")
@@ -1987,7 +1987,7 @@ def pick_feature_id(gdf, click_latlon, id_col):
 def add_draw_tools(m):
     if Draw is None or m is None:
         return
-    Draw(export=False, position="topleft",
+    Draw(export=False, position="topright",
          draw_options={"polyline": False, "marker": False, "circle": False,
                        "circlemarker": False, "polygon": True, "rectangle": True},
          edit_options={"edit": False, "remove": True}).add_to(m)
