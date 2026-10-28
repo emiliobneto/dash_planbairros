@@ -1689,25 +1689,44 @@ def set_export(slot, name, gdf):
 
 
 def add_print_button(m):
-    """Botão PNG com retry — não quebra o mapa se o plugin demorar a carregar."""
+    """Botão que baixa o mapa em JPEG (com legenda, sem os controles)."""
     if MacroElement is None or m is None:
         return
     m.get_root().header.add_child(JavascriptLink(
-        "https://cdn.jsdelivr.net/npm/leaflet-easyprint@2.1.9/dist/bundle.min.js"))
+        "https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js"))
     el = MacroElement()
     el._template = Template("""
     {% macro script(this, kwargs) %}
-    (function addPrint(n){
-      try {
-        if (window.L && L.easyPrint) {
-          L.easyPrint({title:'Baixar imagem (PNG)', position:'topleft', sizeModes:['Current'],
-                       exportOnly:true, filename:'planbairros_mapa', hideControlContainer:false
-          }).addTo({{this._parent.get_name()}});
-        } else if (n < 40) { setTimeout(function(){ addPrint(n+1); }, 250); }
-      } catch(e) { console.warn('easyPrint:', e); }
-    })(0);
+    (function(){
+      var map = {{this._parent.get_name()}};
+      var Btn = L.Control.extend({
+        options:{position:'topright'},
+        onAdd:function(){
+          var b = L.DomUtil.create('a','leaflet-bar pb-jpg-btn');
+          b.innerHTML='📷'; b.title='Baixar imagem (JPEG)'; b.href='#';
+          b.style.cssText='display:block;width:34px;height:34px;line-height:34px;'+
+                          'text-align:center;font-size:18px;background:#fff;cursor:pointer';
+          L.DomEvent.disableClickPropagation(b);
+          L.DomEvent.on(b,'click',function(e){
+            L.DomEvent.preventDefault(e);
+            if(!window.htmlToImage){alert('Carregando exportador, tente novamente.');return;}
+            var hide=['leaflet-control-zoom','leaflet-draw','leaflet-control-layers','pb-jpg-btn'];
+            htmlToImage.toJpeg(map.getContainer(),{
+              quality:0.95, backgroundColor:'#ffffff', cacheBust:true,
+              filter:function(n){return !(n.classList && hide.some(function(c){return n.classList.contains(c);}));}
+            }).then(function(url){
+              var a=document.createElement('a'); a.href=url;
+              a.download='planbairros_mapa.jpg'; document.body.appendChild(a); a.click(); a.remove();
+            }).catch(function(err){console.warn('JPEG:',err); alert('Falha ao gerar a imagem.');});
+          });
+          return b;
+        }
+      });
+      map.addControl(new Btn());
+    })();
     {% endmacro %}""")
     m.add_child(el)
+
 
 
 def add_legend(m, title, items):
@@ -2055,7 +2074,8 @@ def make_base_map(center=(-23.55, -46.63), zoom=11):
         return None
     m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True, prefer_canvas=True)
     folium.TileLayer(tiles=BASEMAP_URL, attr=BASEMAP_ATTR, name="Mapa base",
-                     overlay=False, control=False, max_zoom=19, max_native_zoom=16).add_to(m)
+                     overlay=False, control=False, max_zoom=19, max_native_zoom=16,
+                     cross_origin="anonymous").add_to(m)
     try:
         for name, z in (("parent_fill", 610), ("thematic", 625), ("detail_shapes", 640)):
             folium.map.CustomPane(name, z_index=z).add_to(m)
@@ -2068,7 +2088,7 @@ def make_base_map(center=(-23.55, -46.63), zoom=11):
         pass
     folium.TileLayer(tiles=BASEMAP_LABELS_URL, attr=BASEMAP_ATTR, name="Rótulos do mapa base",
                      overlay=True, control=True, show=True, max_zoom=19, max_native_zoom=16,
-                     pane="basemap_labels").add_to(m)
+                     pane="basemap_labels", cross_origin="anonymous").add_to(m)
     return m
 
 
@@ -2834,15 +2854,7 @@ def control_panel():
     st.divider()
 
     st.subheader("Downloads", anchor=False)
-    ev, et = ss.get("_export_view"), ss.get("_export_thematic")
-    if st.button("Gerar mapa HTML", use_container_width=True):
-        mm = ss.get("_last_map")
-        ss["_export_map_html"] = mm.get_root().render() if mm is not None else None
-    mh = ss.pop("_export_map_html", None)
-    if mh:
-        st.download_button("Baixar HTML", data=mh, file_name="planbairros_mapa.html",
-                           mime="text/html", use_container_width=True)
-    st.caption("Imagem PNG: use o botão 📷 no canto superior esquerdo do mapa.")
+    st.caption("Imagem JPEG: use o botão 📷 no canto superior direito do mapa.")
 
 # =============================================================================
 # MAP RENDER
