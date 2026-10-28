@@ -222,6 +222,34 @@ CLUSTER_LABELS = {0: "Tipo 1 — Periféricas de alta densidade", 1: "Tipo 2 —
                   2: "Tipo 3 — Periféricas de média densidade", 3: "Tipo 4 — Centrais verticalizadas e mistas",
                   4: "Tipo 5 — Predominância de comércio e serviços"}
 CLUSTER_NULL_COLOR = "#c8c8c8"
+# --- quadras2026.csv (valor venal, pavimentos, CA, TO, uso) ---
+QUADRAS26_FILENAME = "quadras2026.csv"
+QUADRAS26_SECRET_KEY = "PB_QUADRAS26_FILE"
+QUADRAS26_URL = "https://drive.google.com/file/d/13jMlxDJDUEjn3ymiwge_cyQkausvYFXJ/view?usp=drive_link"
+# rótulo exibido: (trechos do nome da coluna no CSV, tipo)
+# rótulo exibido: (nome exato da coluna no CSV, tipo)
+Q26_VARS = {
+    "Valor venal do terreno (R$/m²)":    ("Média valor venal terreno m2", "rs"),
+    "Valor venal da construção (R$/m²)": ("Média valor venal construcao m2", "rs"),
+    "Média de pavimentos":               ("Média de pavimentos", "pav"),
+    "CA médio":                          ("CA Médio", "dec"),
+    "TO médio":                          ("TO Médio", "dec"),
+    "Uso predominante":                  ("UsoPredominante", "uso"),
+}
+
+PAV_LABELS = ["1 pavimento", "2 pavimentos", "3 a 4 pavimentos",
+              "5 a 8 pavimentos", "Acima de 8 pavimentos"]
+USO_BASE = {"residencialaltopadrao": "Residencial alto padrão",
+            "residencialmediopadrao": "Residencial médio padrão",
+            "residencialpopular": "Residencial popular",
+            "comercioservicos": "Comércio e serviços",
+            "outrosusos": "Outros usos", "terreno": "Terreno"}
+USO_COLORS = {
+    "Residencial alto padrão vertical": "#542688", "Residencial alto padrão horizontal": "#b2abd2",
+    "Residencial médio padrão vertical": "#14407D", "Residencial médio padrão horizontal": "#6baed6",
+    "Residencial popular vertical": "#C65534", "Residencial popular horizontal": "#fdb863",
+    "Comércio e serviços": "#F4DD63", "Outros usos": "#6FA097", "Terreno": "#B1BF7C",
+}
 ISO_TRANSITION_SET = {1, 3, 6}
 ISO_TRANSITION_LABEL = "Área de transição"
 ISO_TRANSITION_COLOR = "#fdb863"
@@ -1096,6 +1124,72 @@ def _cls_favela(v):
         return "Particular"
     return "Sem informação"
 
+PAL_LARANJA_MARROM = ["#fee0b6", "#fdb863", "#e08214", "#b35806", "#7f3b08"]
+
+def natural_breaks(values, k=5):
+    """Quebras naturais (Jenks via mapclassify). Sem mapclassify, usa quantis."""
+    v = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if v.empty:
+        return []
+    k = min(k, v.nunique())
+    try:
+        import mapclassify
+        smp = v.sample(min(len(v), 3000), random_state=0) if len(v) > 3000 else v
+        b = list(mapclassify.NaturalBreaks(smp, k=k).bins)
+        b[-1] = float(v.max())
+    except Exception:
+        b = list(v.quantile([i / k for i in range(1, k + 1)]).values)
+    return sorted(set(round(float(x), 4) for x in b))
+
+VAR_LABELS = {"viagem_exp_mil": "Total de viagens (.000)"}
+
+
+def add_choropleth(m, gdf, id_col, val_col, name, prefix, selected_ids, cache_key,
+                   opacity=0.75, title=None, tt_col=None, simplify_tol=0.0, fmt=None):
+    """Quebras naturais (Jenks) com paleta laranja→marrom (claro = menor)."""
+    fmt = fmt or _fmt_num
+    g = gdf.copy()
+    v = pd.to_numeric(g[val_col], errors="coerce")
+    vv = v.dropna()
+    if vv.empty:
+        st.info(f"Sem valores para '{val_col}' nas feições exibidas."); return False
+    edges = sorted(set([float(vv.min())] + natural_breaks(vv, k=5)))
+    if len(edges) < 2:
+        edges = [float(vv.min()), float(vv.max()) + 1e-9]
+    k = len(edges) - 1
+    cols = PAL_LARANJA_MARROM[-k:]
+    idx = pd.cut(v, bins=edges, labels=False, include_lowest=True)
+    g["__ch_color"] = [cols[int(i)] if pd.notna(i) else CLUSTER_NULL_COLOR for i in idx]
+    if tt_col is None:
+        g["__ch_tt"] = [f"{_id_to_str(a)} — {title or val_col}: {_fmt_num(b)}"
+                        for a, b in zip(g[id_col], v)]
+        tt_col = "__ch_tt"
+    add_polygons_selectable_colored(m, g, name, id_col, "__ch_color", selected_ids=selected_ids,
+        tooltip_col=tt_col, fill_opacity=opacity, selected_fill_opacity=0.0,
+        tooltip_prefix=prefix, simplify_tol=simplify_tol, cache_key=cache_key,
+        default_fill=CLUSTER_NULL_COLOR)
+    add_legend(m, title or val_col, [(f"{_fmt_num(edges[i])} – {_fmt_num(edges[i + 1])}", cols[i])
+                                     for i in range(k)] + [("Sem dado", CLUSTER_NULL_COLOR)])
+    return True
+
+
+def od_tooltip_html(row):
+    """Tabela de modos e motivos (pct_modo_* / pct_motivo_*) no hover da zona OD."""
+    def _linhas(prefix, rotulo):
+        cols = sorted(c for c in row.index if str(c).lower().startswith(prefix))
+        return "".join(
+            f"<tr><td>{rotulo} {str(c)[len(prefix):].replace('_', ' ')} (%)</td>"
+            f"<td style='text-align:right;padding-left:8px'>{_fmt_num(row[c])}</td></tr>"
+            for c in cols if pd.notna(row[c]))
+    return (f"<b>Zona {_id_to_str(row.get(OD_ID))}</b><br>"
+            f"<b>Total de viagens (.000): {_fmt_num(row.get('viagem_exp_mil'))}</b>"
+            f"<table style='font-size:11px;margin-top:4px'>"
+            f"<tr><th colspan=2 style='text-align:left'>Modo</th></tr>{_linhas('pct_modo_', 'Modo')}"
+            f"<tr><th colspan=2 style='text-align:left'>Motivo</th></tr>{_linhas('pct_motivo_', 'Motivo')}"
+            f"</table>")
+
+
+
 def _cls_decliv(v):
     """Classes do arquivo: '0 a 05%', '05 a 25%', '25 a 60%', '> 60%' (aceita zeros à esquerda)."""
     lab = {1: "0 a 5%", 2: "5 a 25%", 3: "25 a 60%", 4: "> 60%"}
@@ -1347,6 +1441,94 @@ def attach_quadras_csv(g_quad):
     return g_quad
 
 
+def _num_br(s):
+    s = s.astype("string").str.strip()
+    if s.str.contains(",", regex=False).any():
+        s = s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+    return pd.to_numeric(s, errors="coerce")
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _read_q26(path, mtime):
+    df = _read_table(path, mtime)
+    if df is None or df.empty:
+        return None
+    # comparação tolerante a acentos, caixa e espaços extras
+    low = {_norm_txt(c): c for c in df.columns}
+    key = low.get("quadra_id")
+    if key is None:
+        return None
+    ren = {key: QUADRA_ID}
+    for lab, (col, _k) in Q26_VARS.items():
+        c = low.get(_norm_txt(col))
+        if c:
+            ren[c] = lab
+        else:
+            st.warning(f"{QUADRAS26_FILENAME}: coluna '{col}' não encontrada.")
+    df = df.rename(columns=ren)[list(ren.values())]
+    df[QUADRA_ID] = df[QUADRA_ID].map(lambda x: normalize_quadra_id(x, 6))
+    for lab in ren.values():
+        if lab != QUADRA_ID and Q26_VARS[lab][1] != "uso":
+            df[lab] = _num_br(df[lab])
+    return df.drop_duplicates(QUADRA_ID)
+
+def attach_quadras26(g):
+    if g is None or g.empty or QUADRA_ID not in g.columns:
+        return g
+    p = _find_local_file(QUADRAS26_FILENAME)
+    if p is None:
+        try:
+            p = download_drive_file(_get_secret(QUADRAS26_SECRET_KEY) or QUADRAS26_URL,
+                                    DATA_CACHE_DIR / QUADRAS26_FILENAME, label=QUADRAS26_FILENAME)
+        except Exception as e:
+            st.warning(f"Não foi possível baixar {QUADRAS26_FILENAME}: {e}")
+            return g
+    df = _read_q26(str(p), _meta(p)[1])
+    if df is None:
+        st.warning(f"{QUADRAS26_FILENAME}: coluna 'quadra_id' não encontrada.")
+        return g
+    return g.merge(df, on=QUADRA_ID, how="left", suffixes=("", "_q26"))
+
+
+def _uso_label(v):
+    s = re.sub(r"[^a-z]", "", _norm_txt(v))
+    if not s:
+        return None
+    suf = ""
+    if s.endswith("vert"):
+        s, suf = s[:-4], " vertical"
+    elif s.endswith("hor"):
+        s, suf = s[:-3], " horizontal"
+    return USO_BASE.get(s, str(v)) + suf
+
+
+def add_quadra_var_layer(m, g, id_col, var, sel_ids, cache_key, opacity):
+    kind = Q26_VARS[var][1]
+    g = g.copy()
+    qid = g[QUADRA_ID] if QUADRA_ID in g.columns else g[id_col]
+    if kind in ("rs", "dec"):
+        fmt = (lambda x: f"R$ {_fmt_num(x)}" if pd.notna(x) else "—") if kind == "rs" else _fmt_num
+        x = pd.to_numeric(g[var], errors="coerce")
+        g["__q_tt"] = [f"{_id_to_str(a)} — {var}: {fmt(b)}" for a, b in zip(qid, x)]
+        return add_choropleth(m, g, id_col, var, "Quadras", "Quadra: ", sel_ids, cache_key,
+                              opacity=opacity, title=var, tt_col="__q_tt", fmt=fmt)
+    if kind == "pav":
+        x = pd.to_numeric(g[var], errors="coerce").round()
+        leg = pd.cut(x, [-float("inf"), 1, 2, 4, 8, float("inf")], labels=PAV_LABELS).astype(object)
+        cmap = dict(zip(PAV_LABELS, DENS_COLORS[-5:]))
+    else:
+        leg = g[var].map(_uso_label)
+        cmap = {k: c for k, c in USO_COLORS.items() if k in set(leg.dropna())}
+        extra = [u for u in leg.dropna().unique() if u not in cmap]
+        cmap.update({u: PALETTE_AUTO[i % len(PALETTE_AUTO)] for i, u in enumerate(extra)})
+    g["__ch_color"] = leg.map(cmap).fillna(CLUSTER_NULL_COLOR)
+    g["__q_tt"] = [f"{_id_to_str(a)} — {l if isinstance(l, str) else 'Sem dado'}" for a, l in zip(qid, leg)]
+    add_polygons_selectable_colored(m, g, "Quadras", id_col, "__ch_color", selected_ids=sel_ids,
+        tooltip_col="__q_tt", fill_opacity=opacity, selected_fill_opacity=0.0,
+        tooltip_prefix="Quadra: ", cache_key=cache_key, default_fill=CLUSTER_NULL_COLOR)
+    add_legend(m, var, list(cmap.items()) + [("Sem dado", CLUSTER_NULL_COLOR)])
+    return True
+
+
 # =============================================================================
 # TABELAS EXTERNAS — leitura / agregação / vínculo
 # =============================================================================
@@ -1473,29 +1655,6 @@ def _fmt_num(x):
         return f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return str(x)
-
-
-def add_choropleth(m, gdf, id_col, val_col, name, prefix, selected_ids, cache_key, opacity=0.75):
-    g = gdf.copy()
-    v = pd.to_numeric(g[val_col], errors="coerce")
-    vv = v.dropna()
-    if vv.empty:
-        st.info(f"Sem valores para '{val_col}' nas feições exibidas."); return False
-    edges = sorted(set(vv.quantile([0, .2, .4, .6, .8, 1]).tolist()))
-    if len(edges) < 2:
-        edges = [float(vv.min()), float(vv.max()) + 1e-9]
-    k = len(edges) - 1
-    cols = CHORO_COLORS[-k:]
-    idx = pd.cut(v, bins=edges, labels=False, include_lowest=True)
-    g["__ch_color"] = [cols[int(i)] if pd.notna(i) else CLUSTER_NULL_COLOR for i in idx]
-    g["__ch_tt"] = [f"{_id_to_str(a)} — {val_col}: {_fmt_num(b)}" for a, b in zip(g[id_col], v)]
-    add_polygons_selectable_colored(m, g, name, id_col, "__ch_color", selected_ids=selected_ids,
-        tooltip_col="__ch_tt", fill_opacity=opacity, selected_fill_opacity=0.0,
-        tooltip_prefix=prefix, cache_key=cache_key, default_fill=CLUSTER_NULL_COLOR)
-    add_legend(m, val_col, [(f"{_fmt_num(edges[i])} – {_fmt_num(edges[i + 1])}", cols[i])
-                            for i in range(k)] + [("Sem dado", CLUSTER_NULL_COLOR)])
-    return True
-
 
 def cluster_color(code):
     return CLUSTER_NULL_COLOR if code is None else CLUSTER_COLOR_MAP.get(code, CLUSTER_NULL_COLOR)
@@ -2335,22 +2494,20 @@ def read_lotes_for_isos(iso_ids):
     return gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs=parts[0].crs)
 
 
+def _censo_pop_col(g):
+    return next((c for c in g.columns if "pop" in _norm_txt(c) and "dens" not in _norm_txt(c)), None)
+
+
 def _censo_variables():
-    """Colunas numéricas do SetoresCensitarios2023.parquet (densidade primeiro)."""
+    """Setores: densidade (regras de DENS_BINS) e população (quebras naturais)."""
     g = read_layer("censo")
     if g is None:
         return []
-    out = []
-    for c in g.columns:
-        if c == "geometry" or ID_LIKE_RE.search(str(c)):
-            continue
-        x = _dens_num(g[c]) if not pd.api.types.is_numeric_dtype(g[c]) else g[c]
-        if x.notna().sum() >= 0.5 * max(g[c].notna().sum(), 1):
-            out.append(str(c))
-    dc = _col(g, DENS_COL)
-    if dc in out:
-        out.remove(dc); out.insert(0, dc)
+    out = [c for c in (_col(g, DENS_COL), _censo_pop_col(g)) if c]
+    if len(out) > 1:
+        VAR_LABELS[out[1]] = "População"
     return out
+
 
 
 def post_variables(pv):
@@ -2506,8 +2663,7 @@ def consume_draw_selection(level, map_state):
 def _variables_for_level(level):
     return {"subpref": ["Subprefeituras"], "distrito": ["Distritos"],
             "isocrona": ["Isócronas", "Isócronas (classes)"],
-            "quadra": ["Quadras", "Cluster"]}.get(level, ["Nível"])
-
+            "quadra": ["Quadras", "Cluster"] + list(Q26_VARS)}.get(level, ["Nível"])
 
 def ensure_variable_for_level(level):
     opts = _variables_for_level(level)
@@ -2639,12 +2795,14 @@ def control_panel():
             opts = ["(nenhuma)"] + post_variables(pv)
             vk = f"var_{pv}"
             if ss.get(vk) not in opts:
-                dc = next((o for o in opts if o.lower() == DENS_COL), None)
-                ss[vk] = dc if pv == "censo" and dc else opts[0]
-            lbl = {"censo": "Variável do setor censitário",
+                pref = {"censo": DENS_COL, "od": "viagem_exp_mil"}.get(pv, "")
+                ss[vk] = next((o for o in opts if o.lower() == pref), opts[1] if len(opts) > 1 else opts[0])
+            lbl = {"censo": "Classificar setores por",
                    "od": "Variável OD (soma por ZONA_D)",
                    "lote": "Variável IPTU (por lote)"}[pv]
-            st.selectbox(lbl, options=opts, key=vk, on_change=mark_ui_action)
+            st.selectbox(lbl, options=opts, key=vk, on_change=mark_ui_action,
+                         format_func=lambda c: VAR_LABELS.get(c, "Densidade demográfica"
+                                                              if c.lower() == DENS_COL else c))
     if lvl == "quadra":
         st.button("Ajustar ao selecionado", use_container_width=True,
                   on_click=lambda: (mark_ui_action(), _fit_selected_post_level()))
@@ -2875,7 +3033,7 @@ def render_map_panel():
             id_col_map = data.get("quadra_id_col", QUADRA_UID)
             sel_key, id_for_sel = "selected_quadra_ids", id_col_map
             if g_quad is not None and not g_quad.empty:
-                g_quad_viz = attach_quadras_csv(g_quad)
+                g_quad_viz = attach_quadras26(attach_quadras_csv(g_quad))
                 view_gdf = g_quad_viz
                 ttip = QUADRA_ID if QUADRA_ID in g_quad_viz.columns else id_col_map
                 if CLUSTER_COL in g_quad_viz.columns:
@@ -2888,6 +3046,10 @@ def render_map_panel():
                     if not tem_on:
                         add_legend(m, "Tipos de áreas urbanas", [(CLUSTER_LABELS[k], v) for k, v in CLUSTER_COLOR_MAP.items()]
                                    + [("Sem dado", CLUSTER_NULL_COLOR)])
+                elif ss.get("variable") in Q26_VARS and ss["variable"] in g_quad_viz.columns:
+                    add_quadra_var_layer(m, g_quad_viz, id_col_map, ss["variable"],
+                        ss.get("selected_quadra_ids"),
+                        f"quad-q26:{iso_key}:{ss['variable']}:{fo(1)}", fo(0.85))
                 else:
                     add_polygons_selectable(m, g_quad, "Quadras", id_col_map, tooltip_col=ttip,
                         selected_ids=ss.get("selected_quadra_ids"), fill_opacity=fo(0.06),
@@ -2910,8 +3072,16 @@ def render_map_panel():
             if ok_var and post_view == "censo" and var.lower() == DENS_COL:
                 drawn = add_density_layer(m, g_show, ss.get(sel_key), f"{ck_base}:dens", fo(0.75))
             elif ok_var:
-                if post_view == "censo":
-                    g_show = g_show.copy(); g_show[var] = _dens_num(g_show[var])
+                g_c = g_show.copy()
+                g_c[var] = _dens_num(g_c[var])
+                tt = None
+                if post_view == "od":
+                    g_c["__od_tt"] = g_c.apply(od_tooltip_html, axis=1)
+                    tt = "__od_tt"
+                drawn = add_choropleth(m, g_c, id_col, var, name, "" if tt else prefix,
+                    ss.get(sel_key), f"{ck_base}:ch:{var}", opacity=fo(0.75),
+                    title=VAR_LABELS.get(var, var), tt_col=tt,
+                    simplify_tol=SIMPLIFY_TOL_BY_LEVEL[tol_k])
             if drawn:
                 pass
             elif g_show is not None and not g_show.empty:
