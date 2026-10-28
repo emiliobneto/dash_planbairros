@@ -151,7 +151,7 @@ THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
                "class_col": "propriedade_area", "fn": "favela",
                "colors": {"Sem informação": "#d8daeb", "Pública": "#8073ac",
                           "Particular": "#e08215", "Pública/particular": "#542688"}},
-    "declividade": {"title": "Declividade", "file": "Declividade.parquet", "label": "classe",
+    "declividade": {"title": "Declividade", "file": "declividade.parquet", "label": "classe",
                     "kind": "class", "class_col": "classe", "fn": "decliv", "tt_leg": True,
                     "colors": {"1 - 0 a 5%": "#fee0b6", "2 - 5 a 25%": "#fdb863",
                                "3 - 25 a 60%": "#b35807", "4 - acima de 60%": "#7f3b08"}},
@@ -159,7 +159,7 @@ THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
                         "label": "rg_process", "kind": "class", "class_col": "rg_process", "fn": "risco",
                         "colors": {"R1": "#fddbc7", "R2": "#f4a582", "R3": "#c65534", "R4": "#b2182b",
                                    "Área em monitoramento": "#b2abd2", "Área encerrada": "#d8daeb"}},
-    "arvores": {"title": "Árvores", "file": "arvores.parquet", "label": None, "kind": "points", "color": "#6FA097"},
+    "arvores": {"title": "Árvores", "file": "arvore.parquet", "label": None, "kind": "points", "color": "#6FA097"},
     "vias": {"title": "Vias", "file": "vias.parquet", "label": "cvc_classe", "kind": "class",
              "class_col": "cvc_classe", "fn": "vias", "weight": 4, "tt_leg": True,
              "colors": {"Local": "#d8daeb", "Coletora": "#F4DD63", "Arterial": "#C65534",
@@ -812,13 +812,34 @@ def read_gdf_parquet(path):
     p = Path(path)
     if not p.exists():
         return None
-    gdf = gpd.read_parquet(p)
+    try:
+        gdf = gpd.read_parquet(p)
+    except Exception:
+        # parquet sem metadado geo: geometria em WKB/WKT numa coluna comum
+        from shapely import wkb, wkt
+        df = pd.read_parquet(p)
+        gcol = next((c for c in df.columns if str(c).lower() in
+                     ("geometry", "geom", "wkb_geometry", "the_geom", "wkt")), None)
+        if gcol is None:
+            raise
+        def conv(v):
+            if isinstance(v, (bytes, bytearray, memoryview)):
+                return wkb.loads(bytes(v))
+            if isinstance(v, str):
+                return wkt.loads(v)
+            return None
+        gdf = gpd.GeoDataFrame(df.drop(columns=[gcol]), geometry=df[gcol].map(conv))
     if gdf.crs is None:
         minx = gdf.total_bounds[0] if len(gdf) else 0
         gdf = gdf.set_crs(31983 if abs(minx) > 180 else 4326, allow_override=True)
     if gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(4326)
+    try:
+        gdf["geometry"] = gdf.geometry.make_valid()
+    except Exception:
+        gdf["geometry"] = gdf.geometry.buffer(0)
     return gdf
+
 
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
@@ -1006,27 +1027,34 @@ def read_thematic(key):
     g = normalize_id_cols(_drop_bad_geoms(standardize_columns(g)), [ISO_ID, CENSO_ID])
     return g
 
-
 def filter_thematic(g, iso_ids):
     """Retorna só as feições das isócronas selecionadas. Sem seleção, retorna vazio."""
     if g is None or g.empty or not iso_ids:
         return g.iloc[0:0] if g is not None else None
     iso_ids = ensure_set_of_str(iso_ids)
-
-    # 1) vínculo por atributo (LCZ, setores/OD já enriquecidos)
     if ISO_ID in g.columns:
         return g[g[ISO_ID].astype(str).isin(iso_ids)]
-
-    # 2) vínculo espacial
     g_iso = read_layer("iso")
+    if g_iso is None:
+        return g.iloc[0:0]
     sel = g_iso[g_iso[ISO_ID].astype(str).isin(iso_ids)]
     if sel.empty:
         return g.iloc[0:0]
-    area = sel.to_crs(g.crs).union_all() if hasattr(sel, "union_all") else sel.to_crs(g.crs).unary_union
-    cand = g.iloc[g.sindex.query(area, predicate="intersects")]
-    return gpd.clip(cand, area)   # corta na borda da isócrona
-
-
+    sel = sel.to_crs(g.crs)
+    try:
+        area = sel.union_all()
+    except Exception:
+        area = sel.unary_union
+    try:
+        cand = g.iloc[g.sindex.query(area, predicate="intersects")]
+    except Exception:
+        cand = g[g.intersects(area)]
+    if cand.empty:
+        return cand
+    try:
+        return gpd.clip(cand, area)
+    except Exception:
+        return cand          # mostra sem recorte se o clip falhar
 
 
 def _coerce_int(v):
@@ -1061,11 +1089,26 @@ def _cls_favela(v):
         return "Particular"
     return "Sem informação"
 
-
 def _cls_decliv(v):
-    m = re.match(r"\s*([1-4])", str(v))
-    n = int(m.group(1)) if m else _coerce_int(v)
-    return {1: "1 - 0 a 5%", 2: "2 - 5 a 25%", 3: "3 - 25 a 60%", 4: "4 - acima de 60%"}.get(n, "Sem classe")
+    lab = {1: "1 - 0 a 5%", 2: "2 - 5 a 25%", 3: "3 - 25 a 60%", 4: "4 - acima de 60%"}
+    s = _norm_txt(v).replace(",", ".")
+    if not s:
+        return "Sem classe"
+    if "acima" in s or ">" in s:
+        return lab[4]
+    for pat, n in ((r"25\s*(a|-|–)\s*60", 3), (r"\b5\s*(a|-|–)\s*25", 2),
+                   (r"\b0\s*(a|-|–)\s*5\b", 1)):
+        if re.search(pat, s):
+            return lab[n]
+    m = re.match(r"^\s*([1-4])(\s*-|\s*$)", s)
+    if m:
+        return lab[int(m.group(1))]
+    try:                      # valor numérico de % de declividade
+        x = float(s.rstrip("%"))
+        return lab[1 if x <= 5 else 2 if x <= 25 else 3 if x <= 60 else 4]
+    except ValueError:
+        return "Sem classe"
+
 
 
 def _cls_risco(v):
@@ -1139,6 +1182,19 @@ def _cls_lcz(v):
 CLASSIFIERS = {"corredor": _cls_corredor, "favela": _cls_favela, "decliv": _cls_decliv,
                "risco": _cls_risco, "vias": _cls_vias, "dens": _cls_dens, "lcz": _cls_lcz}
 
+    def _class_src(g, cfg):
+    """Coluna de classe; se não existir, tenta achar uma parecida."""
+    c = _col(g, cfg.get("class_col"))
+    if c or g is None:
+        return c
+    hints = {"decliv": ("classe", "decl", "class"), "risco": ("risco", "grau", "process"),
+             "favela": ("propriedade", "propr"), "corredor": ("corredor", "proposta")}
+    for h in hints.get(cfg.get("fn"), ()):
+        hit = next((col for col in g.columns if col != "geometry" and h in str(col).lower()), None)
+        if hit:
+            return hit
+    return None
+
 
 def classify_thematic(key, g):
     cfg = THEMATIC_LAYERS[key]
@@ -1157,7 +1213,7 @@ def classify_thematic(key, g):
         g["__color"] = cfg["color"]
         legend = [(cfg["title"], cfg["color"])]
     else:
-        src = _col(g, cfg["class_col"])
+        src = _class_src(g, cfg)
         colors = cfg["colors"]
         bins = dens_bins() if key == "densidade" and src else []
         if bins:
@@ -1170,33 +1226,49 @@ def classify_thematic(key, g):
         else:
             g["__leg"] = g[src].map(CLASSIFIERS[cfg["fn"]]) if src else "Sem informação"
         g["__color"] = g["__leg"].map(colors).fillna("#bdbdbd")
-        present = set(g["__leg"].unique())
-        legend = [(k, v) for k, v in colors.items() if k in present]
+        legend = list(colors.items())                     # legenda sempre completa
+        if g["__leg"].isin(["Sem classe", "Sem informação", "Outros"]).any():
+            legend.append(("Sem classe", "#bdbdbd"))
         if cfg.get("tt_leg"):
             g["__tt"] = g["__leg"]
         if key == "densidade":
-            g["__tt"] = g["__tt"] + " hab/hec"
+            g["__tt"] = g["__tt"].astype(str) + " hab/hec"
     return g, legend
     
-THEMATIC_SIMPLIFY = {"vias": 0.00005, "lcz": 0.00002, "declividade": 0.0002,
+THEMATIC_SIMPLIFY = {"vias": 0.00005, "lcz": 0.00002, "declividade": 0.00005,
                      "densidade": 0.0001, "bacia": 0.0002, "apa": 0.0001}
 MAX_THEMATIC_ON = 4          # camadas simultâneas
+
+
 @st.cache_resource(show_spinner=False, max_entries=24)
 def thematic_geojson(key, iso_key, meta):
-    """Retorna (geojson_str, legenda, csv_bytes, n) — calculado uma vez."""
-    g = read_thematic(key)
-    if g is None or g.empty:
-        return "", [], b"", 0
-    iso_ids = set(iso_key.split("|")) if iso_key else set()
-    if not iso_ids:
-        return "", [], b"", 0
+    """Retorna (geojson, legenda, csv, n, diag)."""
     cfg = THEMATIC_LAYERS[key]
-    keep = [c for c in {_col(g, cfg.get("label")), _col(g, cfg.get("class_col")),
-                        _col(g, "dd_setor"), ISO_ID, CENSO_ID} if c and c in g.columns]
-    g = g[keep + ["geometry"]]                      # só colunas úteis
-    g = filter_thematic(g, iso_ids)
+    diag = {"arquivo": str(meta[0]), "tamanho_MB": round(meta[2] / 1e6, 1)}
+    try:
+        g = read_thematic(key)
+    except Exception as e:
+        diag["erro"] = f"leitura: {e}"
+        return "", [], b"", 0, diag
     if g is None or g.empty:
-        return "", [], b"", 0
+        diag["erro"] = "leitura vazia/falhou"
+        return "", [], b"", 0, diag
+    src = _class_src(g, cfg)
+    diag.update({"feicoes_total": int(len(g)), "crs": str(g.crs),
+                 "colunas": [str(c) for c in g.columns][:40], "coluna_classe": src,
+                 "valores_classe": (g[src].dropna().astype(str).unique()[:10].tolist()
+                                    if src else None)})
+    iso_ids = set(iso_key.split("|")) if iso_key else set()
+    keep = [c for c in {_col(g, cfg.get("label")), src, _col(g, "dd_setor"), ISO_ID, CENSO_ID}
+            if c and c in g.columns]
+    try:
+        g = filter_thematic(g[keep + ["geometry"]], iso_ids)
+    except Exception as e:
+        diag["erro"] = f"filtro: {e}"
+        return "", [], b"", 0, diag
+    diag["feicoes_na_area"] = 0 if g is None else int(len(g))
+    if g is None or g.empty:
+        return "", [], b"", 0, diag
     gc, legend = classify_thematic(key, g)
     csv = gdf_to_csv_bytes(gc)
     if cfg["kind"] == "points":
@@ -1205,7 +1277,10 @@ def thematic_geojson(key, iso_key, meta):
     else:
         tol = THEMATIC_SIMPLIFY.get(key, 0.00003)
     gj = _simplify_to_geojson(gc, tol, ["__color", "__tt", "__leg"])
-    return gj, legend, csv, len(gc)
+    if not gj:
+        diag["erro"] = "falha ao gerar GeoJSON"
+    return gj, legend, csv, len(gc), diag
+
 
 # =============================================================================
 # CSV CLUSTER
@@ -2083,16 +2158,6 @@ def _match_key(v):
         return k
 import re
 
-def _drive_direct(url: str) -> str:
-    """Converte link de visualização do Drive em link de download direto."""
-    if not url:
-        return ""
-    m = re.search(r"/d/([\w-]+)", url) or re.search(r"[?&]id=([\w-]+)", url)
-    if not m:
-        return url
-    return f"https://drive.google.com/uc?export=download&id={m.group(1)}&confirm=t"
-
-
 def _col_ci(g, name):
     """Encontra a coluna ignorando maiúsculas/espaços."""
     if g is None or not name:
@@ -2613,19 +2678,23 @@ def draw_overlays(m, title):
     g_iso = read_layer("iso")
     g_iso_sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids) if g_iso is not None else None
     iso_key = "|".join(sorted(iso_ids))
-    csvs, titles = [], []
+    csvs, titles, diags = [], [], {}
     for k in tem_keys[:MAX_THEMATIC_ON]:
         p = ensure_thematic_file(k)
         if p is None:
+            diags[k] = {"erro": "arquivo não encontrado/baixado"}
             continue
-        gj, legend, csv, n = thematic_geojson(k, iso_key, _meta(p))
+        gj, legend, csv, n, dg = thematic_geojson(k, iso_key, _meta(p))
+        diags[k] = dg
         add_thematic_to_map(m, k, gj, legend)
         titles.append(THEMATIC_LAYERS[k]["title"])
         if csv:
             csvs.append(csv)
+    if diags:
+        with st.expander("Diagnóstico — camadas temáticas", expanded=False):
+            st.json(diags)
     if csvs:
-        ss["_export_thematic"] = ("tematicos", csvs[0] if len(csvs) == 1
-                                  else b"\n".join(csvs))
+        ss["_export_thematic"] = ("tematicos", csvs[0] if len(csvs) == 1 else b"\n".join(csvs))
     if ovs:
         data_ov = build_post_iso_data()
         if "ov_quadra" in ovs and data_ov.get("g_quadra") is None:
@@ -2636,8 +2705,9 @@ def draw_overlays(m, title):
             nm, src, idc, cor = OVERLAY_EXTRA[ov]
             add_overlay_outline(m, data_ov.get(f"g_{src}"), nm, idc, cor)
     if g_iso_sel is not None and not g_iso_sel.empty and ss.get("level") != "isocrona":
-        add_boundary_overlay(m, g_iso_sel, weight=2.0, cache_key=f"bnd:iso:{'|'.join(sorted(iso_ids))}")
+        add_boundary_overlay(m, g_iso_sel, weight=2.0, cache_key=f"bnd:iso:{iso_key}")
     return title + (" | " + ", ".join(titles) if titles else "")
+
 
 def render_map_panel():
     ss = st.session_state
