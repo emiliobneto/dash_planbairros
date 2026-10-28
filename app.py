@@ -1239,7 +1239,7 @@ def dens_bins():
     if cached:
         return cached
     g = read_layer("censo")
-    col = _col(g, DENS_COL) if g is not None else None
+    col = _dens_col(g)
     if not col:
         return []
     v = _dens_num(g[col]).dropna()
@@ -2497,18 +2497,24 @@ def read_lotes_for_isos(iso_ids):
 def _censo_pop_col(g):
     return next((c for c in g.columns if "pop" in _norm_txt(c) and "dens" not in _norm_txt(c)), None)
 
+def _dens_col(g):
+    """Coluna de densidade: 'densidade_demografica', 'densidade' ou qualquer nome com 'dens'."""
+    if g is None:
+        return None
+    return _col(g, DENS_COL) or next(
+        (c for c in g.columns if c != "geometry" and "dens" in _norm_txt(c)), None)
 
 def _censo_variables():
-    """Setores: densidade (regras de DENS_BINS) e população (quebras naturais)."""
+    """Setores: densidade (classes de dens_bins) e população (quebras naturais)."""
     g = read_layer("censo")
     if g is None:
         return []
-    out = [c for c in (_col(g, DENS_COL), _censo_pop_col(g)) if c]
-    if len(out) > 1:
-        VAR_LABELS[out[1]] = "População"
-    return out
-
-
+    dens, pop = _dens_col(g), _censo_pop_col(g)
+    if dens:
+        VAR_LABELS[dens] = "Densidade demográfica"
+    if pop:
+        VAR_LABELS[pop] = "População"
+    return [c for c in (dens, pop) if c]
 
 def post_variables(pv):
     if pv == "censo":
@@ -2522,7 +2528,7 @@ def post_variables(pv):
 
 def add_density_layer(m, g, sel_ids, cache_key, opacity):
     """Setores coloridos pelos bins de densidade_demografica."""
-    col, bins = _col(g, DENS_COL), dens_bins()
+    col, bins = _dens_col(g), dens_bins()
     if not col or not bins or CENSO_ID not in g.columns:
         return False
     labels = [b[1] for b in bins]
@@ -3069,7 +3075,7 @@ def render_map_panel():
             drawn = False
             ok_var = (g_show is not None and not g_show.empty and var
                       and var != "(nenhuma)" and var in g_show.columns)
-            if ok_var and post_view == "censo" and var.lower() == DENS_COL:
+            if ok_var and post_view == "censo" and var == _dens_col(g_show):
                 drawn = add_density_layer(m, g_show, ss.get(sel_key), f"{ck_base}:dens", fo(0.75))
             elif ok_var:
                 g_c = g_show.copy()
