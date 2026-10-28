@@ -155,10 +155,11 @@ THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
                     "kind": "class", "class_col": "classe", "fn": "decliv", "tt_leg": True,
                     "colors": {"0 a 5%": "#fee0b6", "5 a 25%": "#fdb863",
                                "25 a 60%": "#e08215", "> 60%": "#7f3b08"}},
-    "risco_geologico": {"title": "Risco geológico", "file": "risco_geologico.parquet",
-                        "label": "rg_process", "kind": "class", "class_col": "rg_process", "fn": "risco",
-                        "colors": {"R1": "#fddbc7", "R2": "#f4a582", "R3": "#c65534", "R4": "#b2182b",
-                                   "Área em monitoramento": "#b2abd2", "Área encerrada": "#d8daeb"}},
+    "risco_geologico": {"title": "Risco Geológico", "file": "risco_geologico.parquet", "label": "rg_grau",
+                  "kind": "class", "class_col": "rg_grau", "fn": "risco", "tt_leg": True,
+                  "colors": {"R1 - Baixo": "#ffffb2", "R2 - Médio": "#fecc5c",
+                             "R3 - Alto": "#fd8d3c", "R4 - Muito alto": "#e31a1c",
+                             "Área em monitoramento": "#6baed6", "Área encerrada": "#bdbdbd"}},
     "arvores": {"title": "Árvores", "file": "arvore.parquet", "label": None, "kind": "points", "color": "#6FA097"},
     "vias": {"title": "Vias", "file": "vias.parquet", "label": "cvc_classe", "kind": "class",
              "class_col": "cvc_classe", "fn": "vias", "weight": 4, "tt_leg": True,
@@ -1110,14 +1111,17 @@ def _cls_decliv(v):
     return lab[1 if x <= 5 else 2 if x <= 25 else 3 if x <= 60 else 4]
 
 def _cls_risco(v):
+    """rg_grau: 'r1'..'r4', 'AREA EM MONITORAMENTO', 'AREA ENCERRADA'."""
     s = _norm_txt(v)
-    m = re.search(r"r\s*([1-4])", s)
+    if not s:
+        return "Sem classe"
     if "monitor" in s:
         return "Área em monitoramento"
     if "encerr" in s:
         return "Área encerrada"
-    return f"R{m.group(1)}" if m else "Outros"
-
+    m = re.search(r"r\s*([1-4])", s)
+    lab = {"1": "R1 - Baixo", "2": "R2 - Médio", "3": "R3 - Alto", "4": "R4 - Muito alto"}
+    return lab[m.group(1)] if m else "Sem classe"
 
 def _cls_vias(v):
     s = _norm_txt(v)
