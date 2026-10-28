@@ -581,17 +581,24 @@ def download_drive_file(file_id_or_url, dst: Path, label=""):
     dst.parent.mkdir(parents=True, exist_ok=True)
     if _valid_file(dst):
         return dst
+    dst.unlink(missing_ok=True)          # apaga HTML/arquivo parcial de tentativa anterior
     session = requests.Session()
     ui = label or dst.name
     last_error = None
     for base_url in _drive_candidates(file_id_or_url):
         try:
-            resp = session.get(base_url, stream=True, allow_redirects=True, timeout=120)
-            if "drive.google.com/uc" in base_url and fid:
-                token = next((v for k, v in resp.cookies.items() if k.startswith("download_warning")), None)
-                if token:
-                    resp = session.get(f"https://drive.google.com/uc?export=download&id={fid}&confirm={token}",
-                                       stream=True, allow_redirects=True, timeout=120)
+            resp = session.get(base_url, stream=True, allow_redirects=True, timeout=180,
+                               headers={"User-Agent": "Mozilla/5.0"})
+            if "text/html" in resp.headers.get("Content-Type", "") and fid:
+                # arquivo grande: o Drive devolve a página de aviso de vírus
+                txt = resp.text
+                uid = re.search(r'name="uuid" value="([^"]+)"', txt)
+                conf = re.search(r'name="confirm" value="([^"]+)"', txt)
+                url2 = (f"https://drive.usercontent.google.com/download?id={fid}&export=download"
+                        f"&confirm={conf.group(1) if conf else 't'}"
+                        + (f"&uuid={uid.group(1)}" if uid else ""))
+                resp = session.get(url2, stream=True, allow_redirects=True, timeout=600,
+                                   headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code != 200:
                 last_error = RuntimeError(f"HTTP {resp.status_code} em '{ui}'"); continue
             total = int(resp.headers.get("Content-Length", 0) or 0)
@@ -684,14 +691,15 @@ def ensure_thematic_file(key) -> Optional[Path]:
     found = _find_local_file(fn)
     if found is not None:
         return found
-    raw = (_get_secret(f"PB_TEM_{key.upper()}") or THEMATIC_DRIVE_LINKS.get(key, "")
-           or thematic_folder_index().get(fn.lower(), ""))
-    if raw:
+    for raw in (_get_secret(f"PB_TEM_{key.upper()}"), THEMATIC_DRIVE_LINKS.get(key, "")):
+        if not raw:
+            continue
         try:
             return download_drive_file(raw, THEMATIC_CACHE_DIR / fn, label=fn)
         except Exception as e:
             st.warning(f"Falha ao baixar {fn}: {e}")
     return None
+
 
 # --- LOTES ---
 def get_lotes_folder_raw():
@@ -806,14 +814,17 @@ def ensure_local_lote_file(distrito_id):
 # READ
 # =============================================================================
 @st.cache_resource(show_spinner=False, max_entries=24)
-def read_gdf_parquet(path):
+def read_gdf_parquet(path, bbox=None):
     if gpd is None:
         return None
     p = Path(path)
     if not p.exists():
         return None
     try:
-        gdf = gpd.read_parquet(p)
+        try:
+            gdf = gpd.read_parquet(p, bbox=bbox) if bbox else gpd.read_parquet(p)
+        except TypeError:                      # geopandas antigo, sem suporte a bbox
+            gdf = gpd.read_parquet(p)
     except Exception:
         # parquet sem metadado geo: geometria em WKB/WKT numa coluna comum
         from shapely import wkb, wkt
@@ -834,6 +845,8 @@ def read_gdf_parquet(path):
         gdf = gdf.set_crs(31983 if abs(minx) > 180 else 4326, allow_override=True)
     if gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(4326)
+    if bbox and len(gdf):
+        gdf = gdf.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]]
     try:
         gdf["geometry"] = gdf.geometry.make_valid()
     except Exception:
@@ -1009,23 +1022,20 @@ def fit_map(m, g_ref=None):
     m.options["minZoom"] = 9
     m.options["zoomSnap"] = 0.25
 
-def read_thematic(key):
+def read_thematic(key, bbox=None):
     p = ensure_thematic_file(key)
     if p is None:
-        st.warning(f"Arquivo '{THEMATIC_LAYERS[key]['file']}' não encontrado no repositório.")
+        st.warning(f"Arquivo '{THEMATIC_LAYERS[key]['file']}' não encontrado/baixado.")
         return None
-    g = None
     try:
-        g = read_gdf_parquet(str(p))
-        if g is not None and ISO_ID not in g.columns:
-            g = clip_to_municipio(g)
+        g = read_gdf_parquet(str(p), bbox)
     except Exception as e:
         st.warning(f"Erro ao ler {p.name}: {e}")
-        g = None
+        return None
     if g is None or g.empty:
-        st.warning(f"Camada temática '{key}' vazia ou inválida."); return None
-    g = normalize_id_cols(_drop_bad_geoms(standardize_columns(g)), [ISO_ID, CENSO_ID])
-    return g
+        return None
+    return normalize_id_cols(_drop_bad_geoms(standardize_columns(g)), [ISO_ID, CENSO_ID])
+
 
 def filter_thematic(g, iso_ids):
     """Retorna só as feições das isócronas selecionadas. Sem seleção, retorna vazio."""
@@ -1245,8 +1255,15 @@ def thematic_geojson(key, iso_key, meta):
     """Retorna (geojson, legenda, csv, n, diag)."""
     cfg = THEMATIC_LAYERS[key]
     diag = {"arquivo": str(meta[0]), "tamanho_MB": round(meta[2] / 1e6, 1)}
+    iso_ids = set(iso_key.split("|")) if iso_key else set()
+    g_iso = read_layer("iso")
+    sel = g_iso[g_iso[ISO_ID].astype(str).isin(iso_ids)] if g_iso is not None else None
+    bbox = None
+    if sel is not None and not sel.empty:
+        a, b, c, d = sel.to_crs(4326).total_bounds
+        bbox = (a - 0.002, b - 0.002, c + 0.002, d + 0.002)
     try:
-        g = read_thematic(key)
+        g = read_thematic(key, bbox)
     except Exception as e:
         diag["erro"] = f"leitura: {e}"
         return "", [], b"", 0, diag
@@ -1258,7 +1275,6 @@ def thematic_geojson(key, iso_key, meta):
                  "colunas": [str(c) for c in g.columns][:40], "coluna_classe": src,
                  "valores_classe": (g[src].dropna().astype(str).unique()[:10].tolist()
                                     if src else None)})
-    iso_ids = set(iso_key.split("|")) if iso_key else set()
     keep = [c for c in {_col(g, cfg.get("label")), src, _col(g, "dd_setor"), ISO_ID, CENSO_ID}
             if c and c in g.columns]
     try:
