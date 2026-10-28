@@ -61,7 +61,7 @@ ISO_SEL_FILL_OPACITY = 0.18
 
 SIMPLIFY_TOL_BY_LEVEL = {
     "subpref": 0.0002, "distrito": 0.0001, "isocrona": 0.00005,
-    "censo": 0.00003, "od": 0.00005, "quadra": 0.0, "lote": 0.0,
+    "censo": 0.00003, "od": 0.00005, "quadra": 0.0, "lote": 0.00001,
 }
 
 ISO_FILL_OPACITY_DEFAULT = 0.05
@@ -813,7 +813,7 @@ def ensure_local_lote_file(distrito_id):
 # =============================================================================
 # READ
 # =============================================================================
-@st.cache_resource(show_spinner=False, max_entries=24)
+@st.cache_resource(show_spinner=False, max_entries=8)
 def read_gdf_parquet(path, bbox=None):
     if gpd is None:
         return None
@@ -823,6 +823,8 @@ def read_gdf_parquet(path, bbox=None):
     try:
         try:
             gdf = gpd.read_parquet(p, bbox=bbox) if bbox else gpd.read_parquet(p)
+            if bbox and gdf.empty:             # arquivo em outro CRS (ex.: 31983): lê tudo e recorta depois
+                gdf = gpd.read_parquet(p)
         except TypeError:                      # geopandas antigo, sem suporte a bbox
             gdf = gpd.read_parquet(p)
     except Exception:
@@ -936,7 +938,7 @@ def read_layer(layer_key):
     return g
 
 
-def read_lotes_by_distrito(distrito_id):
+def read_lotes_by_distrito(distrito_id, bbox=None):
     did = _id_to_str(distrito_id)
     if not did:
         return None
@@ -944,16 +946,10 @@ def read_lotes_by_distrito(distrito_id):
         p = ensure_local_lote_file(did)
     except Exception as e:
         st.warning(str(e)); return None
-    ck, meta = f"lote__{did}", _meta(p)
-    cached = _cache_get(ck, meta)
-    if cached is not None:
-        return cached
-    g = read_gdf_parquet(str(p))
+    g = read_gdf_parquet(str(p), bbox)          # cache único (cache_resource), só a área das isócronas
     if g is None or g.empty:
-        st.warning(f"Lotes do distrito '{did}' vazio/inválido."); return None
-    g = normalize_id_cols(_drop_bad_geoms(standardize_columns(g)), LAYER_ID_COLS["lote"])
-    _cache_set(ck, meta, g)
-    return g
+        st.warning(f"Lotes do distrito '{did}' vazio/sem feições na área."); return None
+    return normalize_id_cols(_drop_bad_geoms(standardize_columns(g)), LAYER_ID_COLS["lote"])
 
 # =============================================================================
 # TEMÁTICOS — leitura / filtro / classificação
@@ -2321,16 +2317,25 @@ def _distritos_of_isos(iso_ids):
         ids = {k} if k else set()
     return ids
 
-
 def read_lotes_for_isos(iso_ids):
-    """Carrega SOMENTE os Distrito_<n>.parquet dos distritos das isócronas."""
+    """Carrega SOMENTE os Distrito_<n>.parquet dos distritos, recortados ao bbox das isócronas."""
+    bbox = None
+    g_iso = read_layer("iso")
+    if g_iso is not None and iso_ids:
+        sel = subset_by_id_multi(g_iso, ISO_ID, iso_ids)
+        if not sel.empty:
+            a, b, c, d = sel.to_crs(4326).total_bounds
+            bbox = (round(float(a) - 0.002, 5), round(float(b) - 0.002, 5),
+                    round(float(c) + 0.002, 5), round(float(d) + 0.002, 5))
     parts = []
     for did in sorted(_distritos_of_isos(iso_ids)):
-        g = read_lotes_by_distrito(did)
+        g = read_lotes_by_distrito(did, bbox)
         if g is not None and not g.empty:
             parts.append(g)
     if not parts:
         return None
+    if len(parts) == 1:
+        return parts[0]
     return gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs=parts[0].crs)
 
 
