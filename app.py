@@ -115,7 +115,7 @@ THEMATIC_DRIVE_LINKS: Dict[str, str] = {
     "declividade": "https://drive.google.com/file/d/1e-T5hl2cmX_QmtBd4THHo41rWIg9XLCW/view?usp=drive_link", "risco_geologico": "https://drive.google.com/file/d/1Pl6GklXWe30GmZlz58-RkyYKESbxtTF6/view?usp=drive_link", 
     "arvores": "https://drive.google.com/file/d/1MmHpwARSTbWnZBQBFZBvHcQF0GaV_ZGU/view?usp=drive_link", "vias": "https://drive.google.com/file/d/16hGt-7i_1QuEO4scp-bMZXYUO40gF-xq/view?usp=drive_link",
     "densidade": "https://drive.google.com/file/d/1VYMxrdSustDrxNEGHprqd2rMpedtmKwC/view?usp=drive_link",
-    "lcz": "https://drive.google.com/file/d/1v3aVumc20VUgOxX9Flyjwz4pfAN_GhqJ/view?usp=drive_link"
+    "lcz": "https://drive.google.com/file/d/1v3aVumc20VUgOxX9Flyjwz4pfAN_GhqJ/view?usp=drive_link", "od": "https://drive.google.com/file/d/1k1w0br_kkMErGdZEcnFLhVGKR2E-RpBh/view?usp=drive_link"
 }
 
 LCZ_LABELS = {
@@ -330,10 +330,12 @@ SECRETS_KEYS = {
     "od": "PB_OD_FILE_ID", "quadra": "PB_QUADRAS_FILE_ID",
 }
 FALLBACK_URLS = {
-    "subpref": "", "dist": "", "iso": "", "censo": "", "od": "",
+    "subpref": "", "dist": "", "censo": "",
+    "iso": "https://drive.google.com/file/d/1Ktaqe11xyKWelysBR-8_2ZtvRt8y1KS5/view?usp=drive_link",
     "quadra": "https://drive.google.com/file/d/1Ivy2PyGHqFgIxSMoK3N9oik2wr5v912U/view?usp=drive_link",
-    "iso":"https://drive.google.com/file/d/1Ktaqe11xyKWelysBR-8_2ZtvRt8y1KS5/view?usp=drive_link",
+    "od": THEMATIC_DRIVE_LINKS.get("od", ""),
 }
+
 
 # =============================================================================
 # NORMALIZAÇÃO
@@ -2079,6 +2081,16 @@ def _match_key(v):
         return str(int(float(k)))
     except Exception:
         return k
+import re
+
+def _drive_direct(url: str) -> str:
+    """Converte link de visualização do Drive em link de download direto."""
+    if not url:
+        return ""
+    m = re.search(r"/d/([\w-]+)", url) or re.search(r"[?&]id=([\w-]+)", url)
+    if not m:
+        return url
+    return f"https://drive.google.com/uc?export=download&id={m.group(1)}&confirm=t"
 
 
 def _col_ci(g, name):
