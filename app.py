@@ -153,8 +153,8 @@ THEMATIC_LAYERS: Dict[str, Dict[str, Any]] = {
                           "Particular": "#e08215", "Pública/particular": "#542688"}},
     "declividade": {"title": "Declividade", "file": "declividade.parquet", "label": "classe",
                     "kind": "class", "class_col": "classe", "fn": "decliv", "tt_leg": True,
-                    "colors": {"1 - 0 a 5%": "#fee0b6", "2 - 5 a 25%": "#fdb863",
-                               "3 - 25 a 60%": "#b35807", "4 - acima de 60%": "#7f3b08"}},
+                    "colors": {"0 a 5%": "#fee0b6", "5 a 25%": "#fdb863",
+                               "25 a 60%": "#e08215", "> 60%": "#7f3b08"}},
     "risco_geologico": {"title": "Risco geológico", "file": "risco_geologico.parquet",
                         "label": "rg_process", "kind": "class", "class_col": "rg_process", "fn": "risco",
                         "colors": {"R1": "#fddbc7", "R2": "#f4a582", "R3": "#c65534", "R4": "#b2182b",
@@ -1096,26 +1096,18 @@ def _cls_favela(v):
     return "Sem informação"
 
 def _cls_decliv(v):
-    lab = {1: "1 - 0 a 5%", 2: "2 - 5 a 25%", 3: "3 - 25 a 60%", 4: "4 - acima de 60%"}
+    """Classes do arquivo: '0 a 05%', '05 a 25%', '25 a 60%', '> 60%' (aceita zeros à esquerda)."""
+    lab = {1: "0 a 5%", 2: "5 a 25%", 3: "25 a 60%", 4: "> 60%"}
     s = _norm_txt(v).replace(",", ".")
     if not s:
         return "Sem classe"
-    if "acima" in s or ">" in s:
+    if ">" in s or "acima" in s:
         return lab[4]
-    for pat, n in ((r"25\s*(a|-|–)\s*60", 3), (r"\b5\s*(a|-|–)\s*25", 2),
-                   (r"\b0\s*(a|-|–)\s*5\b", 1)):
-        if re.search(pat, s):
-            return lab[n]
-    m = re.match(r"^\s*([1-4])(\s*-|\s*$)", s)
-    if m:
-        return lab[int(m.group(1))]
-    try:                      # valor numérico de % de declividade
-        x = float(s.rstrip("%"))
-        return lab[1 if x <= 5 else 2 if x <= 25 else 3 if x <= 60 else 4]
-    except ValueError:
+    nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", s)]
+    if not nums:
         return "Sem classe"
-
-
+    x = nums[1] if len(nums) >= 2 else nums[0]   # limite superior da faixa ou valor em %
+    return lab[1 if x <= 5 else 2 if x <= 25 else 3 if x <= 60 else 4]
 
 def _cls_risco(v):
     s = _norm_txt(v)
