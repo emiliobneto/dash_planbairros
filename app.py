@@ -1692,13 +1692,20 @@ def add_print_button(m):
     """Botão que baixa o mapa em JPEG (com legenda, sem os controles)."""
     if MacroElement is None or m is None:
         return
-    m.get_root().header.add_child(JavascriptLink(
-        "https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js"))
     el = MacroElement()
     el._template = Template("""
     {% macro script(this, kwargs) %}
     (function(){
       var map = {{this._parent.get_name()}};
+      var LIB = 'https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js';
+      function loadLib(cb){
+        if (window.htmlToImage) { cb(); return; }
+        var s = document.createElement('script');
+        s.src = LIB; s.onload = cb;
+        s.onerror = function(){ alert('Não foi possível carregar o exportador.'); };
+        document.head.appendChild(s);
+      }
+      loadLib(function(){});   // pré-carrega
       var Btn = L.Control.extend({
         options:{position:'topright'},
         onAdd:function(){
@@ -1709,15 +1716,16 @@ def add_print_button(m):
           L.DomEvent.disableClickPropagation(b);
           L.DomEvent.on(b,'click',function(e){
             L.DomEvent.preventDefault(e);
-            if(!window.htmlToImage){alert('Carregando exportador, tente novamente.');return;}
-            var hide=['leaflet-control-zoom','leaflet-draw','leaflet-control-layers','pb-jpg-btn'];
-            htmlToImage.toJpeg(map.getContainer(),{
-              quality:0.95, backgroundColor:'#ffffff', cacheBust:true,
-              filter:function(n){return !(n.classList && hide.some(function(c){return n.classList.contains(c);}));}
-            }).then(function(url){
-              var a=document.createElement('a'); a.href=url;
-              a.download='planbairros_mapa.jpg'; document.body.appendChild(a); a.click(); a.remove();
-            }).catch(function(err){console.warn('JPEG:',err); alert('Falha ao gerar a imagem.');});
+            loadLib(function(){
+              var hide=['leaflet-control-zoom','leaflet-draw','leaflet-control-layers','pb-jpg-btn'];
+              htmlToImage.toJpeg(map.getContainer(),{
+                quality:0.95, backgroundColor:'#ffffff', cacheBust:true,
+                filter:function(n){return !(n.classList && hide.some(function(c){return n.classList.contains(c);}));}
+              }).then(function(url){
+                var a=document.createElement('a'); a.href=url;
+                a.download='planbairros_mapa.jpg'; document.body.appendChild(a); a.click(); a.remove();
+              }).catch(function(err){console.warn('JPEG:',err); alert('Falha ao gerar a imagem.');});
+            });
           });
           return b;
         }
@@ -1726,8 +1734,6 @@ def add_print_button(m):
     })();
     {% endmacro %}""")
     m.add_child(el)
-
-
 
 def add_legend(m, title, items):
     if MacroElement is None or m is None or not items:
